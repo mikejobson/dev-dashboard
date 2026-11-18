@@ -1,0 +1,203 @@
+@page "/github"
+@inherits LivePage
+@inject GitHubStore Store
+@inject GitHubPoller Poller
+@inject RepoCatalog Catalog
+
+<PageTitle>GitHub · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>GitHub</h1>
+        <p>
+            @if (Store.HasData)
+            {
+                <span>@_gh.ViewerLogin · @_gh.Organizations.Count orgs · polled @Fmt.Ago(_gh.FetchedAt, Now)</span>
+            }
+            else
+            {
+                <span>Pull requests, issues and recent pushes across your orgs.</span>
+            }
+        </p>
+    </div>
+    <button type="button" @onclick="Refresh" disabled="@(Store.Status.Polling || !Store.Status.Enabled)">@(Store.Status.Polling ? "Polling…" : "Refresh now")</button>
+</div>
+
+@if (!Store.Status.Enabled)
+{
+    <div class="banner info">GitHub polling is switched off (<code>GitHub:Enabled</code>).</div>
+}
+else if (Store.Status.LastError is { } error)
+{
+    <div class="banner danger">The last poll failed: @error @(Store.HasData ? "Showing the previous results." : "")</div>
+}
+else if (!Store.HasData)
+{
+    <div class="banner info">Waiting for the first poll…</div>
+}
+
+@if (_gh.Warnings.Count > 0)
+{
+    <details class="banner">
+        <summary>@_gh.Warnings.Count parts of the last poll could not be read</summary>
+        <ul>
+            @foreach (var warning in _gh.Warnings)
+            {
+                <li class="small">@warning</li>
+            }
+        </ul>
+    </details>
+}
+
+<h2>Needs my review <span class="muted small">@_review.Count</span></h2>
+<PrList Items="_review" Now="Now" Clones="_clones" Empty="No one is waiting on your review." />
+
+<h2>Mine, CI failing <span class="muted small">@_failing.Count</span></h2>
+<PrList Items="_failing" Now="Now" Clones="_clones" Empty="None of your PRs are failing CI." />
+
+<h2>Mine <span class="muted small">@_mine.Count</span></h2>
+<PrList Items="_mine" Now="Now" Clones="_clones" Empty="You have no other open PRs." />
+
+@if (_assigned.Count > 0)
+{
+    <h2>Assigned to me <span class="muted small">@_assigned.Count</span></h2>
+    <PrList Items="_assigned" Now="Now" Clones="_clones" />
+}
+
+<h2>My issues <span class="muted small">@_gh.Issues.Count</span></h2>
+@if (_gh.Issues.Count == 0)
+{
+    <div class="card muted">No open issues assigned to you or mentioning you recently.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Issue</th><th>Why</th><th class="right">Updated</th></tr></thead>
+            <tbody>
+                @foreach (var issue in _gh.Issues)
+                {
+                    <tr>
+                        <td>
+                            <a href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a>
+                            <div class="sub"><a class="muted" href="@Fmt.RepoUrl(issue.RepoKey)">@issue.Repo</a>#@issue.Number @string.Join(" ", issue.Labels.Select(l => "· " + l))</div>
+                        </td>
+                        <td>
+                            <div class="chips">
+                                @if (issue.Assigned) { <span class="chip info">assigned</span> }
+                                @if (issue.Mentioned) { <span class="chip muted">mentioned</span> }
+                            </div>
+                        </td>
+                        <td class="right nowrap sub" title="@Fmt.Date(issue.UpdatedAt)">@Fmt.Ago(issue.UpdatedAt, Now)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+<div class="page-head" style="margin-top:28px;margin-bottom:10px">
+    <h2 style="margin:0">Recent activity in your orgs <span class="muted small">@VisibleRepos.Count repos pushed in the last @_days days</span></h2>
+    <div class="toolbar" style="margin:0">
+        <input type="search" placeholder="Filter repos…" aria-label="Filter repos" @bind="_search" @bind:event="oninput" />
+        <button type="button" class="toggle @(_onlyUncloned ? "on" : "")" aria-pressed="@_onlyUncloned" @onclick="() => _onlyUncloned = !_onlyUncloned">Not cloned</button>
+    </div>
+</div>
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>Repo</th><th>Latest on default branch</th><th>Cloned on</th><th class="right">Open PRs</th><th class="right">Pushed</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var repo in VisibleRepos)
+            {
+                <tr>
+                    <td class="desc">
+                        <a href="@repo.Url" target="_blank" rel="noopener"><strong>@repo.NameWithOwner</strong></a>
+                        @if (repo.IsArchived) { <span class="chip warn">archived</span> }
+                        @if (repo.Description is not null) { <div class="sub">@repo.Description</div> }
+                    </td>
+                    <td class="desc">
+                        @repo.HeadMessage
+                        <div class="sub">@repo.LastPusher @if (repo.DefaultBranch is not null) { <span>on <span class="mono">@repo.DefaultBranch</span></span> }</div>
+                    </td>
+                    <td>
+                        @if (_clones.TryGetValue(repo.Key, out var clones))
+                        {
+                            @foreach (var clone in clones)
+                            {
+                                <div class="clone">
+                                    <a class="sub" href="@Fmt.RepoUrl(repo.Key)">@clone.Machine.Machine.Hostname</a>
+                                    <span class="sub">(@Describe(clone, repo))</span>
+                                </div>
+                            }
+                        }
+                        else
+                        {
+                            <span class="chip muted">not cloned anywhere</span>
+                        }
+                    </td>
+                    <td class="right">@repo.OpenPullRequests</td>
+                    <td class="right nowrap sub" title="@Fmt.Date(repo.PushedAt)">@Fmt.Ago(repo.PushedAt, Now)</td>
+                </tr>
+            }
+            @if (VisibleRepos.Count == 0)
+            {
+                <tr><td class="empty" colspan="5">No repos to show.</td></tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Inject] private Microsoft.Extensions.Options.IOptionsMonitor<GitHubOptions> Options { get; set; } = default!;
+
+    private GitHubSnapshot _gh = GitHubSnapshot.Empty;
+    private IReadOnlyDictionary<string, List<CloneView>> _clones = new Dictionary<string, List<CloneView>>();
+    private List<PullRequestInfo> _review = [], _failing = [], _mine = [], _assigned = [];
+    private string _search = "";
+    private bool _onlyUncloned;
+    private int _days;
+
+    private List<GitHubRepo> VisibleRepos => _gh.RecentRepos
+        .Where(r => !_onlyUncloned || !_clones.ContainsKey(r.Key))
+        .Where(r => _search.Trim().Length == 0
+            || r.NameWithOwner.Contains(_search.Trim(), StringComparison.OrdinalIgnoreCase)
+            || (r.Description?.Contains(_search.Trim(), StringComparison.OrdinalIgnoreCase) ?? false))
+        .ToList();
+
+    protected override Task LoadAsync()
+    {
+        _gh = Store.Current;
+        _days = Options.CurrentValue.RecentDays;
+        _clones = Catalog.ClonesByGitHubKey();
+        _review = _gh.PullRequests.Where(p => p.ReviewRequested).ToList();
+        // Each PR appears in one group only: a review request wins, then failing CI.
+        _failing = _gh.PullRequests.Where(p => p.Authored && !p.ReviewRequested && p.Ci == CiState.Failure).ToList();
+        _mine = _gh.PullRequests.Where(p => p.Authored && !p.ReviewRequested && p.Ci != CiState.Failure).ToList();
+        _assigned = _gh.PullRequests.Where(p => p.Assigned && !p.Authored && !p.ReviewRequested).ToList();
+        return Task.CompletedTask;
+    }
+
+    private void Refresh() => Poller.RequestPoll();
+
+    /// <summary>"dirty, 2 ahead" style summary of a clone relative to its upstream and GitHub's default branch.</summary>
+    private static string Describe(CloneView clone, GitHubRepo repo)
+    {
+        if (clone.Git is not { } git)
+        {
+            return "folder";
+        }
+
+        var parts = new List<string> { git.IsDirty ? "dirty" : "clean" };
+        if (git.Ahead > 0) { parts.Add($"{git.Ahead} ahead"); }
+        if (git.Behind > 0) { parts.Add($"{git.Behind} behind"); }
+        if (git.Branch is not null && git.Branch != repo.DefaultBranch) { parts.Add($"on {git.Branch}"); }
+        else if (git.Branch == repo.DefaultBranch && repo.HeadSha is not null && git.HeadSha != repo.HeadSha && git.Ahead == 0 && git.Behind == 0)
+        {
+            parts.Add("needs fetch");
+        }
+
+        return string.Join(", ", parts);
+    }
+}

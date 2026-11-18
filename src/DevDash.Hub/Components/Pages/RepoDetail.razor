@@ -1,0 +1,269 @@
+@page "/repo"
+@inherits LivePage
+@inject RepoCatalog Catalog
+@inject FindingsService Findings
+
+<PageTitle>@(_row?.Name ?? "Repo") · DevDash</PageTitle>
+
+@if (_row is null)
+{
+    <h1>Repo not found</h1>
+    <p class="muted">Nothing is known about <code>@Key</code>. It may have been removed from every machine. <a href="local">Back to Local</a>.</p>
+}
+else
+{
+    <div class="page-head">
+        <div>
+            <h1>@_row.Name @if (_row.Owner is not null) { <span class="owner muted small">@_row.Owner</span> }</h1>
+            <p>
+                @if (_row.Description is not null)
+                {
+                    @_row.Description.Text <span class="chip muted" title="Where this description came from">@_row.Description.Source</span>
+                }
+                else
+                {
+                    <span>No description yet.</span>
+                }
+            </p>
+        </div>
+        <div class="chips">
+            @if (_row.GitHub is { } gh)
+            {
+                <a class="btn" href="@gh.Url" target="_blank" rel="noopener">Open on GitHub</a>
+                @if (gh.IsArchived) { <span class="chip warn">archived</span> }
+                <span class="chip">@(gh.IsPrivate ? "private" : "public")</span>
+                @if (gh.PrimaryLanguage is not null) { <span class="chip muted">@gh.PrimaryLanguage</span> }
+            }
+            else if (_row.RemoteMissing)
+            {
+                <span class="chip danger">remote not found on GitHub</span>
+            }
+            else if (!_row.IsHosted && _row.Kind == EntryKind.GitRepo)
+            {
+                <span class="chip warn">local only</span>
+            }
+        </div>
+    </div>
+
+    @if (_row.GitHub is { } repo)
+    {
+        <div class="card">
+            <dl class="kv">
+                <dt>GitHub</dt><dd><a href="@repo.Url" target="_blank" rel="noopener">@repo.NameWithOwner</a></dd>
+                <dt>Default branch</dt><dd><span class="mono">@repo.DefaultBranch</span> at <span class="mono">@Fmt.Sha(repo.HeadSha)</span> — @repo.HeadMessage</dd>
+                <dt>Last push</dt><dd>@Fmt.Ago(repo.PushedAt, Now)@(repo.LastPusher is null ? "" : $" · head commit by {repo.LastPusher}")</dd>
+                <dt>Open PRs</dt><dd>@repo.OpenPullRequests</dd>
+            </dl>
+        </div>
+    }
+
+    <h2>On your machines</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Machine</th><th>Path</th><th>State</th><th>Last commit</th><th class="right">Fetched</th><th class="right">Size</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var clone in _row.Clones)
+                {
+                    <tr>
+                        <td class="nowrap">@clone.Machine.Machine.Hostname</td>
+                        <td class="mono">@clone.Entry.Path</td>
+                        <td>
+                            <CloneChips Clone="clone" />
+                            @if (clone.Git is { Upstream: not null } g)
+                            {
+                                <div class="sub">tracks <span class="mono">@g.Upstream</span></div>
+                            }
+                        </td>
+                        <td>
+                            @if (clone.Git?.LastCommit is { } commit)
+                            {
+                                <span class="mono sha">@Fmt.Sha(commit.Sha)</span>@commit.Subject
+                                <div class="sub">@commit.Author · @Fmt.Ago(commit.Date, Now)</div>
+                            }
+                            else if (clone.Entry.LastModified is not null)
+                            {
+                                <span class="sub">modified @Fmt.Ago(clone.Entry.LastModified, Now)</span>
+                            }
+                        </td>
+                        <td class="right nowrap sub">@(clone.Git is null ? "" : Fmt.Ago(clone.Git.LastFetchAt, Now))</td>
+                        <td class="right nowrap sub">
+                            @Fmt.Size(clone.Entry.Size?.TotalBytes)
+                            @if (clone.Entry.Size is { ReclaimableBytes: > 0 } size)
+                            {
+                                <div title="Build output that can be regenerated">@Fmt.Size(size.ReclaimableBytes) reclaimable</div>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    @if (_row.PullRequests.Count > 0)
+    {
+        <h2>My pull requests</h2>
+        <PrList Items="_row.PullRequests" Now="Now" Clones="_clonesByKey" />
+    }
+
+    @if (_row.Issues.Count > 0)
+    {
+        <h2>My issues</h2>
+        <div class="table-wrap">
+            <table>
+                <tbody>
+                    @foreach (var issue in _row.Issues)
+                    {
+                        <tr>
+                            <td><a href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span></td>
+                            <td class="right nowrap sub">@Fmt.Ago(issue.UpdatedAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (_findings.Count > 0)
+    {
+        <h2>Cleanup findings</h2>
+        @foreach (var view in _findings)
+        {
+            <FindingCard View="view" ShowRepoLink="false" OnSnooze="SnoozeAsync" OnDismiss="DismissAsync" OnRestore="RestoreAsync" />
+        }
+    }
+
+    @foreach (var clone in Repositories)
+    {
+        var git = clone.Git!;
+        <h2>Branches <span class="muted small">on @clone.Machine.Machine.Hostname · @git.Branches.Count · default <span class="mono">@(git.DefaultBranch ?? "unknown")</span></span></h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr><th>Branch</th><th>Upstream</th><th>State</th><th class="right">Last commit</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var branch in git.Branches.OrderByDescending(b => b.LastCommitDate))
+                    {
+                        <tr>
+                            <td>
+                                <span class="mono">@branch.Name</span>
+                                <div class="sub">@branch.Subject</div>
+                            </td>
+                            <td class="mono sub">@branch.Upstream</td>
+                            <td>
+                                <div class="chips">
+                                    @if (branch.Name == git.DefaultBranch) { <span class="chip">default</span> }
+                                    @if (_checkedOut.Contains((clone.MachineKey(), branch.Name))) { <span class="chip info">checked out</span> }
+                                    @if (branch.UpstreamGone) { <span class="chip danger">upstream gone</span> }
+                                    @if (branch.Upstream is null) { <span class="chip muted">no upstream</span> }
+                                    @if (branch.Ahead > 0) { <span class="chip info">↑@branch.Ahead</span> }
+                                    @if (branch.Behind > 0) { <span class="chip info">↓@branch.Behind</span> }
+                                    @if (branch.MergedIntoDefault == true && branch.Name != git.DefaultBranch) { <span class="chip ok">merged</span> }
+                                </div>
+                            </td>
+                            <td class="right nowrap sub" title="@Fmt.Date(branch.LastCommitDate)">@Fmt.Ago(branch.LastCommitDate, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (git.Worktrees.Count > 1)
+        {
+            <h2>Worktrees <span class="muted small">on @clone.Machine.Machine.Hostname · @git.Worktrees.Count</span></h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Path</th><th>Branch</th><th>State</th></tr></thead>
+                    <tbody>
+                        @foreach (var (wt, index) in git.Worktrees.Select((w, i) => (w, i)))
+                        {
+                            <tr>
+                                <td class="mono">@wt.Path</td>
+                                <td class="mono">@(wt.Branch ?? $"detached @ {Fmt.Sha(wt.Head)}")</td>
+                                <td>
+                                    <div class="chips">
+                                        @if (index == 0) { <span class="chip">main working tree</span> }
+                                        @if (wt.Prunable) { <span class="chip danger" title="@wt.PrunableReason">prunable</span> }
+                                        @if (wt.Locked) { <span class="chip muted">locked</span> }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+
+        @if (git.Stashes.Count > 0)
+        {
+            <h2>Stashes <span class="muted small">on @clone.Machine.Machine.Hostname · @git.Stashes.Count</span></h2>
+            <div class="table-wrap">
+                <table>
+                    <tbody>
+                        @foreach (var stash in git.Stashes)
+                        {
+                            <tr>
+                                <td class="mono nowrap">@($"stash@{{{stash.Index}}}")</td>
+                                <td>@stash.Message</td>
+                                <td class="right nowrap sub" title="@Fmt.Date(stash.Date)">@Fmt.Ago(stash.Date, Now)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? Key { get; set; }
+
+    private RepoRow? _row;
+    private List<FindingView> _findings = [];
+    private IReadOnlyDictionary<string, List<CloneView>> _clonesByKey = new Dictionary<string, List<CloneView>>();
+    private HashSet<(string Machine, string Branch)> _checkedOut = [];
+
+    /// <summary>One clone per repository per machine: branches, worktrees and stashes are shared by linked worktrees.</summary>
+    private IEnumerable<CloneView> Repositories => (_row?.Clones ?? [])
+        .Where(c => c.Git is not null)
+        .GroupBy(c => (c.Machine.MachineId, c.Git!.CommonDir ?? c.Entry.Path))
+        .Select(g => g.OrderBy(c => c.Git!.IsLinkedWorktree).First());
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Loaded)
+        {
+            await LoadAsync();
+        }
+    }
+
+    protected override async Task LoadAsync()
+    {
+        _row = string.IsNullOrEmpty(Key) ? null : await Catalog.FindAsync(Key);
+        _clonesByKey = Catalog.ClonesByGitHubKey();
+        if (_row is null)
+        {
+            _findings = [];
+            return;
+        }
+
+        var paths = _row.Clones.Select(c => (c.Machine.MachineId, c.Entry.Path)).ToHashSet();
+        _findings = (await Findings.GetAsync())
+            .Where(v => string.Equals(v.Finding.RepoKey, _row.Key, StringComparison.OrdinalIgnoreCase)
+                || (v.Finding.MachineId is not null && v.Finding.Path is not null && paths.Contains((v.Finding.MachineId, v.Finding.Path))))
+            .ToList();
+
+        _checkedOut = _row.Clones
+            .Where(c => c.Git is not null)
+            .SelectMany(c => c.Git!.Worktrees.Where(w => w.Branch is not null).Select(w => (c.MachineKey(), w.Branch!)))
+            .ToHashSet();
+    }
+
+    private async Task SnoozeAsync((Finding Finding, int Days) args) => await Findings.SnoozeAsync(args.Finding, TimeSpan.FromDays(args.Days));
+
+    private async Task DismissAsync(Finding finding) => await Findings.DismissAsync(finding);
+
+    private async Task RestoreAsync(Finding finding) => await Findings.RestoreAsync(finding.Fingerprint);
+}

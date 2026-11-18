@@ -1,0 +1,209 @@
+@* One cleanup finding: what, why, and the commands to copy. A command is only ever run through a
+   typed agent action, on a machine that allows it, after the confirmation dialog below. *@
+@using Microsoft.AspNetCore.Components.Authorization
+@inject ActionQueue Queue
+@inject AuthenticationStateProvider Auth
+@inject IOptionsMonitor<HubOptions> Options
+<div class="finding @(View.IsActive ? "" : "hidden-state")">
+    <div class="finding-top">
+        <div class="finding-title">
+            <span class="dot @Fmt.SeverityClass(Finding.Severity)" title="@Finding.Severity severity"></span>@Finding.Title
+            @if (View.Status == FindingStatus.Snoozed)
+            {
+                <span class="chip muted" title="@Fmt.Date(View.SnoozedUntil)">snoozed until @(View.SnoozedUntil?.ToLocalTime().ToString("d MMM"))</span>
+            }
+            else if (View.Status == FindingStatus.Dismissed)
+            {
+                <span class="chip muted">dismissed</span>
+            }
+        </div>
+        <div class="finding-actions">
+            @if (View.IsActive)
+            {
+                <button type="button" @onclick="() => OnSnooze.InvokeAsync((Finding, 7))">Snooze 7d</button>
+                <button type="button" @onclick="() => OnSnooze.InvokeAsync((Finding, 30))">30d</button>
+                <button type="button" @onclick="() => OnDismiss.InvokeAsync(Finding)">Dismiss</button>
+            }
+            else
+            {
+                <button type="button" @onclick="() => OnRestore.InvokeAsync(Finding)">Restore</button>
+            }
+        </div>
+    </div>
+    <p>
+        @Finding.Explanation
+        @if (Finding.MachineName is not null)
+        {
+            <span class="nowrap"> · @Finding.MachineName</span>
+        }
+        @if (Finding.RepoKey is not null && ShowRepoLink)
+        {
+            <span> · <a href="@Fmt.RepoUrl(Finding.RepoKey)">repo</a></span>
+        }
+        @if (Finding.Url is not null)
+        {
+            <span> · <a href="@Finding.Url" target="_blank" rel="noopener">open on GitHub</a></span>
+        }
+    </p>
+    @if (Rows.Count > 0)
+    {
+        <div class="commands">
+            @foreach (var command in Rows)
+            {
+                var row = View.ActionFor(command);
+                <div class="command @(command.Kind == CommandKind.Fix ? "fix" : "inspect")">
+                    <span class="command-label">
+                        @if (command.MachineId is not null)
+                        {
+                            <span class="chip muted">@Finding.MachineNameFor(command)</span>
+                        }
+                        @command.Label
+                    </span>
+                    <code>@command.Command</code>
+                    <span class="command-buttons">
+                        <button type="button" class="copy" data-copy="@command.Command" title="Copy the command">Copy</button>
+                        @if (View.CanRun(command) && row is not { IsPending: true })
+                        {
+                            <button type="button" class="run" title="Queue this for the agent on @Finding.MachineNameFor(command). You confirm first." @onclick="() => Ask(command)">Run on @Finding.MachineNameFor(command)</button>
+                        }
+                    </span>
+                    @if (row is not null)
+                    {
+                        <span class="command-status">
+                            <span class="chip @StatusClass(row)" title="Queued by @row.QueuedBy at @Fmt.Date(row.QueuedAt)">@StatusText(row)</span>
+                            @if (row.Status is AgentActionStatus.Failed or AgentActionStatus.Expired && !string.IsNullOrWhiteSpace(row.Output))
+                            {
+                                <span class="command-output">@row.Output</span>
+                            }
+                        </span>
+                    }
+                </div>
+            }
+        </div>
+    }
+    @if (Shortcuts.Count > 0)
+    {
+        <div class="open-chips">
+            <span class="muted small">Open</span>
+            @foreach (var command in Shortcuts)
+            {
+                <button type="button" class="chip-btn" data-copy="@command.Command" title="Copy: @command.Command">@(command.MachineId is null ? command.Label : $"{command.Label} · {Finding.MachineNameFor(command)}")</button>
+            }
+        </div>
+    }
+    @if (_asking is { Action: { } action } asking)
+    {
+        var machine = Finding.MachineNameFor(asking);
+        <div class="modal-backdrop" @onclick="Cancel">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="@($"run-{Finding.Fingerprint}")" @onclick:stopPropagation="true">
+                <h3 id="@($"run-{Finding.Fingerprint}")">Run this on @machine?</h3>
+                <dl class="kv">
+                    <dt>Machine</dt>
+                    <dd>@machine <span class="muted mono">@Finding.MachineIdFor(asking)</span></dd>
+                    <dt>Repo</dt>
+                    <dd class="mono">@action.RepoPath</dd>
+                    <dt>Action</dt>
+                    <dd>@AgentActions.Summary(action)</dd>
+                </dl>
+                <p>The agent on @machine will run exactly this, and nothing else:</p>
+                <div class="command"><code>@AgentActions.CommandLine(action)</code></div>
+                <p>@AgentActions.Safeguard(action)</p>
+                <p>It is recorded as queued by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and never runs.</p>
+                @if (_error is not null)
+                {
+                    <div class="banner danger">@_error</div>
+                }
+                <div class="modal-actions">
+                    <button type="button" @onclick="Cancel">Cancel</button>
+                    <button type="button" class="primary" disabled="@_busy" @onclick="ConfirmAsync">Run on @machine</button>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public FindingView View { get; set; } = default!;
+
+    [Parameter] public bool ShowRepoLink { get; set; } = true;
+
+    [Parameter] public EventCallback<(Finding Finding, int Days)> OnSnooze { get; set; }
+
+    [Parameter] public EventCallback<Finding> OnDismiss { get; set; }
+
+    [Parameter] public EventCallback<Finding> OnRestore { get; set; }
+
+    private FindingCommand? _asking;
+    private string _login = "";
+    private string? _error;
+    private bool _busy;
+
+    private Finding Finding => View.Finding;
+
+    // Look first, then act: inspect rows above fix rows, each keeping the order its rule gave.
+    private List<FindingCommand> Rows =>
+    [
+        .. Finding.Commands.Where(c => c.Kind == CommandKind.Inspect),
+        .. Finding.Commands.Where(c => c.Kind == CommandKind.Fix),
+    ];
+
+    private List<FindingCommand> Shortcuts => Finding.Commands.Where(c => c.Kind == CommandKind.Open).ToList();
+
+    private async Task Ask(FindingCommand command)
+    {
+        var user = (await Auth.GetAuthenticationStateAsync()).User;
+        _login = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+        _error = null;
+        _asking = command;
+    }
+
+    private void Cancel()
+    {
+        _asking = null;
+        _error = null;
+    }
+
+    // Queues the typed action the rule attached to the command. The command text itself is never sent anywhere.
+    private async Task ConfirmAsync()
+    {
+        if (_asking is not { Action: { } action } command || Finding.MachineIdFor(command) is not { } machineId || _busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var outcome = await Queue.QueueAsync(machineId, action, _login, Finding);
+            if (outcome.Ok)
+            {
+                _asking = null;
+            }
+            else
+            {
+                _error = outcome.Error;
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string StatusClass(AgentActionEntity row) => row.Status switch
+    {
+        AgentActionStatus.Succeeded => "ok",
+        AgentActionStatus.Failed => "danger",
+        AgentActionStatus.Expired => "muted",
+        _ => "info",
+    };
+
+    private static string StatusText(AgentActionEntity row) => row.Status switch
+    {
+        AgentActionStatus.Queued => $"queued for {row.MachineName}",
+        AgentActionStatus.Claimed => $"running on {row.MachineName}",
+        AgentActionStatus.Succeeded => $"done on {row.MachineName}, waiting for its rescan",
+        AgentActionStatus.Failed => $"failed on {row.MachineName}",
+        _ => "expired, not run",
+    };
+}

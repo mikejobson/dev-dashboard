@@ -1,0 +1,50 @@
+backup/develop-pre-reset-202610066f6b88448d8df779e2169f8657e2d14e7427e9ad2026-10-05T22:57:48+01:00 fix(dashboard): full-width location tree rows with clear hover and selection
+ci/dashboard-unit-tests76bfb19cc6523f677f731f23f40acdd3f7a5114borigin/ci/dashboard-unit-tests[ahead 1, behind 40]2026-10-17T21:27:45+01:00 ci: run dashboard-ui unit tests on pull requests
+claude/kind-germain-92eb462881a2d3074f85e8cadc792545f21a0e522f819b2026-09-18T11:28:05+01:00 Merge pull request #197 from acme/feature/release-approval-gate
+claude/core-node-app-plan-fb81dfe65b5ea07d16e9f34a674219f1939ba177955113origin/claude/core-node-app-plan-fb81df2026-10-14T05:50:03+01:00 showcase(diagram): keep diagram labels inside their boxes
+develop21dce74aa471963065aeff2f55b890c237860a8borigin/develop2026-11-01T15:04:17Z*Merge pull request #383 from acme/feat/room-settings
+docs/device-monitoring-plan9feaa2d0b83db5d95a641d84ab3b136e8c6c9e6aorigin/docs/device-monitoring-plan[ahead 12, behind 15]2026-10-15T13:06:18+01:00 docs(plans): device monitoring for rooms with no processor
+feat/edge-move-back8ddf2af6824c624dc16cceb777c69168e66b9930origin/feat/edge-move-back[behind 27]2026-10-31T10:28:44Z feat(portal): a processor behind an edge can move back to the cloud or to another edge
+feat/edge-overview3644975ee2a4f360676f735e368e9693596e8ff4origin/feat/edge-overview2026-10-31T06:28:02Z fix(portal): a switch or PDU in a room opens without hanging on Opening this space
+feat/power-plugin3390ad3300bcdad8b2d87e9f3dd19b2f2836fd13origin/feat/power-plugin2026-10-30T10:32:26Z feat(power): support a second power controller model
+feat/location-overview641bf2328d431410e0e0faa273dbe6719f4240fcorigin/feat/location-overview2026-10-30T22:37:30Z feat(portal): the signal path shows the edges that relay the processor, wherever they are
+feat/logs-deeplink9ff7ba416c1b06ae78a9270881842fa57a866175origin/feat/logs-deeplink[behind 29]2026-10-31T10:28:15Z fix(portal): viewing a moment stays on it at the newest line instead of going live
+feat/network-in-treeadf44d8ee0e44d901cb793e2672a00b25d5e82b4origin/feat/network-in-tree2026-10-30T15:05:09Z feat(portal): a switch or PDU picked in the location tree opens beside the tree
+feat/network-needs-a-looka278a521d66057a6483474416a40efd92f8ca5102026-10-30T12:22:56Z feat(portal): Needs a look is its own Network view with a count badge (#366)
+feat/network-placingc7cd4125a44845a977f22a9112db7b6eaf0d37c0origin/feat/network-placing2026-10-30T14:45:15Z docs: device suggestions, keyboard triage and a location per switch in Find switches
+feat/network-tree9beff88a220abb84d1a6b7d24d96ce0969624af4origin/feat/network-tree2026-10-30T13:17:57Z fix(portal): one monitors:moved subscription for the Network page and the tree
+feat/processor-registrationcf795983dc3d94bd95632a63119956ad982e5a14origin/feat/processor-registration[behind 5]2026-11-01T08:18:09Z test(portal): pin moment's locale in the metric chart interval label test
+feat/reconnect-known-processor27bfde79f8b3e1fd016ff9500a2223ecd88b1f9f2026-10-31T21:08:55Z feat(processors): reconnect a processor the cloud already has (lost its key)
+feat/release-history-ui-old19990f8cb91fa3cd6c31a7f3ab37dd5324f12bcc2026-10-22T16:18:07+01:00 feat(portal): release history tab, notes publishing, running since and what changes (#305 phase 3)
+feat/room-settingsecdde923f7f4392676c1f52daa30024a8dbf38f6origin/feat/room-settings[behind 37]2026-10-31T06:43:31Z feat(portal): a Profile section in location Settings, and the map back on a building
+feat/scheduling4d25fc84ea32646a4a41b039b3a9cc40ed31dfe4origin/feat/scheduling[behind 34]2026-10-31T07:17:12Z fix(portal): switching between Now and a set time no longer moves the When control
+feat/signal-path-offline6147ef77af1f9d1aaaa603c69cdc8a3e15b09d092026-10-31T21:08:53Z feat(dashboard): show broken and degraded links on the signal path
+feat/system-tabse2527ac34dd815a0e35ffda593f6d142ef5d5bf8origin/feat/system-tabs[behind 32]2026-10-31T08:02:04Z feat(portal): Status, Files and Actions tabs for a control system, a slimmer More, and one tab style everywhere
+feat/team-network7a551fe26de1536870766b893f030e9c294d5170origin/develop[behind 64]2026-10-30T11:51:49Z docs(plans): team Network page and switches and PDUs in the location tree
+feat/team-network-api1ba346ebe411bb6a7dcee5a0fed41f628ed29e2e2026-10-30T12:29:07Z feat(portal): moveMonitors, the batch monitor move the Network page and the tree share
+feat/team-network-pagea63867ae2200635200d95c90c5d276a9addd41f62026-10-30T13:11:28Z docs(dashboard): the team Network page, its menu entry and the location tab's link to it
+feature/edge-dashboard-tidyc58567ec133bc8f12ab50841bdfebbcedf3a420aorigin/feature/edge-dashboard-tidy[ahead 16, behind 19]2026-10-15T13:56:15+01:00 fix(portal): edge page layout, Settings tab and four trend charts
+feature/edge-fleet-updatesecf08af38f3ff880e29d6c54de010c6fa5b84cf2origin/feature/edge-fleet-updates[ahead 11, behind 14]2026-10-15T11:24:00+01:00 fix(api): replayed stats points are throttled on their own clock
+feature/edge-tunnel-mqtt2163726e1043923c992a9fdd2d46d14e710baf1aorigin/feature/edge-tunnel-mqtt[ahead 14, behind 16]2026-10-15T16:56:03+01:00 feat(portal): Test now, edge maintenance and an MQTT tab
+feature/monitoring-ping7b41e21bd46a58143925752bc88beb62b3ee198eorigin/feature/monitoring-ping[ahead 11, behind 13]2026-10-15T16:13:36+01:00 feat(assistant): attention board for what's offline or down
+feature/occupancy-sensor0c2adeb937982aa4aaaebfd05c0cea2131e79468origin/feature/occupancy-sensor[ahead 22, behind 24]2026-10-15T18:16:40+01:00 fix(core): '1 person' in the cloud occupancy input message
+feature/panel-app-polish18deaca3d9cffde68021fe2dd984b4dadfe252eaorigin/feature/panel-app-polish2026-10-02T08:42:19+01:00 fix(ios-app): clear stored credentials when a system is removed
+feature/portal-feedbackd8b1df7b905e1c6d7a76540031c8ac1b8b029e1dorigin/feature/portal-feedback2026-10-05T09:05:38+01:00 feat(portal): report bugs and request features from the cloud portal
+feature/room-feedback-overview7d456adcdbc45d5b7bd05d0cdf24f50475974a54origin/feature/room-feedback-overview2026-10-05T12:06:59+01:00 feat(feedback): show room ratings in the rooms list and highlight poor/good rooms on Overview
+feature/team-status-chat846f025d635569b4bffdddb5266f8e00f5234239origin/feature/team-status-chat2026-10-05T17:02:26+01:00 fix(assistant): keep the answer visible, and show live status while it works
+fix/assistant-hardening9be062e7c1cd0ac95b3e5de4c94311717748331forigin/fix/assistant-hardening2026-10-05T18:34:15+01:00 fix(assistant): harden conversations, confirms and auditing
+fix/edge-mqtt-broker-stopaa5df530071c99232158ede6a26a250e4f5c0dceorigin/feature/edge-tunnel-mqtt[ahead 1]2026-10-15T21:48:52+01:00 fix(edge): stop the MQTT broker even when the host's stop token has expired
+fix/edge-prompt-shutdown099b5ed6c4f405421c984158dd99c2813463fb3borigin/develop[ahead 1, behind 282]2026-10-15T21:47:09+01:00 fix(edge): close relayed WebSockets on shutdown so the edge stops promptly
+fix/edge-shutdown-on-stack8e3e3a3d7546e349f0ee06d4ffe66a6e67a692cborigin/feature/power-controllers[ahead 2, behind 9]2026-10-15T21:49:17+01:00 fix(edge): stop the MQTT broker even when the host's stop token has expired
+fix/edge-unifi-fallbacke77a965152cbd82411e69df19639a5d3c7283afdorigin/fix/edge-unifi-fallback2026-10-30T22:35:53Z fix(edge): retry the UniFi classic API after 1 minute, backing off to every 10
+fix/flaky-portal-specs160fc71f78f605d23173150c198be0d5e074f3a5origin/fix/flaky-portal-specs[ahead 1, behind 38]2026-10-17T19:54:16+01:00 test(portal): make three timing-sensitive specs deterministic
+fix/test-env-frame-shim46f759d28d1c0a897f5a99f4fb00661cf3e4826eorigin/fix/test-env-frame-shim[ahead 1, behind 39]2026-10-17T20:55:45+01:00 test(portal): run animation frames on a timer and reset shared browser state per spec
+mainb9e0c03a68333e399e0aeffea45b40687e8a2a53origin/main[behind 3]2026-10-13T07:06:16+01:00 Merge pull request #304 from acme/develop
+worktree-agent-a373e107cd707087b0a2ab3f821b7f477c452ceea71275d56a8dd20c02026-10-31T17:02:47Z feat(cloud): behind an edge the processor shows a code too; device Cloud page
+worktree-agent-a63d69d856cb93cb16fc8441276f0d4a53e4ac1690fc3c81bb9390df52026-10-31T13:09:23Z docs(framework): cloud connector with a built-in cloud, connection file and registration by code
+worktree-agent-a6fe19c42015abbc4eb446d4d4b60dc36ea39a7840ec67d45eefb28152026-10-31T17:02:48Z feat(processors): approve edge enrolments from the portal, pending adoptions, connection choice
+worktree-agent-a7439d396a82ad6bad748da45073a70d9732b8107a6b2c779113194b12026-10-21T20:58:26+01:00 Merge pull request #350 from acme/copilot/fix-config-page-new-version
+worktree-agent-a9c47c23c042374ec0ad1e1e8d01c154bf7285e8405b63bb14ac5c2cb2026-10-06T08:19:32+01:00 feat(feedback): attach a page or app screenshot to bug reports and issues
+worktree-agent-aacb578f9653676c6d748da45073a70d9732b8107a6b2c779113194b12026-10-21T20:58:26+01:00 Merge pull request #350 from acme/copilot/fix-config-page-new-version
+worktree-agent-abec3af4e95886165795e36b6b24ac6ac346baa8eb55b6b1c00f542082026-10-31T13:01:38Z feat(portal): add a processor by its code or MAC and serial; local dashboard shows cloud status
+worktree-agent-ac7fd5f1e426ca363a03cbcbd81e309e391ec5d40e69d2b5df913a6432026-10-31T12:54:54Z docs(cloud-api): processor registration endpoints, registeredVia and pairing fields

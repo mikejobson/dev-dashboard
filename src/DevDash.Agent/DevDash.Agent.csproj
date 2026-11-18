@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <AssemblyName>devdash-agent</AssemblyName>
+    <RootNamespace>DevDash.Agent</RootNamespace>
+    <!-- No ICU: the self-contained Linux binary then runs on a machine without libicu, and every
+         binary is smaller. The agent only does ordinal comparisons and invariant formatting. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <!-- Windows only: the same program built for the Windows subsystem, so the scheduled task can run it
+       with no console window. Published beside the console build as devdash-agentw.exe
+       (scripts/publish-agent.sh). A custom property rather than -p:AssemblyName, which would also
+       rename the referenced projects. -->
+  <PropertyGroup Condition="'$(DevDashWindowless)' == 'true'">
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>devdash-agentw</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Defaults travel inside the assembly, so the single-file binary needs no loose appsettings.json. -->
+    <EmbeddedResource Include="appsettings.json" LogicalName="appsettings.json" />
+    <Content Update="appsettings.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.15" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DevDash.Contracts\DevDash.Contracts.csproj" />
+    <ProjectReference Include="..\DevDash.Core\DevDash.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DevDash.Core.Tests" />
+  </ItemGroup>
+</Project>

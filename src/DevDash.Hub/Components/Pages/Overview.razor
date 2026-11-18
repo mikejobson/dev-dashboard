@@ -1,0 +1,196 @@
+@page "/"
+@inherits LivePage
+@inject SnapshotStore Snapshots
+@inject RepoCatalog Catalog
+@inject GitHubStore GitHub
+@inject FindingsService Findings
+
+<PageTitle>Overview · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Overview</h1>
+        <p>What needs attention across your machines and GitHub.</p>
+    </div>
+</div>
+
+@if (_machines.Count == 0)
+{
+    <div class="banner info">
+        No machine has reported yet. Start an agent with
+        <code>dotnet run --project src/DevDash.Agent -- scan --api-key-file "$PWD/src/DevDash.Hub/devdash-data/dev-agent-key.txt"</code>.
+    </div>
+}
+
+<div class="tiles">
+    <a class="tile @(_online == _machines.Count && _machines.Count > 0 ? "ok" : "")" href="machines">
+        <div class="value">@_online / @_machines.Count</div>
+        <div class="label">machines online</div>
+    </a>
+    <a class="tile" href="local">
+        <div class="value">@_repos.Count(r => r.Kind == EntryKind.GitRepo)</div>
+        <div class="label">repos tracked</div>
+    </a>
+    <a class="tile @(_dirty > 0 ? "warn" : "")" href="local">
+        <div class="value">@_dirty</div>
+        <div class="label">with uncommitted changes</div>
+    </a>
+    <a class="tile @(_reviews.Count > 0 ? "warn" : "")" href="github">
+        <div class="value">@_reviews.Count</div>
+        <div class="label">PRs waiting for my review</div>
+    </a>
+    <a class="tile @(_failing.Count > 0 ? "danger" : "")" href="github">
+        <div class="value">@_failing.Count</div>
+        <div class="label">of my PRs failing CI</div>
+    </a>
+    <a class="tile @(_active.Count > 0 ? "warn" : "ok")" href="cleanup">
+        <div class="value">@_active.Count</div>
+        <div class="label">cleanup findings</div>
+    </a>
+</div>
+
+<div class="grid-2">
+    <section>
+        <h2>Needs attention</h2>
+        <div class="card">
+            @if (_reviews.Count == 0 && _failing.Count == 0 && _urgent.Count == 0)
+            {
+                <span class="muted">Nothing urgent.</span>
+            }
+            else
+            {
+                <ul class="list">
+                    @foreach (var pr in _failing)
+                    {
+                        <li>
+                            <span class="dot danger"></span><a href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
+                            <div class="sub muted small">CI failing · @pr.Repo#@pr.Number · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
+                        </li>
+                    }
+                    @foreach (var pr in _reviewsShown)
+                    {
+                        <li>
+                            <span class="dot warn"></span><a href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
+                            <div class="sub muted small">Review requested@(pr.IsDraft ? " (draft)" : "") · @pr.Repo#@pr.Number · @pr.Author · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
+                        </li>
+                    }
+                    @if (_reviewsHidden > 0)
+                    {
+                        <li class="more"><a href="github">@_reviewsHidden more review @(_reviewsHidden == 1 ? "request" : "requests") on the GitHub page →</a></li>
+                    }
+                    @foreach (var view in _urgent)
+                    {
+                        <li>
+                            <span class="dot @Fmt.SeverityClass(view.Finding.Severity)"></span>
+                            @if (view.Finding.RepoKey is not null)
+                            {
+                                <a href="@Fmt.RepoUrl(view.Finding.RepoKey)">@view.Finding.Title</a>
+                            }
+                            else
+                            {
+                                <a href="cleanup">@view.Finding.Title</a>
+                            }
+                            <div class="sub muted small clamp-2">@view.Finding.Explanation</div>
+                        </li>
+                    }
+                    @if (_active.Count > _urgent.Count)
+                    {
+                        <li class="more"><a href="cleanup">All @_active.Count cleanup findings →</a></li>
+                    }
+                </ul>
+            }
+        </div>
+    </section>
+
+    <section>
+        <h2>Machines</h2>
+        <div class="card">
+            @if (_machines.Count == 0)
+            {
+                <span class="muted">None yet.</span>
+            }
+            else
+            {
+                <ul class="list">
+                    @foreach (var machine in _machines)
+                    {
+                        var online = Snapshots.IsOnline(machine);
+                        <li>
+                            <span class="dot @(online ? "ok" : "")"></span><strong>@machine.Machine.Hostname</strong>
+                            <span class="muted"> · @machine.Machine.Os · agent @machine.Machine.AgentVersion</span>
+                            <div class="sub muted small">
+                                @(online ? "Online" : "Offline") · last seen @Fmt.Ago(machine.LastSeenAt, Now) ·
+                                @machine.Snapshot.Entries.Count entries in @string.Join(", ", machine.Snapshot.Roots)
+                            </div>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <h2>GitHub</h2>
+        <div class="card">
+            @if (!GitHub.HasData)
+            {
+                <span class="muted">@(GitHub.Status.LastError ?? (GitHub.Status.Enabled ? "Waiting for the first poll…" : "GitHub polling is switched off."))</span>
+            }
+            else
+            {
+                var gh = GitHub.Current;
+                <dl class="kv">
+                    <dt>Signed in as</dt><dd>@gh.ViewerLogin</dd>
+                    <dt>Orgs</dt><dd>@gh.Organizations.Count</dd>
+                    <dt>Open PRs</dt><dd>@gh.PullRequests.Count(p => p.Authored) mine, @_reviews.Count to review</dd>
+                    <dt>Issues</dt><dd>@gh.Issues.Count</dd>
+                    <dt>Repos pushed recently</dt><dd>@gh.RecentRepos.Count (@_notCloned not cloned anywhere)</dd>
+                    <dt>Last poll</dt><dd>@Fmt.Ago(gh.FetchedAt, Now)</dd>
+                </dl>
+            }
+        </div>
+    </section>
+</div>
+
+@code {
+    private IReadOnlyList<MachineView> _machines = [];
+    private IReadOnlyList<RepoRow> _repos = [];
+    private List<PullRequestInfo> _reviews = [];
+    private List<PullRequestInfo> _failing = [];
+    private List<PullRequestInfo> _reviewsShown = [];
+    private int _reviewsHidden;
+    private List<FindingView> _active = [];
+    private List<FindingView> _urgent = [];
+    private int _online;
+    private int _dirty;
+    private int _notCloned;
+
+    protected override async Task LoadAsync()
+    {
+        _machines = Snapshots.Machines;
+        _online = _machines.Count(Snapshots.IsOnline);
+        _repos = await Catalog.GetAsync();
+        _dirty = _repos.Count(r => r.AnyDirty);
+
+        var gh = GitHub.Current;
+        _reviews = gh.PullRequests.Where(p => p.ReviewRequested).ToList();
+        _failing = gh.PullRequests.Where(p => p.Authored && p.Ci == CiState.Failure).ToList();
+        // A PR that is both failing and awaiting my review is listed once, under failing.
+        var failingUrls = _failing.Select(p => p.Url).ToHashSet();
+        var reviewQueue = _reviews
+            .Where(p => !failingUrls.Contains(p.Url))
+            .OrderBy(p => p.IsDraft)
+            .ThenByDescending(p => p.UpdatedAt)
+            .ToList();
+        _reviewsShown = reviewQueue.Take(5).ToList();
+        _reviewsHidden = reviewQueue.Count - _reviewsShown.Count;
+        var cloned = Catalog.ClonesByGitHubKey();
+        _notCloned = gh.RecentRepos.Count(r => !cloned.ContainsKey(r.Key));
+
+        _active = (await Findings.GetAsync()).Where(v => v.IsActive).ToList();
+        // Failing CI is already listed from the PR data above.
+        _urgent = _active
+            .Where(v => v.Finding.Severity >= FindingSeverity.Medium && v.Finding.RuleId != "failing-ci-pr")
+            .OrderByDescending(v => v.Finding.Severity)
+            .Take(8)
+            .ToList();
+    }
+}

@@ -1,0 +1,171 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish:
+#   - agent binaries for every platform, with checksums.txt, on a GitHub Release
+#   - the hub image at ghcr.io/<owner>/dev-dashboard-hub:<version> and :latest
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  HUB_IMAGE: ghcr.io/${{ github.repository_owner }}/dev-dashboard-hub
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version from the tag
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - run: dotnet test DevDash.slnx -c Release -p:Version=${{ steps.version.outputs.version }}
+
+  agent:
+    name: Publish agent binaries
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      # One Linux runner builds every platform: self-contained single-file publishing only needs
+      # the target's prebuilt runtime pack. The verify job below runs the results on real macOS
+      # and Windows before anything is released.
+      - name: Publish all platforms
+        run: scripts/publish-agent.sh "${{ needs.test.outputs.version }}"
+
+      - name: Check the Linux binary
+        run: |
+          mkdir check && tar -xzf dist/devdash-agent-linux-x64.tar.gz -C check
+          test "$(check/devdash-agent --version)" = "devdash-agent ${{ needs.test.outputs.version }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: agent-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Run the binary on ${{ matrix.os }}
+    needs: [test, agent]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: devdash-agent-osx-arm64.tar.gz
+          - os: windows-latest
+            asset: devdash-agent-win-x64.zip
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: agent-dist
+          path: dist
+
+      - name: Unpack and run
+        shell: bash
+        run: |
+          mkdir bin
+          case "${{ matrix.asset }}" in
+            *.zip) unzip -q "dist/${{ matrix.asset }}" -d bin ;;
+            *) tar -xzf "dist/${{ matrix.asset }}" -C bin ;;
+          esac
+          test "$(bin/devdash-agent --version | tr -d '\r')" = "devdash-agent ${{ needs.test.outputs.version }}"
+          mkdir -p smoke/Developer && git init -q smoke/Developer/widget
+          bin/devdash-agent scan --dry-run --root smoke/Developer | grep '"name": "widget"'
+          bin/devdash-agent install --dry-run --hub-url https://devdash.example.ts.net --api-key ddk_release_smoke_test
+
+  hub-image:
+    name: Build and push the hub image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only the final stage's tiny RUN step executes as arm64; the .NET build cross-compiles natively.
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.HUB_IMAGE }}
+          # v0.2.0 -> 0.2.0 and 0.2, plus latest (skipped automatically for pre-releases).
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.test.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Create the GitHub Release
+    needs: [test, agent, verify, hub-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: agent-dist
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          case "${{ needs.test.outputs.version }}" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "DevDash ${{ needs.test.outputs.version }}" \
+            --generate-notes --verify-tag "${flags[@]}"

@@ -1,0 +1,2 @@
+stash@{0}1791405755On fix/login-social-buttons: epitaxy: pre-switch from fix/login-social-buttons
+stash@{1}1791098671On claude/mcp-phase3: wip: proxy host + Mcp__PublicBaseUrl (from claude/mcp-phase3)

@@ -1,0 +1,124 @@
+@page "/cleanup"
+@inherits LivePage
+@inject FindingsService Findings
+
+<PageTitle>Cleanup · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Cleanup</h1>
+        <p>Things worth tidying. Commands are there to copy. A machine that has agent actions turned on also gets a Run button on the safe ones, and asks you to confirm first.</p>
+    </div>
+    <div class="toolbar" style="margin:0">
+        <span class="muted small">@_all.Count(v => v.IsActive) active · @_all.Count(v => v.Status == FindingStatus.Snoozed) snoozed · @_all.Count(v => v.Status == FindingStatus.Dismissed) dismissed</span>
+        <button type="button" class="toggle @(_showHidden ? "on" : "")" aria-pressed="@_showHidden" @onclick="() => _showHidden = !_showHidden">Show snoozed and dismissed</button>
+    </div>
+</div>
+
+@if (Groups.Count == 0)
+{
+    <div class="card empty">@(_all.Count == 0 ? "Nothing to clean up." : "Everything is snoozed or dismissed.")</div>
+}
+
+@if (Groups.Count > 0)
+{
+    <nav class="rule-index" aria-label="Finding groups">
+        @foreach (var group in Groups)
+        {
+            <button type="button" class="rule-pill @(IsOpen(group) ? "on" : "")" aria-pressed="@IsOpen(group)" @onclick="() => Toggle(group)">
+                <span class="dot @Fmt.SeverityClass(group.Worst)"></span>@group.Rule.Title <span class="muted">@group.Items.Count</span>
+            </button>
+        }
+        <span class="rule-index-actions">
+            <button type="button" class="link" @onclick="ExpandAll">Expand all</button>
+            <button type="button" class="link" @onclick="CollapseAll">Collapse all</button>
+        </span>
+    </nav>
+}
+
+@foreach (var group in Groups)
+{
+    var open = IsOpen(group);
+    <section class="rule @(open ? "open" : "")" id="@group.Rule.Id">
+        <button type="button" class="rule-head" aria-expanded="@open" @onclick="() => Toggle(group)">
+            <span class="chevron" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span class="dot @Fmt.SeverityClass(group.Worst)"></span>
+            <h3>@group.Rule.Title</h3>
+            <span class="count small">@group.Items.Count</span>
+            <span class="muted small rule-desc">@group.Rule.Description</span>
+        </button>
+        @if (open)
+        {
+            var scripts = CleanupScript.Build(group.Rule.Title, group.Items.Where(v => v.IsActive).Select(v => v.Finding), Now);
+            @if (scripts.Count > 0)
+            {
+                <div class="rule-tools">
+                    <span class="muted small">Copy the fixes as a script for</span>
+                    @foreach (var script in scripts)
+                    {
+                        <button type="button" class="copy" data-copy="@script.Text"
+                                title="Copies @script.CommandCount fix command(s) from @script.FindingCount finding(s), for @script.MachineName only. Read it before you run it.">@script.MachineName (@script.CommandCount)</button>
+                    }
+                </div>
+            }
+            @foreach (var view in group.Items)
+            {
+                <FindingCard @key="view.Finding.Fingerprint" View="view" OnSnooze="SnoozeAsync" OnDismiss="DismissAsync" OnRestore="RestoreAsync" />
+            }
+        }
+    </section>
+}
+
+@code {
+    private IReadOnlyList<FindingView> _all = [];
+    private bool _showHidden;
+
+    private HashSet<string>? _open;
+
+    /// <summary><c>?open=all</c> starts with every group expanded.</summary>
+    [SupplyParameterFromQuery(Name = "open")] public string? OpenParam { get; set; }
+
+    private sealed record Group(ICleanupRule Rule, List<FindingView> Items)
+    {
+        public FindingSeverity Worst => Items.Max(v => v.Finding.Severity);
+    }
+
+    // Worst first, so the things that matter sit at the top; within a group, worst first too.
+    private List<Group> Groups => Findings.Rules
+        .Select(rule => new Group(rule, _all
+            .Where(v => v.Finding.RuleId == rule.Id && (_showHidden || v.IsActive))
+            .OrderByDescending(v => v.Finding.Severity)
+            .ToList()))
+        .Where(g => g.Items.Count > 0)
+        .OrderByDescending(g => g.Worst)
+        .ThenByDescending(g => g.Items.Count)
+        .ToList();
+
+    private bool IsOpen(Group group) => _open?.Contains(group.Rule.Id) == true;
+
+    private void Toggle(Group group)
+    {
+        _open ??= [];
+        if (!_open.Remove(group.Rule.Id)) { _open.Add(group.Rule.Id); }
+    }
+
+    private void ExpandAll() => _open = Groups.Select(g => g.Rule.Id).ToHashSet();
+
+    private void CollapseAll() => _open = [];
+
+    protected override async Task LoadAsync()
+    {
+        _all = await Findings.GetAsync();
+        // First load: open only the groups that hold high-severity findings. Later reloads keep the user's choice.
+        _open ??= string.Equals(OpenParam, "all", StringComparison.OrdinalIgnoreCase)
+            ? Groups.Select(g => g.Rule.Id).ToHashSet()
+            : Groups.Where(g => g.Worst >= FindingSeverity.High).Select(g => g.Rule.Id).ToHashSet();
+    }
+
+    // Each action notifies the dashboard, which reloads this page (and any other open one).
+    private async Task SnoozeAsync((Finding Finding, int Days) args) => await Findings.SnoozeAsync(args.Finding, TimeSpan.FromDays(args.Days));
+
+    private async Task DismissAsync(Finding finding) => await Findings.DismissAsync(finding);
+
+    private async Task RestoreAsync(Finding finding) => await Findings.RestoreAsync(finding.Fingerprint);
+}

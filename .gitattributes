@@ -1,0 +1,6 @@
+# Scripts must keep the line endings their interpreter expects, whatever core.autocrlf says.
+*.sh   text eol=lf
+*.ps1  text eol=lf
+
+# Captured git output used by the parser tests: byte-for-byte, never converted.
+tests/**/Fixtures/** -text

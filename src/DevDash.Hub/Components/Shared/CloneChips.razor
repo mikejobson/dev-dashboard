@@ -1,0 +1,77 @@
+@* Status chips for one working tree. *@
+@if (Clone.Git is { } git)
+{
+    <div class="chips">
+        @if (ShowBranch)
+        {
+            <span class="chip branch" title="@(git.Branch ?? "detached HEAD")">@(git.Branch ?? $"detached @ {Fmt.Sha(git.HeadSha)}")</span>
+        }
+        @if (git.IsLinkedWorktree)
+        {
+            <span class="chip muted" title="Linked worktree">worktree</span>
+        }
+        @if (git.Conflicted > 0)
+        {
+            <span class="chip danger">@git.Conflicted conflicted</span>
+        }
+        @if (git.IsDirty)
+        {
+            <span class="chip warn" title="@git.Staged staged, @git.Unstaged unstaged">@git.DirtyCount changed</span>
+        }
+        else
+        {
+            <span class="chip ok">clean</span>
+        }
+        @if (git.Untracked > 0)
+        {
+            <span class="chip muted">@git.Untracked untracked</span>
+        }
+        @if (git.Ahead > 0)
+        {
+            <span class="chip info" title="Commits not pushed">↑@git.Ahead</span>
+        }
+        @if (git.Behind > 0)
+        {
+            <span class="chip info" title="Commits to pull">↓@git.Behind</span>
+        }
+        @if (git.UpstreamGone)
+        {
+            <span class="chip danger" title="The upstream branch was deleted on the remote">upstream gone</span>
+        }
+        else if (git.Remotes.Count == 0)
+        {
+            <span class="chip warn" title="This repo has no remote">no remote</span>
+        }
+        else if (git.Upstream is null && !git.Detached)
+        {
+            <span class="chip muted" title="The branch has never been pushed">no upstream</span>
+        }
+        @if (git.Stashes.Count > 0)
+        {
+            <span class="chip muted">@git.Stashes.Count stashed</span>
+        }
+    </div>
+}
+else
+{
+    <div class="chips">
+        <span class="chip warn">@KindLabel</span>
+        @if (Clone.Entry.Folder is { } folder)
+        {
+            <span class="chip muted">@folder.FileCount files, @folder.DirectoryCount folders</span>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public CloneView Clone { get; set; } = default!;
+
+    [Parameter] public bool ShowBranch { get; set; } = true;
+
+    private string KindLabel => Clone.Entry.Kind switch
+    {
+        EntryKind.LooseFile => "loose file",
+        EntryKind.WorktreeContainer => "empty worktree folder",
+        _ => "not a git repo",
+    };
+}

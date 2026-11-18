@@ -1,0 +1,16 @@
+**/bin/
+**/obj/
+**/devdash-data/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+.git/
+.vs/
+.idea/
+.env
+tests/
+deploy/
+*.md
+dist/
+.github/
+scripts/

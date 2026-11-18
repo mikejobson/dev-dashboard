@@ -1,0 +1,63 @@
+@* A table of pull requests with CI, review and draft state. *@
+@if (Items.Count == 0)
+{
+    <div class="card muted">@Empty</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Pull request</th><th>State</th><th>Local</th><th class="right">Updated</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var pr in Items)
+                {
+                    <tr>
+                        <td>
+                            <a href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
+                            <div class="sub">
+                                <a class="muted" href="@Fmt.RepoUrl(pr.RepoKey)">@pr.Repo</a>#@pr.Number
+                                @if (pr.Author is not null) { <span> · @pr.Author</span> }
+                                @if (pr.HeadRef is not null) { <span> · <span class="mono">@pr.HeadRef</span></span> }
+                            </div>
+                        </td>
+                        <td>
+                            <div class="chips">
+                                @if (pr.IsDraft) { <span class="chip muted">draft</span> }
+                                @if (pr.Ci == CiState.Success) { <span class="chip ok">CI passing</span> }
+                                @if (pr.Ci == CiState.Failure) { <span class="chip danger">CI failing</span> }
+                                @if (pr.Ci == CiState.Pending) { <span class="chip warn">CI running</span> }
+                                @if (pr.ReviewDecision == "APPROVED") { <span class="chip ok">approved</span> }
+                                @if (pr.ReviewDecision == "CHANGES_REQUESTED") { <span class="chip danger">changes requested</span> }
+                                @if (pr.ReviewDecision == "REVIEW_REQUIRED") { <span class="chip muted">review required</span> }
+                                @if (pr.Mergeable == "CONFLICTING") { <span class="chip danger">conflicts</span> }
+                            </div>
+                        </td>
+                        <td>
+                            @if (Clones is not null && Clones.TryGetValue(pr.RepoKey, out var clones))
+                            {
+                                <span class="sub">@string.Join(", ", clones.Select(c => c.Machine.Machine.Hostname).Distinct())</span>
+                            }
+                            else
+                            {
+                                <span class="sub">not cloned</span>
+                            }
+                        </td>
+                        <td class="right nowrap sub" title="@Fmt.Date(pr.UpdatedAt)">@Fmt.Ago(pr.UpdatedAt, Now)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<PullRequestInfo> Items { get; set; } = [];
+
+    [Parameter] public IReadOnlyDictionary<string, List<CloneView>>? Clones { get; set; }
+
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+
+    [Parameter] public string Empty { get; set; } = "Nothing here.";
+}

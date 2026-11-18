@@ -1,0 +1,144 @@
+@page "/local"
+@inherits LivePage
+@inject SnapshotStore Snapshots
+@inject RepoCatalog Catalog
+
+<PageTitle>Local · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Local</h1>
+        <p>Every entry in your code folders, by machine.</p>
+    </div>
+    <span class="muted small">@Visible.Count of @_rows.Count shown</span>
+</div>
+
+<div class="toolbar">
+    <input type="search" placeholder="Search name, owner, branch…" aria-label="Search repos" @bind="_search" @bind:event="oninput" />
+    <button type="button" class="toggle @(_dirty ? "on" : "")" aria-pressed="@_dirty" @onclick="() => _dirty = !_dirty">Dirty</button>
+    <button type="button" class="toggle @(_ahead ? "on" : "")" aria-pressed="@_ahead" @onclick="() => _ahead = !_ahead">Ahead</button>
+    <button type="button" class="toggle @(_behind ? "on" : "")" aria-pressed="@_behind" @onclick="() => _behind = !_behind">Behind</button>
+    <button type="button" class="toggle @(_stale ? "on" : "")" aria-pressed="@_stale" @onclick="() => _stale = !_stale">Stale</button>
+    <button type="button" class="toggle @(_notGit ? "on" : "")" aria-pressed="@_notGit" @onclick="() => _notGit = !_notGit">Not git</button>
+</div>
+
+@if (_machines.Count == 0)
+{
+    <div class="card empty">No machine has reported yet.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Repo</th>
+                    @foreach (var machine in _machines)
+                    {
+                        <th><span class="dot @(Snapshots.IsOnline(machine) ? "ok" : "")"></span>@machine.Machine.Hostname</th>
+                    }
+                    <th>GitHub</th>
+                    <th class="right">Last activity</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in Visible)
+                {
+                    <tr>
+                        <td class="desc">
+                            <a href="@Fmt.RepoUrl(row.Key)"><strong>@row.Name</strong></a>
+                            @if (row.Owner is not null)
+                            {
+                                <span class="owner muted small">@row.Owner</span>
+                            }
+                            @if (row.Description is not null)
+                            {
+                                <div class="sub clamp-2" title="@row.Description.Text">@row.Description.Text</div>
+                            }
+                        </td>
+                        @foreach (var machine in _machines)
+                        {
+                            <td>
+                                @foreach (var clone in row.Clones.Where(c => c.Machine.MachineId == machine.MachineId))
+                                {
+                                    <div class="clone" title="@clone.Entry.Path">
+                                        @if (row.Clones.Count(c => c.Machine.MachineId == machine.MachineId) > 1 || clone.DisplayName != row.Name)
+                                        {
+                                            <div class="sub mono">@clone.DisplayName</div>
+                                        }
+                                        <CloneChips Clone="clone" />
+                                    </div>
+                                }
+                            </td>
+                        }
+                        <td>
+                            <div class="chips">
+                                @if (row.GitHub is { } gh)
+                                {
+                                    <a class="chip" href="@gh.Url" target="_blank" rel="noopener">@(gh.IsPrivate ? "private" : "public")</a>
+                                    @if (gh.IsArchived) { <span class="chip warn">archived</span> }
+                                    @if (row.PullRequests.Count > 0) { <span class="chip info">@row.PullRequests.Count of my PRs</span> }
+                                    @if (row.Issues.Count > 0) { <span class="chip info">@row.Issues.Count @(row.Issues.Count == 1 ? "issue" : "issues")</span> }
+                                }
+                                else if (row.RemoteMissing)
+                                {
+                                    <span class="chip danger">not found</span>
+                                }
+                                else if (row.IsHosted)
+                                {
+                                    <span class="chip muted">@row.Key.Split('/')[0]</span>
+                                }
+                                else if (row.Kind == EntryKind.GitRepo)
+                                {
+                                    <span class="chip warn">local only</span>
+                                }
+                            </div>
+                        </td>
+                        <td class="right nowrap sub" title="@Fmt.Date(row.LastActivity)">@Fmt.Ago(row.LastActivity, Now)</td>
+                    </tr>
+                }
+                @if (Visible.Count == 0)
+                {
+                    <tr><td class="empty" colspan="@(_machines.Count + 3)">Nothing matches these filters.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    private const int StaleDays = 180;
+
+    private IReadOnlyList<MachineView> _machines = [];
+    private IReadOnlyList<RepoRow> _rows = [];
+    private string _search = "";
+    private bool _dirty, _ahead, _behind, _stale, _notGit;
+
+    private List<RepoRow> Visible => _rows.Where(Matches).ToList();
+
+    protected override async Task LoadAsync()
+    {
+        _machines = Snapshots.Machines;
+        _rows = await Catalog.GetAsync();
+    }
+
+    private bool Matches(RepoRow row)
+    {
+        if (_dirty && !row.AnyDirty) { return false; }
+        if (_ahead && !row.AnyAhead) { return false; }
+        if (_behind && !row.AnyBehind) { return false; }
+        if (_stale && !(row.LastActivity is { } last && (Now - last).TotalDays >= StaleDays)) { return false; }
+        if (_notGit && row.Kind == EntryKind.GitRepo) { return false; }
+
+        var term = _search.Trim();
+        if (term.Length == 0)
+        {
+            return true;
+        }
+
+        return Contains(row.Name) || Contains(row.Owner) || Contains(row.Key) || Contains(row.Description?.Text)
+            || row.Clones.Any(c => Contains(c.Git?.Branch) || Contains(c.Entry.Name));
+
+        bool Contains(string? value) => value is not null && value.Contains(term, StringComparison.OrdinalIgnoreCase);
+    }
+}

@@ -1,0 +1,52 @@
+# DevDash hub on your tailnet.
+#
+#   cp .env.example .env    # fill in TS_AUTHKEY and GITHUB_TOKEN
+#   docker compose up -d            # run the published image (ghcr.io/mikejobson/dev-dashboard-hub)
+#   docker compose up -d --build    # or build the hub from this checkout instead
+#   open https://${TS_HOSTNAME}.<your-tailnet>.ts.net
+#
+# The hub shares the tailscale container's network namespace and listens on 127.0.0.1:8080 only.
+# `tailscale serve` terminates HTTPS on :443 with a tailnet certificate and proxies to it, adding the
+# Tailscale-User-* identity headers the hub uses to sign you in. No ports are published on the host.
+
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: ${TS_HOSTNAME:-devdash}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY in .env}
+      TS_HOSTNAME: ${TS_HOSTNAME:-devdash}
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+      TS_SERVE_CONFIG: /config/serve.json
+      # Keeps the node key and the HTTPS certificate across restarts, so a restart neither re-registers
+      # (which could rename the node to devdash-1) nor asks Let's Encrypt for a fresh certificate.
+      # The node is still ephemeral: Tailscale removes it once it has been offline for a while.
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+    volumes:
+      - ./deploy/tailscale/serve.json:/config/serve.json:ro
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+
+  hub:
+    # Pulled from GHCR by default; pin a release with DEVDASH_VERSION in .env. `--build` builds this
+    # checkout and tags the result with the same name, so `docker compose pull` gets the published one back.
+    image: ghcr.io/mikejobson/dev-dashboard-hub:${DEVDASH_VERSION:-latest}
+    build: .
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    environment:
+      Auth__Mode: Tailscale
+      Auth__AllowedUsers: ${DEVDASH_ALLOWED_USERS:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GitHub__Enabled: ${GITHUB_ENABLED:-true}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - devdash-data:/data
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+  devdash-data:

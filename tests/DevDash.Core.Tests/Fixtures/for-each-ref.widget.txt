@@ -1,0 +1,17 @@
+claude/dismiss-button-08b257624f16640f1bfac64cfdc0a6d17d8d0361a44374origin/claude/dismiss-button-08b2572026-10-08T20:13:15+01:00 Keep the cookie banner's Not now button visible in light mode
+claude/gracious-mayer-nyyxv2efd1dd134721e1ffa85245b694952d79366ae8cborigin/claude/gracious-mayer-nyyxv22026-09-10T18:08:52+01:00 Load the export settings, and show its card only where there is one
+claude/onboarding-template-w3zbxk4da92f51a3422be66edc680fa923a8b86979ce98origin/claude/onboarding-template-w3zbxk2026-09-09T08:52:01Z Let the onboarding screens reuse the shared layout
+claude/session-end-routing-ii1h9f99d4c173bea85cf198bb5103672c2d3b76f34a47origin/claude/session-end-routing-ii1h9f2026-09-10T21:57:15+01:00 Disable the setting that actually governs auto-redirect
+claude/order-history-deployment-kglqdt02b322b02221fc7a3ceb00a7376f66b1b632c673origin/claude/order-history-deployment-kglqdt2026-09-08T12:58:31+01:00 Merge branch 'main' into claude/order-history-deployment-kglqdt
+claude/form-template-date-field-szjessf8704bf2fa138bb8891dc742d05a92056c68b20dorigin/claude/form-template-date-field-szjess[gone]2026-09-05T21:03:35+01:00 Update Acme.Widgets packages to version 2026.9.5 and adjust configuration initialization
+copilot/investigate-keyboard-shortcuts88b0e1d322eb2c773cdb7d9498cbdaee8b514da8origin/copilot/investigate-keyboard-shortcuts2026-10-08T20:11:49+01:00*Detect shortcuts in embedded editors and give them their own options button
+feat/mock-diagnostics-and-calendarf08fac51a7c72bf3a232e9e5ee98777d0680be5borigin/feat/mock-diagnostics-and-calendar2026-09-16T12:07:37+01:00 Fill out the mock data, and answer the health check's diagnostics
+feat/menu-overflow85054f599fb70406f4a3d98db7ee546c9c01e6beorigin/feat/menu-overflow2026-10-06T10:13:44+01:00 Put the blank line back between the two newest release notes
+fix/product-images-lfse943cb4b341342abb67a50b10ebc32efb3f0e5ce2026-09-09T12:13:39+01:00 Store the product images in LFS, as .gitattributes says
+fix/upload-indicator-gatea63f8ef4e479f380b4336b0465465242e41a006dorigin/fix/upload-indicator-gate2026-09-09T17:17:52+01:00 Stop a stalled upload from holding the progress indicator on
+fix/no-socket-polling5509a18050f43cbabfe0221377f330f15e95e548origin/fix/no-socket-polling2026-10-05T11:48:12+01:00 Stop polling clients with no socket connection
+fix/unpair-and-full-device-list8f77fb9d4003c2cf81976ed4e4565a317783cea8origin/fix/unpair-and-full-device-list2026-09-09T11:32:42+01:00 Fix device unpair, and list every device that can be paired
+maina85c538cff483cb1dbfa8cd6ffbb61691e3342daorigin/main[behind 27]2026-10-08T20:32:22+01:00 Merge pull request #80 from acme/release/2026.10.8
+release/2026.10.41809c8ca6d751363e9f6d64b4dbfbd0e0501b2a0origin/release/2026.10.42026-10-04T21:01:07+01:00 Gate the feedback prompt on the lib's userId, not a PascalCase field
+release/2026.10.815f407ff87e075bacd99a5763acc5522e5a9162corigin/release/2026.10.82026-10-08T20:26:10+01:00 Give the general settings spec the feedback prompt settings
+snag-fixes98e0a58018e84afe809d058615d42aaf767a423forigin/snag-fixes2026-09-21T16:11:21+01:00 Say Archived, and stop drawing a badge an order never had

@@ -1,0 +1,48 @@
+worktree /Users/dev/Developer/core
+HEAD 21dce74aa471963065aeff2f55b890c237860a8b
+branch refs/heads/develop
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-a373e107cd707087b
+HEAD 0a2ab3f821b7f477c452ceea71275d56a8dd20c0
+branch refs/heads/worktree-agent-a373e107cd707087b
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-a63d69d856cb93cb1
+HEAD 6fc8441276f0d4a53e4ac1690fc3c81bb9390df5
+branch refs/heads/worktree-agent-a63d69d856cb93cb1
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-a6fe19c42015abbc4
+HEAD eb446d4d4b60dc36ea39a7840ec67d45eefb2815
+branch refs/heads/worktree-agent-a6fe19c42015abbc4
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-a7439d396a82ad6ba
+HEAD 6147ef77af1f9d1aaaa603c69cdc8a3e15b09d09
+branch refs/heads/feat/signal-path-offline
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-a9c47c23c042374ec
+HEAD 0ad1e1e8d01c154bf7285e8405b63bb14ac5c2cb
+branch refs/heads/worktree-agent-a9c47c23c042374ec
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-aacb578f9653676c6
+HEAD 27bfde79f8b3e1fd016ff9500a2223ecd88b1f9f
+branch refs/heads/feat/reconnect-known-processor
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-abec3af4e95886165
+HEAD 795e36b6b24ac6ac346baa8eb55b6b1c00f54208
+branch refs/heads/worktree-agent-abec3af4e95886165
+
+worktree /Users/dev/Developer/core/.claude/worktrees/agent-ac7fd5f1e426ca363
+HEAD a03cbcbd81e309e391ec5d40e69d2b5df913a643
+branch refs/heads/worktree-agent-ac7fd5f1e426ca363
+
+worktree /Users/dev/Developer/core/.claude/worktrees/kind-germain-92eb46
+HEAD 2881a2d3074f85e8cadc792545f21a0e522f819b
+branch refs/heads/claude/kind-germain-92eb46
+
+worktree /Users/dev/Developer/core/.claude/worktrees/youthful-perlman-69db18
+HEAD bb20cd639d24980480ab14df3f30d4400a050e38
+detached
+
+worktree /Users/dev/Developer/core.worktrees/panel-app-polish
+HEAD 18deaca3d9cffde68021fe2dd984b4dadfe252ea
+branch refs/heads/feature/panel-app-polish
+

@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DevDash.Agent/DevDash.Agent.csproj" />
+    <Project Path="src/DevDash.Contracts/DevDash.Contracts.csproj" />
+    <Project Path="src/DevDash.Core/DevDash.Core.csproj" />
+    <Project Path="src/DevDash.Hub/DevDash.Hub.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DevDash.Core.Tests/DevDash.Core.Tests.csproj" />
+    <Project Path="tests/DevDash.Hub.Tests/DevDash.Hub.Tests.csproj" />
+  </Folder>
+</Solution>

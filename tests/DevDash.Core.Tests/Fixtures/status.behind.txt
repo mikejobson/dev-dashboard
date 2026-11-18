@@ -1,0 +1,6 @@
+# branch.oid c2402c682ae94bd5c5772fe56b0e20e0235d8218
+# branch.head master
+# branch.upstream origin/master
+# branch.ab +0 -2
+1 .M N... 100644 100644 100644 d42c2fc0a378abbe54a302b4897ed7fed227cdbe d42c2fc0a378abbe54a302b4897ed7fed227cdbe WidgetTv/WidgetTv.csproj
+1 .M N... 100644 100644 100644 a6196b8e6eec53c1344cb2f8bd7c683cbfe92ccc a6196b8e6eec53c1344cb2f8bd7c683cbfe92ccc WidgetTv/packages.config

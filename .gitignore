@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+.DS_Store
+# local hub data (SQLite db, dev agent key)
+devdash-data/
+*.db
+*.db-shm
+*.db-wal
+.env
+
+# release assets built by scripts/publish-agent.sh
+dist/

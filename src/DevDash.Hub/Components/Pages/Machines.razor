@@ -1,0 +1,232 @@
+@page "/machines"
+@inherits LivePage
+@inject SnapshotStore Snapshots
+@inject ApiKeyService Keys
+@inject ActionQueue Actions
+
+<PageTitle>Machines · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Machines</h1>
+        <p>Agents that report to this hub, and the API keys they use.</p>
+    </div>
+</div>
+
+@if (_machines.Count == 0)
+{
+    <div class="card empty">No machine has reported yet.</div>
+}
+else
+{
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Machine</th><th>System</th><th>Agent</th><th>Scan</th><th>Roots</th><th>Actions</th><th class="right">Last seen</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var machine in _machines)
+                {
+                    var online = Snapshots.IsOnline(machine);
+                    <tr>
+                        <td>
+                            <span class="dot @(online ? "ok" : "")"></span><strong>@machine.Machine.Hostname</strong>
+                            <div class="sub mono">@machine.MachineId</div>
+                        </td>
+                        <td>
+                            @machine.Machine.Os
+                            <div class="sub">@machine.Machine.OsDescription</div>
+                            @if (machine.Machine.TailscaleName is not null)
+                            {
+                                <div class="sub mono">@machine.Machine.TailscaleName</div>
+                            }
+                        </td>
+                        <td class="mono">@machine.Machine.AgentVersion</td>
+                        <td>
+                            @machine.Snapshot.Entries.Count entries in @machine.Snapshot.ScanDurationMs ms
+                            <div class="sub">scanned @Fmt.Ago(machine.Snapshot.ScannedAt, Now)</div>
+                        </td>
+                        <td class="mono sub">@string.Join(", ", machine.Snapshot.Roots)</td>
+                        <td>
+                            @if (machine.Machine.ActionsEnabled)
+                            {
+                                <span class="chip info" title="This agent runs allowlisted fixes queued from the dashboard, after you confirm each one.">on</span>
+                            }
+                            else
+                            {
+                                <span class="chip muted" title="This agent only reports. Start it with --enable-actions to allow Run buttons for this machine.">off</span>
+                            }
+                        </td>
+                        <td class="right nowrap">
+                            <span class="chip @(online ? "ok" : "muted")">@(online ? "online" : "offline")</span>
+                            <div class="sub" title="@Fmt.Date(machine.LastSeenAt)">@Fmt.Ago(machine.LastSeenAt, Now)</div>
+                        </td>
+                        <td class="right">
+                            <button type="button" class="danger" title="Remove this machine's data from the hub. It reappears if its agent reports again." @onclick="() => ForgetAsync(machine.MachineId)">Forget</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+<h2>Agent actions</h2>
+<p class="muted small" style="margin-top:-4px">
+    Fixes queued from the dashboard for a machine's own agent to run. Off unless that machine's agent was started with
+    <code>--enable-actions</code>. Only a fixed list of safe git operations exists, each one is confirmed first, and the agent checks it again before running.
+</p>
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>Queued</th><th>Machine</th><th>Action</th><th>By</th><th>Status</th><th>Result</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var action in _actions)
+            {
+                <tr>
+                    <td class="sub nowrap" title="@Fmt.Date(action.QueuedAt)">@Fmt.Ago(action.QueuedAt, Now)</td>
+                    <td>@action.MachineName<div class="sub mono">@action.MachineId</div></td>
+                    <td>
+                        <code>@action.CommandLine</code>
+                        @if (action.FindingTitle is not null)
+                        {
+                            <div class="sub">@action.FindingTitle</div>
+                        }
+                    </td>
+                    <td class="sub">@action.QueuedBy</td>
+                    <td class="nowrap">
+                        <span class="chip @ActionClass(action.Status)">@action.Status.ToString().ToLowerInvariant()</span>
+                        <div class="sub">
+                            @if (action.CompletedAt is not null)
+                            {
+                                <span title="@Fmt.Date(action.CompletedAt)">@Fmt.Ago(action.CompletedAt, Now)</span>
+                            }
+                            else if (action.ClaimedAt is not null)
+                            {
+                                <span title="@Fmt.Date(action.ClaimedAt)">claimed @Fmt.Ago(action.ClaimedAt, Now)</span>
+                            }
+                            else
+                            {
+                                <span title="@Fmt.Date(action.ExpiresAt)">expires @action.ExpiresAt.ToLocalTime().ToString("HH:mm")</span>
+                            }
+                        </div>
+                    </td>
+                    <td>
+                        @if (!string.IsNullOrWhiteSpace(action.Output))
+                        {
+                            <details class="output">
+                                <summary>@(action.ExitCode is { } exit ? $"exit {exit}" : "details")</summary>
+                                <pre>@action.Output</pre>
+                            </details>
+                        }
+                        else if (action.ExitCode is { } exitCode)
+                        {
+                            <span class="sub">exit @exitCode</span>
+                        }
+                    </td>
+                </tr>
+            }
+            @if (_actions.Count == 0)
+            {
+                <tr><td class="empty" colspan="6">No actions have been queued.</td></tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+<h2>Agent API keys</h2>
+
+@if (_issued is not null)
+{
+    <div class="banner info">
+        <strong>New key for “@_issued.Entity.Label”.</strong> Copy it now; only its hash is stored and it cannot be shown again.
+        <div class="command" style="margin-top:8px">
+            <code>@_issued.Plaintext</code>
+            <button type="button" class="copy" data-copy="@_issued.Plaintext">Copy</button>
+            <button type="button" @onclick="() => _issued = null">Done</button>
+        </div>
+    </div>
+}
+
+<div class="toolbar">
+    <input type="text" placeholder="Label, e.g. the machine's name" aria-label="Label for the new key" @bind="_label" @bind:event="oninput" />
+    <button type="button" class="primary" @onclick="IssueAsync">Issue key</button>
+    <span class="muted small">A key binds to the first machine that uses it.</span>
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>Key</th><th>Label</th><th>Machine</th><th>Created</th><th>Last used</th><th></th></tr>
+        </thead>
+        <tbody>
+            @foreach (var key in _keys)
+            {
+                <tr>
+                    <td class="mono">@key.Prefix…</td>
+                    <td>@key.Label</td>
+                    <td class="mono">@(key.MachineId ?? "not used yet")</td>
+                    <td class="sub nowrap" title="@Fmt.Date(key.CreatedAt)">@Fmt.Ago(key.CreatedAt, Now)</td>
+                    <td class="sub nowrap">@Fmt.Ago(key.LastUsedAt, Now)</td>
+                    <td class="right">
+                        @if (key.RevokedAt is null)
+                        {
+                            <button type="button" class="danger" @onclick="() => RevokeAsync(key.Id)">Revoke</button>
+                        }
+                        else
+                        {
+                            <span class="chip muted" title="@Fmt.Date(key.RevokedAt)">revoked</span>
+                        }
+                    </td>
+                </tr>
+            }
+            @if (_keys.Count == 0)
+            {
+                <tr><td class="empty" colspan="6">No keys yet.</td></tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    private IReadOnlyList<MachineView> _machines = [];
+    private IReadOnlyList<ApiKeyEntity> _keys = [];
+    private IReadOnlyList<AgentActionEntity> _actions = [];
+    private IssuedKey? _issued;
+    private string _label = "";
+
+    protected override async Task LoadAsync()
+    {
+        _machines = Snapshots.Machines;
+        _keys = await Keys.ListAsync();
+        _actions = await Actions.RecentAsync(30);
+    }
+
+    private static string ActionClass(AgentActionStatus status) => status switch
+    {
+        AgentActionStatus.Succeeded => "ok",
+        AgentActionStatus.Failed => "danger",
+        AgentActionStatus.Expired => "muted",
+        _ => "info",
+    };
+
+    private async Task IssueAsync()
+    {
+        _issued = await Keys.IssueAsync(_label);
+        _label = "";
+        await LoadAsync();
+    }
+
+    private async Task RevokeAsync(int id)
+    {
+        await Keys.RevokeAsync(id);
+        await LoadAsync();
+    }
+
+    private async Task ForgetAsync(string machineId)
+    {
+        await Snapshots.ForgetAsync(machineId);
+        await LoadAsync();
+    }
+}

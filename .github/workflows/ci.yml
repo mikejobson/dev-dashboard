@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The scanner tests drive real git on throwaway repositories and the installer builds
+        # OS-specific paths, so all three are worth running.
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+          - os: windows-latest
+            rid: win-x64
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore DevDash.slnx
+
+      - name: Build
+        run: dotnet build DevDash.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test DevDash.slnx -c Release --no-build
+
+      # The release ships self-contained single-file binaries; make sure one really starts here.
+      - name: Publish the agent as a single file
+        run: >
+          dotnet publish src/DevDash.Agent/DevDash.Agent.csproj -c Release -r ${{ matrix.rid }}
+          --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -o out
+
+      - name: Smoke-test the published agent
+        shell: bash
+        run: |
+          ./out/devdash-agent --version
+          mkdir -p smoke/Developer
+          git init -q smoke/Developer/widget
+          ./out/devdash-agent scan --dry-run --root smoke/Developer | grep '"name": "widget"'
+          ./out/devdash-agent install --dry-run --hub-url https://devdash.example.ts.net --api-key ddk_ci_smoke_test
+
+  scripts:
+    name: Lint scripts and workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: Parse install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/install.ps1), [ref] $null, [ref] $errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+
+  hub-image:
+    name: Build the hub image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build (not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

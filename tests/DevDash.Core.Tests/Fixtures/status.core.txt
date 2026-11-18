@@ -1,0 +1,7 @@
+# branch.oid 21dce74aa471963065aeff2f55b890c237860a8b
+# branch.head develop
+# branch.upstream origin/develop
+# branch.ab +0 -0
+1 .M N... 100755 100755 100755 b3828a818b79c34882b747974ec6373ea56b4798 b3828a818b79c34882b747974ec6373ea56b4798 tools/dev-env/bin/stack-rebuild.sh
+? .angular/
+? .claude/

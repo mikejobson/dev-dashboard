@@ -21,7 +21,7 @@ public sealed class LargeBuildDirsRule : ICleanupRule
                 }
 
                 var dirs = size.ReclaimableDirs.OrderByDescending(d => d.Bytes).ToList();
-                var top = string.Join(", ", dirs.Take(3).Select(d => $"{System.IO.Path.GetRelativePath(entry.Path, d.Path)} ({Size(d.Bytes)})"));
+                var top = string.Join(", ", dirs.Take(3).Select(d => $"{RelativeTo(entry.Path, d.Path)} ({Size(d.Bytes)})"));
                 yield return this.ForEntry(snapshot, entry, size.ReclaimableBytes >= context.Options.BuildDirBytes * 4 ? FindingSeverity.Medium : FindingSeverity.Low,
                     $"{entry.Name}: {Size(size.ReclaimableBytes)} of build output",
                     $"{Size(size.ReclaimableBytes)} of {Size(size.TotalBytes)} is regenerable. Largest: {top}.",
@@ -31,5 +31,19 @@ public sealed class LargeBuildDirsRule : ICleanupRule
                     ]);
             }
         }
+    }
+
+    /// <summary>
+    /// The folder relative to the repo, keeping the reporting machine's separators. Not
+    /// Path.GetRelativePath: the hub may run on a different OS from the machine that sent the paths.
+    /// </summary>
+    public static string RelativeTo(string root, string path)
+    {
+        var trimmed = root.TrimEnd('/', '\\');
+        return path.Length > trimmed.Length + 1
+            && path.StartsWith(trimmed, StringComparison.OrdinalIgnoreCase)
+            && path[trimmed.Length] is '/' or '\\'
+            ? path[(trimmed.Length + 1)..]
+            : path;
     }
 }

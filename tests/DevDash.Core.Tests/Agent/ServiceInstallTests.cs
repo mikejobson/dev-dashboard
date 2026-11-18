@@ -154,7 +154,10 @@ public sealed class ServiceInstallTests : IDisposable
 
         var config = File.ReadAllText(env.ConfigFile);
         Assert.DoesNotContain("ddk_secret", config);
-        Assert.Contains(env.ApiKeyFile, config);
+        using (var json = System.Text.Json.JsonDocument.Parse(config))
+        {
+            Assert.Equal(env.ApiKeyFile, json.RootElement.GetProperty("Agent").GetProperty("ApiKeyFile").GetString());
+        }
         var plist = Home("Library", "LaunchAgents", "com.github.mikejobson.devdash-agent.plist");
         Assert.True(File.Exists(plist));
         Assert.True(Directory.Exists(Path.Combine(_home, "Library", "Logs", "DevDash")));

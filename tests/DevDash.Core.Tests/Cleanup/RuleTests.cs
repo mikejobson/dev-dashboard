@@ -396,6 +396,14 @@ public class LargeBuildDirsRuleTests
         Assert.Contains("ui/node_modules (600 MB)", finding.Explanation);
         Assert.Equal(FindingSeverity.Low, finding.Severity);
     }
+
+    [Theory]
+    [InlineData("/dev/widget", "/dev/widget/ui/node_modules", "ui/node_modules")]
+    [InlineData("/dev/widget/", "/dev/widget/bin", "bin")]
+    [InlineData(@"C:\Users\dev\widget", @"C:\Users\dev\widget\ui\node_modules", @"ui\node_modules")]
+    [InlineData("/dev/widget", "/dev/widgetx/bin", "/dev/widgetx/bin")]
+    public void Relative_paths_do_not_depend_on_the_hub_operating_system(string root, string path, string expected) =>
+        Assert.Equal(expected, LargeBuildDirsRule.RelativeTo(root, path));
 }
 
 public class UntouchedRepoRuleTests

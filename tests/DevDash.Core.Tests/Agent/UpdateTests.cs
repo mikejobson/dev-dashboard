@@ -709,7 +709,7 @@ public sealed class UpdateTests : IDisposable
     public async Task The_watchdog_rolls_back_at_the_deadline_and_asks_for_a_restart()
     {
         var installation = await UpdatedAsync();
-        var guard = Guard(installation, "1.2.0", new TestClock(T0), new UpdateOptions { VerifyMinutes = 0.0005 });
+        var guard = Guard(installation, "1.2.0", new TestClock(DateTimeOffset.UtcNow), new UpdateOptions { VerifyMinutes = 0.0005 });
         Assert.Equal(GuardStart.Verifying, guard.OnStart());
         var lifetime = new FakeLifetime();
         var restart = new RestartSignal(lifetime, new UpdateContext(installation, null, "1.2.0", _site.Trust), NullLogger<RestartSignal>.Instance);
@@ -731,7 +731,9 @@ public sealed class UpdateTests : IDisposable
         var installation = await UpdatedAsync();
         // 3 s of real time: long enough that a slow CI runner confirms before the deadline (0.002 min
         // raced on ubuntu-latest), short enough that the test still waits out the watchdog quickly.
-        var guard = Guard(installation, "1.2.0", new TestClock(T0), new UpdateOptions { VerifyMinutes = 0.05 });
+        // The watchdog waits on the real clock, so the guard's deadline must be measured from now too: a
+        // fixed T0 puts the deadline in the past and the watchdog rolls back before the test confirms.
+        var guard = Guard(installation, "1.2.0", new TestClock(DateTimeOffset.UtcNow), new UpdateOptions { VerifyMinutes = 0.05 });
         guard.OnStart();
         var lifetime = new FakeLifetime();
         var restart = new RestartSignal(lifetime, new UpdateContext(installation, null, "1.2.0", _site.Trust), NullLogger<RestartSignal>.Instance);

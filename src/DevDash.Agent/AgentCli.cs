@@ -3,6 +3,15 @@ namespace DevDash.Agent;
 /// <summary>Minimal command-line parsing: a command plus a few flags that override configuration.</summary>
 public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionary<string, string?> Overrides, string? Error)
 {
+    /// <summary><c>update --version</c>: the release to install. Null means the latest.</summary>
+    public string? UpdateVersion { get; init; }
+
+    /// <summary><c>update --check</c>: say whether there is a newer release; change nothing.</summary>
+    public bool Check { get; init; }
+
+    /// <summary><c>update --no-restart</c>: replace the program but leave a running service alone.</summary>
+    public bool NoRestart { get; init; }
+
     public const string Usage = """
         devdash-agent - reports the state of your code folders to the DevDash hub
 
@@ -11,6 +20,9 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
           devdash-agent scan                Scan once and push to the hub
           devdash-agent scan --dry-run      Scan once and print the snapshot JSON; no fetch, no push
           devdash-agent status              Show configuration, hub reachability and the service state
+          devdash-agent update              Install the latest release (signature and checksum verified), then restart the service
+          devdash-agent update --check      Only say whether a newer release exists
+          devdash-agent update --version X  Install release X (never an older one); --no-restart leaves the service running
           devdash-agent install|uninstall   Run as a background service; see `devdash-agent install --help`
 
         Options:
@@ -23,6 +35,7 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
           --sizes             Measure folder sizes now instead of when they are due
           --no-watch          Do not watch for file changes between scans
           --enable-actions    Let the dashboard queue allowlisted git fixes for this machine (off by default)
+          --updates <mode>    Self-update: off, notify (default: when asked from the dashboard) or auto
 
         Configuration can also come from ~/.config/devdash/agent.json or DEVDASH_Agent__* environment variables.
         """;
@@ -35,12 +48,14 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
         var sizes = false;
         var roots = 0;
         var index = 0;
+        string? updateVersion = null;
+        bool check = false, noRestart = false;
 
         if (args.Length > 0 && !args[0].StartsWith('-'))
         {
             command = args[0].ToLowerInvariant();
             index = 1;
-            if (command is not ("run" or "scan" or "status" or "install" or "uninstall" or "help"))
+            if (command is not ("run" or "scan" or "status" or "update" or "install" or "uninstall" or "help"))
             {
                 return Fail($"Unknown command '{args[0]}'.");
             }
@@ -68,6 +83,34 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
                 case "--enable-actions":
                     overrides["Agent:Actions:Enabled"] = "true";
                     break;
+                case "--check" when command == "update":
+                    check = true;
+                    break;
+                case "--no-restart" when command == "update":
+                    noRestart = true;
+                    break;
+                case "--version" when command == "update":
+                    if (Value() is not { } wanted)
+                    {
+                        return Fail("--version needs a value.");
+                    }
+
+                    // People write v0.2.0 as often as 0.2.0; everything past this point is a strict version.
+                    updateVersion = wanted.StartsWith('v') ? wanted[1..] : wanted;
+                    if (!DevDash.Contracts.SemVer.IsValid(updateVersion))
+                    {
+                        return Fail($"--version must be MAJOR.MINOR.PATCH[-prerelease], got '{wanted}'.");
+                    }
+
+                    break;
+                case "--updates":
+                    if (DevDash.Contracts.AgentUpdateModes.Normalize(Value()) is not { } mode)
+                    {
+                        return Fail("--updates must be off, notify or auto.");
+                    }
+
+                    overrides["Agent:Updates:Mode"] = mode;
+                    break;
                 case "-h" or "--help":
                     command = "help";
                     break;
@@ -92,7 +135,7 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
             }
         }
 
-        return new AgentCli(command, dryRun, sizes, overrides, null);
+        return new AgentCli(command, dryRun, sizes, overrides, null) { UpdateVersion = updateVersion, Check = check, NoRestart = noRestart };
 
         static AgentCli Fail(string message) => new("help", false, false, [], message);
     }

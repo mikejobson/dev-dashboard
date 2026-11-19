@@ -128,6 +128,7 @@ td.desc { max-width: 420px; }
 .chip.info { background: var(--info-bg); color: var(--info); }
 .chip.branch { font-family: var(--mono); font-size: 11.5px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .chip.muted { color: var(--muted); }
+.chip.gap { margin-left: 6px; }
 .dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
 .dot.ok { background: var(--ok); }
 .dot.warn { background: var(--warn); }
@@ -260,3 +261,13 @@ details.output pre { margin: 6px 0 0; font-family: var(--mono); font-size: 12px;
 #blazor-error-ui .dismiss { cursor: pointer; float: right; }
 .blazor-error-boundary { background: var(--danger); color: #fff; padding: 12px 16px; border-radius: 6px; }
 .blazor-error-boundary::after { content: "Something went wrong rendering this section."; }
+
+/* ---- hub update notice (sidebar) ---- */
+.hub-update {
+    margin: 16px 4px 0; padding: 10px; border: 1px solid var(--accent); border-radius: var(--radius);
+    background: var(--info-bg); display: flex; flex-direction: column; gap: 6px; font-size: 12.5px;
+}
+.hub-update .command { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.hub-update .command { flex-wrap: wrap; }
+.hub-update .command code { flex: 1 1 140px; min-width: 0; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; font-size: 11.5px; }
+.hub-version { padding: 12px 10px 0; }

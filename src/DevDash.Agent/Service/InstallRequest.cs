@@ -60,7 +60,7 @@ public sealed record InstallRequest
                 case "--enable-actions":
                     settings["Actions:Enabled"] = "true";
                     break;
-                case "--hub-url" or "--api-key" or "--api-key-file" or "--root" or "--machine-id" or "--set":
+                case "--hub-url" or "--api-key" or "--api-key-file" or "--root" or "--machine-id" or "--set" or "--updates":
                     if (Value() is not { } value)
                     {
                         return Fail($"{arg} needs a value.");
@@ -95,6 +95,14 @@ public sealed record InstallRequest
                             break;
                         case "--machine-id":
                             machineId = value.Trim();
+                            break;
+                        case "--updates":
+                            if (DevDash.Contracts.AgentUpdateModes.Normalize(value) is not { } mode)
+                            {
+                                return Fail($"--updates must be off, notify or auto, got '{value}'.");
+                            }
+
+                            settings["Updates:Mode"] = mode;
                             break;
                         default:
                             var cut = value.IndexOf('=');

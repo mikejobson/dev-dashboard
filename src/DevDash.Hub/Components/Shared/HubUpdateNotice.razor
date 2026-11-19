@@ -1,0 +1,34 @@
+@* Tells you when a newer hub release exists. Updating is a manual docker compose step; the hub never updates itself. *@
+@inherits LivePage
+@inject ReleaseStore Releases
+
+@if (_newer is { } release)
+{
+    <div class="hub-update" role="status">
+        <strong>Hub @release.Version is available</strong>
+        <span class="muted small">You're on @HubVersion.Current.</span>
+        @if (release.Url is not null)
+        {
+            <a class="small" href="@release.Url" target="_blank" rel="noopener">Release notes</a>
+        }
+        <span class="muted small">On the Docker host, in the project folder:</span>
+        <div class="command">
+            <code>@UpdateCommand</code>
+            <button type="button" class="copy" data-copy="@UpdateCommand" title="Copy the command">Copy</button>
+        </div>
+        <span class="muted small">If <code>DEVDASH_VERSION</code> is pinned in <code>.env</code>, set it to @release.Version first.</span>
+    </div>
+}
+<div class="hub-version muted small">Hub @HubVersion.Current</div>
+
+@code {
+    private const string UpdateCommand = "docker compose pull && docker compose up -d";
+
+    private LatestRelease? _newer;
+
+    protected override Task LoadAsync()
+    {
+        _newer = HubVersion.NewerThan(HubVersion.Current, Releases.Current);
+        return Task.CompletedTask;
+    }
+}

@@ -10,6 +10,8 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <!-- The pretend release site, shared with the agent tests. -->
+    <Compile Include="..\DevDash.Core.Tests\Agent\FakeRelease.cs" Link="Shared\FakeRelease.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\DevDash.Hub\DevDash.Hub.csproj" />

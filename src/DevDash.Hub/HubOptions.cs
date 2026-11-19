@@ -15,6 +15,31 @@ public sealed class HubOptions
     public CleanupOptions Cleanup { get; set; } = new();
 
     public HubActionOptions Actions { get; set; } = new();
+
+    public HubUpdateOptions Updates { get; set; } = new();
+}
+
+/// <summary>Agent updates: knowing the latest release, and asking agents to move to it.</summary>
+public sealed class HubUpdateOptions
+{
+    /// <summary>
+    /// Check GitHub for new agent releases and offer Update buttons. Separate from
+    /// <see cref="HubActionOptions.Enabled"/>: an update is not a git action, and each agent decides for
+    /// itself whether to accept one (<c>Agent:Updates:Mode</c>).
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>The GitHub repository whose releases are the agent's releases.</summary>
+    public string Repository { get; set; } = "mikejobson/dev-dashboard";
+
+    /// <summary>How often to look for a new release.</summary>
+    public int CheckIntervalMinutes { get; set; } = 60;
+
+    /// <summary>Also count releases marked as pre-release (or tagged like <c>v1.0.0-rc.1</c>). Drafts are never counted.</summary>
+    public bool IncludePrereleases { get; set; }
+
+    /// <summary>An update an agent has claimed but not reported on after this long is recorded as failed. Longer than for git actions: it downloads a release first.</summary>
+    public int LeaseMinutes { get; set; } = 15;
 }
 
 /// <summary>Agent actions: safe fixes queued from the dashboard for a machine's agent to run.</summary>

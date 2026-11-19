@@ -25,16 +25,65 @@ public sealed class HubFactory : WebApplicationFactory<Program>
     /// <summary>Replaces the hub's clock, for tests about expiry.</summary>
     public TimeProvider? Time { get; init; }
 
+    /// <summary>
+    /// What "GitHub" answers when the hub asks for the agent's releases. The hub never reaches the real
+    /// GitHub in tests. Set before the first request to the hub; the default is no releases at all.
+    /// </summary>
+    public string ReleasesJson { get; set; } = "[]";
+
+    /// <summary>The release lookups the hub made: URL and Authorization header.</summary>
+    public List<(string Url, string? Auth)> ReleaseRequests { get; } = [];
+
+    public static string ReleaseJson(string tag, bool signed = true, bool draft = false, bool prerelease = false) => $$"""
+        { "tag_name": "{{tag}}", "draft": {{(draft ? "true" : "false")}}, "prerelease": {{(prerelease ? "true" : "false")}},
+          "html_url": "https://github.com/mikejobson/dev-dashboard/releases/tag/{{tag}}", "published_at": "2026-11-18T10:00:00Z",
+          "assets": [ { "name": "checksums.txt" }, { "name": "devdash-agent-osx-arm64.tar.gz" }{{(signed ? """, { "name": "checksums.txt.sig" }""" : "")}} ] }
+        """;
+
+    /// <summary>Makes the hub look for the latest release now, as its hourly check would.</summary>
+    public async Task<DevDash.Hub.Updates.LatestRelease?> CheckReleasesAsync(params string[] releases)
+    {
+        if (releases.Length > 0)
+        {
+            ReleasesJson = $"[{string.Join(",", releases)}]";
+        }
+
+        await Services.GetRequiredService<DevDash.Hub.Updates.ReleasePoller>().PollOnceAsync(CancellationToken.None);
+        return Services.GetRequiredService<DevDash.Hub.Updates.ReleaseStore>().Current;
+    }
+
+    private sealed class ReleaseStub(HubFactory factory) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            lock (factory.ReleaseRequests)
+            {
+                factory.ReleaseRequests.Add((request.RequestUri!.ToString(), request.Headers.Authorization?.ToString()));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(factory.ReleasesJson, System.Text.Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:DevDash", _connectionString);
         builder.UseSetting("GitHub:Enabled", "false");
         builder.UseSetting("Auth:RequireLoopback", RequireLoopback ? "true" : "false");
-        if (Time is not null)
+        builder.ConfigureServices(services =>
         {
-            builder.ConfigureServices(services => services.AddSingleton(Time));
-        }
+            if (Time is not null)
+            {
+                services.AddSingleton(Time);
+            }
+
+            services.AddHttpClient<DevDash.Hub.Updates.ReleaseClient>().ConfigurePrimaryHttpMessageHandler(() => new ReleaseStub(this));
+            services.AddSingleton<DevDash.Hub.GitHub.IGitHubTokenProvider>(new NoToken());
+        });
     }
 
     public async Task<string> IssueKeyAsync(string label = "test", string? machineId = null)
@@ -59,12 +108,23 @@ public sealed class HubFactory : WebApplicationFactory<Program>
         }
     }
 
-    public static MachineSnapshot Snapshot(string machineId = "mac", DateTimeOffset? now = null, bool actions = false)
+    /// <summary>As in production with no token configured and no <c>gh</c>: GitHub is asked anonymously.</summary>
+    private sealed class NoToken : DevDash.Hub.GitHub.IGitHubTokenProvider
+    {
+        public Task<string?> GetTokenAsync(CancellationToken ct) => Task.FromResult<string?>(null);
+
+        public void Invalidate()
+        {
+        }
+    }
+
+    /// <param name="updateMode">What the agent reports as its update mode. Null is an agent from before self-update (0.1.x).</param>
+    public static MachineSnapshot Snapshot(string machineId = "mac", DateTimeOffset? now = null, bool actions = false, string? updateMode = null, string version = "0.1.0")
     {
         var at = now ?? DateTimeOffset.UtcNow;
         return new MachineSnapshot
         {
-            Machine = new MachineInfo { MachineId = machineId, Hostname = machineId + "-host", Os = "macOS", AgentVersion = "0.1.0", ActionsEnabled = actions },
+            Machine = new MachineInfo { MachineId = machineId, Hostname = machineId + "-host", Os = "macOS", AgentVersion = version, ActionsEnabled = actions, UpdateMode = updateMode },
             ScannedAt = at,
             ScanDurationMs = 123,
             Roots = ["/dev"],

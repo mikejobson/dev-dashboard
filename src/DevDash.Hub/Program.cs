@@ -7,6 +7,7 @@ using DevDash.Hub.Components;
 using DevDash.Hub.Data;
 using DevDash.Hub.GitHub;
 using DevDash.Hub.Services;
+using DevDash.Hub.Updates;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
@@ -85,6 +86,13 @@ builder.Services.AddSingleton<GitHubStore>();
 builder.Services.AddSingleton<GitHubPoller>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<GitHubPoller>());
 
+// ---- agent releases and updates -----------------------------------------------------------------
+builder.Services.AddHttpClient<ReleaseClient>(c => c.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddSingleton<ReleaseStore>();
+builder.Services.AddSingleton<ReleasePoller>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ReleasePoller>());
+builder.Services.AddSingleton<AgentUpdates>();
+
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
     o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
@@ -112,6 +120,7 @@ await using (var db = await app.Services.GetRequiredService<IDbContextFactory<De
 await app.Services.GetRequiredService<ApiKeyService>().EnsureSeedKeyAsync();
 await app.Services.GetRequiredService<SnapshotStore>().LoadAsync();
 await app.Services.GetRequiredService<GitHubStore>().LoadAsync();
+await app.Services.GetRequiredService<ReleaseStore>().LoadAsync();
 
 if (!app.Environment.IsDevelopment())
 {

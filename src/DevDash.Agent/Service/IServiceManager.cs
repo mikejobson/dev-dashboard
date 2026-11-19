@@ -28,6 +28,9 @@ public interface IServiceManager
     IReadOnlyList<ServiceCommand> StartCommands { get; }
     IReadOnlyList<ServiceCommand> StopCommands { get; }
 
+    /// <summary>Restarts a service that is installed, so it runs the program files now on disk (after an update).</summary>
+    IReadOnlyList<ServiceCommand> RestartCommands { get; }
+
     Task<ServiceState> GetStateAsync(ICommandRunner runner, CancellationToken ct);
 
     /// <summary>Anything the user should know after installing, e.g. lingering on Linux.</summary>

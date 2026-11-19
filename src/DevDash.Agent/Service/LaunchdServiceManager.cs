@@ -69,6 +69,9 @@ public sealed class LaunchdServiceManager(ServiceEnvironment environment) : ISer
     // With KeepAlive, `launchctl kill` would just be restarted; unloading is the only real stop.
     public IReadOnlyList<ServiceCommand> StopCommands => [new("launchctl", ["bootout", Target])];
 
+    // -k kills the running instance first; launchd then starts the program at the same path, which is now the new file.
+    public IReadOnlyList<ServiceCommand> RestartCommands => [new("launchctl", ["kickstart", "-k", Target])];
+
     public IReadOnlyList<string> Notes =>
     [
         "macOS asks for permission the first time the agent reads Documents, Desktop or Downloads; scan roots elsewhere (such as ~/Developer) need none.",

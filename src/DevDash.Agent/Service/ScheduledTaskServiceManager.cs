@@ -91,6 +91,9 @@ public sealed class ScheduledTaskServiceManager(ServiceEnvironment environment) 
     public IReadOnlyList<ServiceCommand> StartCommands => [Schtasks("/Run", "/TN", TaskName)];
     public IReadOnlyList<ServiceCommand> StopCommands => [Schtasks("/End", "/TN", TaskName)];
 
+    // /Run is ignored while the task is running (MultipleInstancesPolicy IgnoreNew), so end it first.
+    public IReadOnlyList<ServiceCommand> RestartCommands => [Schtasks("/End", "/TN", TaskName) with { IgnoreFailure = true }, Schtasks("/Run", "/TN", TaskName)];
+
     public IReadOnlyList<string> Notes => environment.ServiceExecutablePath == environment.ExecutablePath
         ? [$"{ServiceEnvironment.WindowlessExecutableName} was not found beside {environment.ExecutablePath}, so the task runs the console build and a console window will be visible."]
         : [];

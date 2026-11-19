@@ -24,7 +24,13 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return shape;
         }
 
-        if (await RepoRefusalAsync(action!.RepoPath, ct).ConfigureAwait(false) is { } repo)
+        // An agent update is not a git action and is never validated, or run, as one.
+        if (!AgentActions.IsRepoAction(action!.Kind) || action.RepoPath is not { } repoPath)
+        {
+            return "Not a repository action.";
+        }
+
+        if (await RepoRefusalAsync(repoPath, ct).ConfigureAwait(false) is { } repo)
         {
             return repo;
         }
@@ -83,7 +89,7 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
 
     private async Task<string?> DeleteBranchesRefusalAsync(AgentAction action, CancellationToken ct)
     {
-        var repo = action.RepoPath;
+        var repo = action.RepoPath!;
         var worktrees = await WorktreesAsync(repo, ct).ConfigureAwait(false);
         var defaults = await DefaultBranchesAsync(repo, ct).ConfigureAwait(false);
 
@@ -116,7 +122,7 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return "The worktree path is not a plain absolute path.";
         }
 
-        var worktrees = await WorktreesAsync(action.RepoPath, ct).ConfigureAwait(false);
+        var worktrees = await WorktreesAsync(action.RepoPath!, ct).ConfigureAwait(false);
         var resolved = PathSafety.Resolve(target);
         var index = worktrees.ToList().FindIndex(w => PathSafety.SamePath(PathSafety.Resolve(w.Path), resolved));
         if (index < 0)
@@ -146,19 +152,19 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
 
     private async Task<string?> PushRefusalAsync(AgentAction action, CancellationToken ct)
     {
-        var remotes = RemoteListParser.Parse((await git.RunAsync(action.RepoPath, ["remote", "-v"], Timeout, ct).ConfigureAwait(false)).StdOut);
+        var remotes = RemoteListParser.Parse((await git.RunAsync(action.RepoPath!, ["remote", "-v"], Timeout, ct).ConfigureAwait(false)).StdOut);
         if (!remotes.Any(r => r.Name == action.Remote))
         {
             return $"The repository has no remote named {action.Remote}.";
         }
 
-        return await BranchRefusalAsync(action.RepoPath, action.Branch!, ct).ConfigureAwait(false);
+        return await BranchRefusalAsync(action.RepoPath!, action.Branch!, ct).ConfigureAwait(false);
     }
 
     private async Task<string?> DropStashRefusalAsync(AgentAction action, CancellationToken ct)
     {
         var selector = $"stash@{{{action.StashIndex}}}";
-        var current = await git.RunAsync(action.RepoPath, ["rev-parse", "--verify", "--quiet", selector], Timeout, ct).ConfigureAwait(false);
+        var current = await git.RunAsync(action.RepoPath!, ["rev-parse", "--verify", "--quiet", selector], Timeout, ct).ConfigureAwait(false);
         var sha = current.StdOut.Trim();
         if (!current.Ok || sha.Length == 0)
         {

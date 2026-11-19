@@ -5,6 +5,7 @@ using DevDash.Agent.Git;
 using DevDash.Agent.Logging;
 using DevDash.Agent.Scanning;
 using DevDash.Agent.Service;
+using DevDash.Agent.Updates;
 using DevDash.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,7 +19,19 @@ if (await ServiceCli.TryRunAsync(args) is { } serviceExitCode)
     return serviceExitCode;
 }
 
+// Internal helpers, also host-free: the Windows restart helper, and the release workflow's signature check.
+if (args.Length > 0 && args[0] == WindowsRelaunch.Command)
+{
+    return await WindowsRelaunch.RunAsync(args, CancellationToken.None);
+}
+
+if (args.Length > 0 && args[0] == ReleaseCheck.Command)
+{
+    return ReleaseCheck.Run(args[1..], ReleaseSigning.Embedded, Console.Out, Console.Error);
+}
+
 // `run --service` (what the installed service runs) logs to a rolling file instead of the console.
+var runningAsService = args.Contains("--service");
 var logDirectory = ServiceCli.TakeLogDirectory(ref args);
 
 var cli = AgentCli.Parse(args);
@@ -73,14 +86,45 @@ builder.Services.AddSingleton<SizeCache>(_ => new SizeCache());
 builder.Services.AddSingleton<MachineScanner>();
 builder.Services.AddHttpClient<HubClient>(c => c.Timeout = TimeSpan.FromSeconds(60));
 
+var updateContext = UpdateContext.ForCurrentProcess();
 if (cli.Command == "run")
 {
-    builder.Services.AddAgentActions(); // does nothing unless Agent:Actions:Enabled
+    // First thing, before the rest of the agent is built: if this is a new version that has already
+    // had its chances to reach the hub, put the previous one back and let the service manager start it.
+    UpdateOptions updateOptions;
+    try
+    {
+        updateOptions = builder.Configuration.GetSection($"{AgentOptions.SectionName}:Updates").Get<UpdateOptions>() ?? new UpdateOptions();
+    }
+    catch (InvalidOperationException)
+    {
+        updateOptions = new UpdateOptions();
+    }
+
+    var guard = UpdateServices.GuardFor(updateContext, updateOptions);
+    if (guard?.OnStart() == GuardStart.RolledBack)
+    {
+        Console.Error.WriteLine(guard.State.Last?.Detail ?? "Rolled back to the previous version.");
+        if (runningAsService)
+        {
+            WindowsRelaunch.Start(updateContext.Installation);
+        }
+
+        return RestartSignal.ExitCode;
+    }
+
+    builder.Services.AddAgentUpdates(updateContext, guard, runningAsService);
+    builder.Services.AddAgentActions(); // polls only if Agent:Actions:Enabled, or updates are notify/auto
     builder.Services.AddHostedService<AgentWorker>();
-    await builder.Build().RunAsync();
-    return 0;
+    var runHost = builder.Build();
+    var restart = runHost.Services.GetRequiredService<RestartSignal>();
+    await runHost.RunAsync();
+
+    // Non-zero after an update or a roll back, so every service manager treats it as "start me again".
+    return restart.Requested ? RestartSignal.ExitCode : 0;
 }
 
+builder.Services.AddUpdater(updateContext);
 using var host = builder.Build();
 var options = host.Services.GetRequiredService<IOptions<AgentOptions>>().Value;
 var scanner = host.Services.GetRequiredService<MachineScanner>();
@@ -109,6 +153,11 @@ switch (cli.Command)
         {
             var response = await hub.PushAsync(snapshot, cts.Token);
             Console.Error.WriteLine($"Pushed {response.Entries} entries for {response.MachineId} to {options.HubUrl} (scan took {snapshot.ScanDurationMs} ms).");
+            if (UpdateServices.GuardFor(updateContext, options.Updates)?.Confirm() is { } confirmed)
+            {
+                Console.Error.WriteLine($"Update confirmed: {confirmed.ToVersion} has reported to the hub (was {confirmed.FromVersion}).");
+            }
+
             return 0;
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
@@ -127,6 +176,13 @@ switch (cli.Command)
         Console.Out.WriteLine($"scan       every {options.ScanIntervalMinutes} min, sizes every {options.SizeScanIntervalHours} h, watch {(options.Watch ? "on" : "off")}");
         Console.Out.WriteLine($"auto-fetch {(options.AutoFetch.Enabled ? $"every {options.AutoFetch.IntervalHours} h" : "off")}");
         Console.Out.WriteLine($"actions    {(options.Actions.Enabled ? "on (allowlisted fixes queued from the dashboard)" : "off (report only)")}");
+        Console.Out.WriteLine($"updates    {UpdateCli.DescribeMode(options.Updates, updateContext)}");
+        Console.Out.WriteLine($"release key {updateContext.Trust.Describe()}");
+        if (UpdateCli.DescribeState(updateContext) is { } updateState)
+        {
+            Console.Out.WriteLine($"last update {updateState}");
+        }
+
         Console.Out.WriteLine($"hub        {options.HubUrl} ({(await hub.PingAsync(cts.Token) ? "reachable" : "unreachable")})");
         string keyState;
         try
@@ -142,6 +198,9 @@ switch (cli.Command)
         Console.Out.WriteLine($"service    {await ServiceCli.DescribeStateAsync(cts.Token)}");
         return 0;
     }
+
+    case "update":
+        return await UpdateCli.RunAsync(cli, host.Services.GetRequiredService<AgentUpdater>(), updateContext, Console.Out, Console.Error, cts.Token);
 
     default:
         Console.Error.WriteLine(AgentCli.Usage);

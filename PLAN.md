@@ -147,6 +147,8 @@ Uses structured outputs for (1) and (3). The API key comes from a hub secret (`A
 - Secrets (GitHub PAT, Anthropic key, TS auth key) live in Docker secrets or a `.env` that isn't committed.
 - By default the agent never modifies working trees or branches. Its only write is `git fetch --prune`, which updates remote-tracking refs.
   Agent actions (phase 6) are a per-machine opt-in with their own rules; see §11.
+- An agent only installs a release whose `checksums.txt` is signed by the release key compiled into it (§12). The hub can ask for a
+  version; it can never supply a binary or a URL.
 
 ## 9. Build phases
 
@@ -158,6 +160,7 @@ Uses structured outputs for (1) and (3). The API key comes from a hub secret (`A
 | 4 | Dockerfile, compose + Tailscale sidecar, identity-header auth, agent API keys, installers for macOS / Windows / Linux | Hub on the tailnet; agents from 2+ machines reporting |
 | 5 | Claude descriptions, daily brief, finding explanations | One-liners filled for repos without descriptions |
 | 6 (built) | Agent actions: allowlisted fixes queued from the dashboard, run by the machine's agent (polling, not SignalR; see §11) | Allowlisted, confirmed, audited |
+| 7 (built) | Agent self-update from signed releases: by hand, from the dashboard, or automatic; rolls back by itself (see §12) | An agent moves to a new release and back without anyone touching the machine |
 
 ## 10. Decisions made (2026-11-17)
 
@@ -198,3 +201,50 @@ Polling keeps the "hub never dials agents" rule from §1; SignalR was not needed
 **Schema.** The hub still uses `EnsureCreated`. `SchemaUpgrade.CreateMissingTablesAsync` runs after it on every start and creates any table
 or index the model has and the database lacks, from EF's own create script, so existing databases gain `AgentActions` without a reset.
 It does not add columns to existing tables.
+
+## 12. Agent self-update (phase 7, built 2026-11-18)
+
+**One updater, three triggers.** `AgentUpdater` (`src/DevDash.Agent/Updates`) is used by `devdash-agent update`, by the dashboard's Update
+button, and by auto mode. It resolves a version, downloads `checksums.txt`, `checksums.txt.sig`, `version.txt` and the platform archive from
+`github.com/<repo>/releases/download/v<version>/` (or `latest/download/`), verifies, unpacks beside the installed program, test-runs the new
+program (`--version` must print the expected version), swaps, and asks to be restarted.
+
+**Trust.** The release workflow signs `checksums.txt` with ECDSA P-256 / SHA-256; the private key is the `DEVDASH_RELEASE_SIGNING_KEY`
+secret and the public key is a constant in `ReleaseSigning.cs` (and in both install scripts; `scripts/release-signing-key.sh` keeps the
+three in step). `version.txt` is listed in `checksums.txt`, so the version a set of files claims is signed too: a genuine older release
+cannot be passed off under a newer version's address. The agent refuses a downgrade, an unsigned release, and anything that does not match
+its checksum. The only way to change the trusted key is to compile a different one in (`-p:DevDashUpdatePublicKeyFile`, used by the CI
+update test); there is no runtime setting, and `devdash-agent verify-release`, run by the release workflow with the binaries it just built,
+rejects a binary built that way and a signature that does not match the source.
+
+**Trigger from the hub.** A new typed action, `AgentActionKind.UpdateAgent { Version }` (strict semver, no repository path), travels through
+the existing queue and claim endpoint, so it is confirmed in a dialog and audited like any other action. It is gated separately from git
+actions, on both sides: the agent accepts it when its own `Agent:Updates:Mode` is `notify` (default) or `auto`, whatever `Actions:Enabled`
+says, and runs git actions only when `Actions:Enabled`, whatever the update mode says. The agent polls the claim endpoint when either is
+on; the hub hands out only the kinds the machine's last snapshot said it accepts (`MachineInfo.ActionsEnabled`, `MachineInfo.UpdateMode`),
+and the executor checks the local switch for the action's own kind again. The hub only ever asks for the release it currently sees as
+latest (`ReleasePoller`, hourly, unauthenticated if need be), and only for a machine that is behind it.
+
+**Swap and restart.** macOS and Linux: copy the current file to `.old`, rename the new one over it (atomic). Windows: rename both
+`devdash-agent.exe` and `devdash-agentw.exe` to `.old`, move the new pair in; a failure part way puts every file back. The agent then
+exits with code 75 and the service manager starts the new program: launchd `KeepAlive`, systemd `Restart=always`, and on Windows a
+detached `relaunch-service` helper that waits for the old process and runs the scheduled task (with the task's restart-on-failure as a
+second line). Exiting was chosen over asking the service manager to restart the service from inside it because the agent then shuts down
+in its own time, after the action's result is reported, and the manager does only what it already does after a crash.
+
+**Roll back.** `UpdateGuard` keeps `devdash-agent.update.json` beside the program: the pending update (from, to, start count, the files and
+their `.old`), the last outcome, and the last version that failed. At the very start of `run`, a pending version counts the start; the
+first snapshot the hub accepts confirms it and deletes `.old`. More than 3 starts without that, or 5 minutes running without it, and the
+new version restores `.old` (Windows: the running program is moved aside as `.bad`), exits, and the restored version reports the roll back
+in `MachineInfo.LastUpdate`. While pending, the first scan skips fetching and sizes so the confirming snapshot lands quickly. Limits: the
+decision is made by the new program, so one that cannot even start is caught only by the test-run before the swap; and a roll back because
+the hub was down is harmless but real, which is why auto mode installs only when the hub answers and waits a day before retrying a version.
+
+**Compatibility.** No snapshot format change: `UpdateMode` and `LastUpdate` are optional fields, so `SnapshotSchema.Version` stays 1 and a
+0.1.0 hub accepts a newer agent. The hub accepts `MinSupportedVersion..Version`, the rule being that a breaking change raises `Version` and
+the minimum follows one release later. A 0.1.0 agent sends no `UpdateMode`: the hub reads that as "cannot self-update", offers no button
+and never hands it an `UpdateAgent` action. Those machines need one reinstall.
+
+**Tests.** Unit tests cover signature and checksum verification (good, changed asset, changed checksums, other key, no signature, replay),
+version ordering, swap planning for both platforms, the confirm/roll back state machine with a fake clock, and the two-switch policy on
+both sides. `scripts/test-ota.sh` does it for real with two published builds, in CI on Linux, macOS and Windows.

@@ -3,6 +3,10 @@
 @inject SnapshotStore Snapshots
 @inject ApiKeyService Keys
 @inject ActionQueue Actions
+@inject AgentUpdates Updates
+@inject ReleaseStore Releases
+@inject ReleasePoller ReleaseChecks
+@inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider Auth
 
 <PageTitle>Machines · DevDash</PageTitle>
 
@@ -11,7 +15,45 @@
         <h1>Machines</h1>
         <p>Agents that report to this hub, and the API keys they use.</p>
     </div>
+    <div class="toolbar">
+        @if (Releases.Current is { } latest)
+        {
+            <span class="muted small" title="@(Releases.Status.LastCheckedAt is { } at ? $"Checked {Fmt.Date(at)}" : "")">
+                Latest agent release
+                @if (latest.Url is not null)
+                {
+                    <a href="@latest.Url" target="_blank" rel="noopener" class="mono">@latest.Version</a>
+                }
+                else
+                {
+                    <span class="mono">@latest.Version</span>
+                }
+                @if (!latest.Signed)
+                {
+                    <span class="chip muted gap" title="This release has no checksums.txt.sig. Agents only install signed releases, so it cannot be installed from here.">not signed</span>
+                }
+                · checked @Fmt.Ago(Releases.Status.LastCheckedAt, Now)
+            </span>
+        }
+        else if (Releases.Status.Enabled)
+        {
+            <span class="muted small">@(Releases.Status.LastError is null ? "No agent release found yet." : "Latest agent release unknown.")</span>
+        }
+        @if (Releases.Status.Enabled)
+        {
+            <button type="button" title="Ask GitHub for the latest release now" @onclick="ReleaseChecks.RequestPoll">Check now</button>
+        }
+        @if (_updatable.Count > 1)
+        {
+            <button type="button" class="primary" title="Queue the update for every machine that is behind and accepts updates. You confirm first." @onclick="() => AskAsync(_updatable)">Update all (@_updatable.Count)</button>
+        }
+    </div>
 </div>
+
+@if (Releases.Status is { Enabled: true, LastError: { } releaseError })
+{
+    <div class="banner warn">Could not check for a new agent release: @releaseError</div>
+}
 
 @if (_machines.Count == 0)
 {
@@ -41,7 +83,61 @@ else
                                 <div class="sub mono">@machine.Machine.TailscaleName</div>
                             }
                         </td>
-                        <td class="mono">@machine.Machine.AgentVersion</td>
+                        <td>
+                            @{
+                                var update = Updates.For(machine);
+                                var updating = _pendingUpdates.GetValueOrDefault(machine.MachineId);
+                            }
+                            <span class="mono">@machine.Machine.AgentVersion</span>
+                            @if (update.State == AgentUpdateState.UpToDate)
+                            {
+                                <span class="chip ok gap" title="This is the latest release.">up to date</span>
+                            }
+                            else if (update.Behind)
+                            {
+                                <span class="chip warn gap" title="@(update.WhyNot ?? $"Release {update.Latest} is newer than this agent.")">Update available: @update.Latest</span>
+                            }
+                            <div class="sub">
+                                @switch (AgentUpdateModes.Normalize(machine.Machine.UpdateMode))
+                                {
+                                    case AgentUpdateModes.Auto:
+                                        <span title="This agent installs new releases itself, and accepts an update queued from here.">updates: auto</span>
+                                        break;
+                                    case AgentUpdateModes.Notify:
+                                        <span title="This agent updates when asked from here, never on its own.">updates: on request</span>
+                                        break;
+                                    case AgentUpdateModes.Off:
+                                        <span title="This agent refuses updates from the dashboard (Agent:Updates:Mode is off, or it is not an installed release).">updates: off</span>
+                                        break;
+                                    default:
+                                        <span title="This agent predates self-update. Reinstall it once with the install one-liner.">updates: not supported by this version</span>
+                                        break;
+                                }
+                            </div>
+                            @if (updating is not null)
+                            {
+                                <div><span class="chip info" title="Queued by @updating.QueuedBy at @Fmt.Date(updating.QueuedAt)">@(updating.Status == AgentActionStatus.Claimed ? "updating" : "update queued")</span></div>
+                            }
+                            else if (update.CanUpdate)
+                            {
+                                <div><button type="button" class="run" title="Ask this machine's agent to install @update.Latest. You confirm first." @onclick="() => AskAsync([machine])">Update</button></div>
+                            }
+                            else if (update is { Behind: true, WhyNot: { } whyNot })
+                            {
+                                <div class="sub">@whyNot</div>
+                            }
+                            @if (machine.Machine.LastUpdate is { } last && last.Outcome != AgentUpdateOutcomes.Succeeded)
+                            {
+                                <div>
+                                    <span class="chip danger" title="@Fmt.Date(last.At)">@(last.Outcome == AgentUpdateOutcomes.RolledBack ? $"rolled back from {last.ToVersion} to {last.FromVersion}" : $"update to {last.ToVersion} failed")</span>
+                                    <div class="sub">@last.Detail</div>
+                                </div>
+                            }
+                            else if (machine.Machine.LastUpdate is { } good)
+                            {
+                                <div class="sub" title="@Fmt.Date(good.At)">updated from @good.FromVersion @Fmt.Ago(good.At, Now)</div>
+                            }
+                        </td>
                         <td>
                             @machine.Snapshot.Entries.Count entries in @machine.Snapshot.ScanDurationMs ms
                             <div class="sub">scanned @Fmt.Ago(machine.Snapshot.ScannedAt, Now)</div>
@@ -71,10 +167,43 @@ else
     </div>
 }
 
+@if (_asking.Count > 0 && Releases.Current is { } target)
+{
+    <div class="modal-backdrop" @onclick="Cancel">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="update-agents" @onclick:stopPropagation="true">
+            <h3 id="update-agents">Update @(_asking.Count == 1 ? $"the agent on {_asking[0].Machine.Hostname}" : $"{_asking.Count} agents") to @target.Version?</h3>
+            <dl class="kv">
+                @foreach (var machine in _asking)
+                {
+                    <dt>@machine.Machine.Hostname</dt>
+                    <dd><span class="mono">@machine.Machine.AgentVersion → @target.Version</span> <span class="muted mono">@machine.MachineId</span></dd>
+                }
+            </dl>
+            <p>Each agent is asked to run exactly this, and nothing else:</p>
+            <div class="command"><code>@AgentActions.CommandLine(AgentAction.UpdateAgent(target.Version))</code></div>
+            <p>
+                The hub sends only the version number. The agent downloads the release from GitHub itself, checks its signature against the key it was built with
+                and its checksum, runs the new program once to see that it starts, then swaps it in and restarts. If the new version has not reported back here
+                within a few minutes, the agent puts the previous one back and says so on this page.
+            </p>
+            <p>It is recorded as queued by <strong>@_login</strong>. An agent that has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes never runs it.</p>
+            @if (_error is not null)
+            {
+                <div class="banner danger">@_error</div>
+            }
+            <div class="modal-actions">
+                <button type="button" @onclick="Cancel">Cancel</button>
+                <button type="button" class="primary" disabled="@_busy" @onclick="ConfirmAsync">Update @(_asking.Count == 1 ? _asking[0].Machine.Hostname : $"{_asking.Count} agents")</button>
+            </div>
+        </div>
+    </div>
+}
+
 <h2>Agent actions</h2>
 <p class="muted small" style="margin-top:-4px">
     Fixes queued from the dashboard for a machine's own agent to run. Off unless that machine's agent was started with
     <code>--enable-actions</code>. Only a fixed list of safe git operations exists, each one is confirmed first, and the agent checks it again before running.
+    Agent updates are listed here too; they follow each machine's own update setting, not <code>--enable-actions</code>.
 </p>
 <div class="table-wrap">
     <table>
@@ -190,6 +319,14 @@ else
 </div>
 
 @code {
+    [Inject] private IOptionsMonitor<HubOptions> Options { get; set; } = default!;
+
+    private IReadOnlyList<MachineView> _updatable = [];
+    private IReadOnlyDictionary<string, AgentActionEntity> _pendingUpdates = new Dictionary<string, AgentActionEntity>();
+    private IReadOnlyList<MachineView> _asking = [];
+    private string _login = "";
+    private string? _error;
+    private bool _busy;
     private IReadOnlyList<MachineView> _machines = [];
     private IReadOnlyList<ApiKeyEntity> _keys = [];
     private IReadOnlyList<AgentActionEntity> _actions = [];
@@ -201,6 +338,60 @@ else
         _machines = Snapshots.Machines;
         _keys = await Keys.ListAsync();
         _actions = await Actions.RecentAsync(30);
+        _pendingUpdates = await Updates.PendingAsync();
+        _updatable = Updates.Updatable().Where(m => !_pendingUpdates.ContainsKey(m.MachineId)).ToList();
+    }
+
+    private async Task AskAsync(IReadOnlyList<MachineView> machines)
+    {
+        var user = (await Auth.GetAuthenticationStateAsync()).User;
+        _login = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+        _error = null;
+        _asking = machines;
+    }
+
+    private void Cancel()
+    {
+        _asking = [];
+        _error = null;
+    }
+
+    // Queues one typed UpdateAgent action per machine. It names the latest release's version; nothing else is sent.
+    private async Task ConfirmAsync()
+    {
+        if (_busy || _asking.Count == 0)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var errors = new List<string>();
+            foreach (var machine in _asking)
+            {
+                var outcome = await Updates.QueueAsync(machine.MachineId, _login);
+                if (!outcome.Ok)
+                {
+                    errors.Add($"{machine.Machine.Hostname}: {outcome.Error}");
+                }
+            }
+
+            if (errors.Count == 0)
+            {
+                _asking = [];
+            }
+            else
+            {
+                _error = string.Join(" ", errors);
+            }
+
+            await LoadAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
     }
 
     private static string ActionClass(AgentActionStatus status) => status switch

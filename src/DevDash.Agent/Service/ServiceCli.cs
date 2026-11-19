@@ -26,6 +26,8 @@ public sealed class ServiceCli(ServiceEnvironment environment, IServiceManager m
           --no-fetch            Do not run `git fetch --prune --quiet`
           --no-watch            Do not watch for file changes between scans
           --enable-actions      Allow actions requested from the hub (writes Agent:Actions:Enabled)
+          --updates <mode>      off | notify | auto (writes Agent:Updates:Mode; default notify: update when
+                                asked from the dashboard, never unprompted)
           --set <Key=Value>     Any other Agent setting, e.g. --set ScanIntervalMinutes=30; repeatable
           --dry-run             Print the files and commands install would use; change nothing
           --no-start            Write the files but do not register or start the service

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using DevDash.Agent.Git;
+using DevDash.Agent.Updates;
 using DevDash.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -9,6 +10,9 @@ namespace DevDash.Agent.Actions;
 /// <summary>What happened to one action, and which folders to rescan because of it.</summary>
 public sealed record ActionOutcome(bool Succeeded, int? ExitCode, string Output, IReadOnlyList<string> AffectedPaths, long DurationMs)
 {
+    /// <summary>True when the agent replaced its own program files and must restart once the result is reported.</summary>
+    public bool RestartRequired { get; init; }
+
     /// <summary>True when the agent declined before running anything that changes the repository.</summary>
     public bool Refused => ExitCode is null;
 
@@ -20,26 +24,70 @@ public sealed record ActionOutcome(bool Succeeded, int? ExitCode, string Output,
 /// <see cref="AgentActions.GitArgs"/>: there is no path by which text from the hub becomes a command.
 /// Git is started through <see cref="GitRunner"/>, so arguments go as a list (no shell), credential
 /// prompts are off and every call has a timeout.
+/// <para>
+/// Two separate switches, both local to this machine: git actions need <c>Agent:Actions:Enabled</c>;
+/// <see cref="AgentActionKind.UpdateAgent"/> needs <c>Agent:Updates:Mode</c> to be notify or auto.
+/// Neither turns the other on.
+/// </para>
 /// </summary>
-public sealed class ActionExecutor(GitRunner git, ActionValidator validator, IOptionsMonitor<AgentOptions> options, ILogger<ActionExecutor> logger)
+public sealed class ActionExecutor(
+    GitRunner git,
+    ActionValidator validator,
+    IOptionsMonitor<AgentOptions> options,
+    ILogger<ActionExecutor> logger,
+    AgentGate? gate = null,
+    AgentUpdater? updater = null)
 {
     /// <summary>No background maintenance and no fsmonitor daemon as a side effect of an action.</summary>
     private static readonly string[] Prefix = ["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
 
-    private readonly SemaphoreSlim _oneAtATime = new(1, 1);
+    // Shared with auto-update, so an update never starts while an action is running, and the reverse.
+    private readonly AgentGate _gate = gate ?? new AgentGate();
 
     public async Task<ActionOutcome> ExecuteAsync(AgentAction? action, CancellationToken ct)
     {
         var stopwatch = Stopwatch.StartNew();
         ActionOutcome Refuse(string why) => new(false, null, "Refused: " + why, [], stopwatch.ElapsedMilliseconds);
 
-        // Checked here as well as in the worker, so nothing can run actions on a machine that has not opted in.
+        if (action is { Kind: AgentActionKind.UpdateAgent })
+        {
+            // Not a git action: allowed by this machine's update mode, whatever Actions:Enabled says.
+            if (!options.CurrentValue.Updates.AcceptsRequests)
+            {
+                return Refuse("updates are switched off on this machine (Agent:Updates:Mode is off).");
+            }
+
+            if (AgentActions.Validate(action) is { } shape)
+            {
+                return Refuse(shape);
+            }
+
+            if (updater is null)
+            {
+                return Refuse("this agent cannot update itself.");
+            }
+
+            using (await _gate.EnterAsync(ct).ConfigureAwait(false))
+            {
+                var update = await updater.RunAsync(new UpdateRequest(action.Version), ct).ConfigureAwait(false);
+                logger.LogInformation("Update to {Version} requested from the dashboard: {Status}: {Message}", action.Version, update.Status, update.Message);
+                return update.Status switch
+                {
+                    UpdateStatus.Installed => new ActionOutcome(true, 0, AgentActions.Truncate(update.Message + " Restarting now."), [], stopwatch.ElapsedMilliseconds) { RestartRequired = true },
+                    UpdateStatus.UpToDate => new ActionOutcome(true, 0, update.Message, [], stopwatch.ElapsedMilliseconds),
+                    UpdateStatus.Refused => Refuse(update.Message),
+                    _ => new ActionOutcome(false, 1, AgentActions.Truncate(update.Message), [], stopwatch.ElapsedMilliseconds),
+                };
+            }
+        }
+
+        // Checked here as well as in the worker, so nothing can run git actions on a machine that has not opted in.
         if (!options.CurrentValue.Actions.Enabled)
         {
             return Refuse("agent actions are not enabled on this machine.");
         }
 
-        await _oneAtATime.WaitAsync(ct).ConfigureAwait(false);
+        var held = await _gate.EnterAsync(ct).ConfigureAwait(false);
         try
         {
             if (await validator.RefusalAsync(action, ct).ConfigureAwait(false) is { } refusal)
@@ -51,7 +99,7 @@ public sealed class ActionExecutor(GitRunner git, ActionValidator validator, IOp
             var current = options.CurrentValue;
             var local = TimeSpan.FromSeconds(current.GitTimeoutSeconds);
             var network = TimeSpan.FromSeconds(Math.Max(10, current.Actions.NetworkTimeoutSeconds));
-            var repo = action!.RepoPath;
+            var repo = action!.RepoPath!;
 
             if (action.Kind == AgentActionKind.Push && await BehindRefusalAsync(action, local, network, ct).ConfigureAwait(false) is { } behind)
             {
@@ -77,7 +125,7 @@ public sealed class ActionExecutor(GitRunner git, ActionValidator validator, IOp
         }
         finally
         {
-            _oneAtATime.Release();
+            held.Dispose();
         }
     }
 
@@ -88,7 +136,7 @@ public sealed class ActionExecutor(GitRunner git, ActionValidator validator, IOp
     /// </summary>
     private async Task<string?> BehindRefusalAsync(AgentAction action, TimeSpan local, TimeSpan network, CancellationToken ct)
     {
-        var repo = action.RepoPath;
+        var repo = action.RepoPath!;
         var fetch = await git.ExecuteAsync(repo, [.. Prefix, "fetch", "--prune", "--quiet", "--", action.Remote!], network, ct).ConfigureAwait(false);
         if (!fetch.Ok)
         {

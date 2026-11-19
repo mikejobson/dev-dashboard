@@ -7,6 +7,11 @@ namespace DevDash.Contracts;
 /// The complete list of things the hub may ask an agent to do. There is deliberately no "run this
 /// command" kind: an agent builds the git arguments itself from these typed fields, and nothing here
 /// can discard work (no force, no <c>-D</c>, no reset, no rebase, no pull).
+/// <para>
+/// Every kind but <see cref="UpdateAgent"/> is a git action on one repository, and only runs on a
+/// machine that turned on <c>Agent:Actions:Enabled</c>. <see cref="UpdateAgent"/> touches no repository
+/// and is gated by the machine's own <c>Agent:Updates:Mode</c> instead.
+/// </para>
 /// </summary>
 public enum AgentActionKind
 {
@@ -27,15 +32,28 @@ public enum AgentActionKind
 
     /// <summary><c>git stash drop</c> of one stash, after checking it is still the stash that was shown.</summary>
     DropStash,
+
+    /// <summary>
+    /// Replace the agent with a named release. The action carries a version and nothing else: the
+    /// agent downloads that release from GitHub itself and checks its signature against the public
+    /// key it was built with, so the hub can never supply a binary or a URL.
+    /// </summary>
+    UpdateAgent,
 }
 
-/// <summary>One allowlisted action on one repository. Fields that a kind does not use must be null.</summary>
+/// <summary>One allowlisted action. Fields that a kind does not use must be null.</summary>
 public sealed record AgentAction
 {
     public required AgentActionKind Kind { get; init; }
 
-    /// <summary>Absolute path of the working tree to run in, as the agent reported it.</summary>
-    public required string RepoPath { get; init; }
+    /// <summary>
+    /// Git actions: absolute path of the working tree to run in, as the agent reported it.
+    /// Null for <see cref="AgentActionKind.UpdateAgent"/>, which is not about a repository.
+    /// </summary>
+    public string? RepoPath { get; init; }
+
+    /// <summary><see cref="AgentActionKind.UpdateAgent"/>: the release to install, a strict <see cref="SemVer"/> such as <c>0.2.0</c>.</summary>
+    public string? Version { get; init; }
 
     /// <summary><see cref="AgentActionKind.DeleteBranches"/>: local branch names.</summary>
     public IReadOnlyList<string>? Branches { get; init; }
@@ -75,6 +93,9 @@ public sealed record AgentAction
 
     public static AgentAction DropStash(string repoPath, int index, string expectedSha) =>
         new() { Kind = AgentActionKind.DropStash, RepoPath = repoPath, StashIndex = index, ExpectedSha = expectedSha };
+
+    public static AgentAction UpdateAgent(string version) =>
+        new() { Kind = AgentActionKind.UpdateAgent, Version = version };
 }
 
 /// <summary>
@@ -93,6 +114,9 @@ public static partial class AgentActions
 
     [GeneratedRegex(@"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")]
     private static partial Regex Sha();
+
+    /// <summary>True for the kinds that run git in a repository; false for <see cref="AgentActionKind.UpdateAgent"/>.</summary>
+    public static bool IsRepoAction(AgentActionKind kind) => kind != AgentActionKind.UpdateAgent;
 
     /// <summary>POSIX single-quote escaping.</summary>
     public static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
@@ -117,13 +141,21 @@ public static partial class AgentActions
             return "Unknown action kind.";
         }
 
-        if (PathProblem(action.RepoPath, "Repository path") is { } repoProblem)
+        var kind = action.Kind;
+        if (IsRepoAction(kind))
         {
-            return repoProblem;
+            if (PathProblem(action.RepoPath, "Repository path") is { } repoProblem)
+            {
+                return repoProblem;
+            }
+        }
+        else if (action.RepoPath is not null)
+        {
+            return $"A {kind} action does not take a repository path.";
         }
 
-        var kind = action.Kind;
-        if ((action.Branches is not null) != (kind == AgentActionKind.DeleteBranches)
+        if ((action.Version is not null) != (kind == AgentActionKind.UpdateAgent)
+            || (action.Branches is not null) != (kind == AgentActionKind.DeleteBranches)
             || (action.WorktreePath is not null) != (kind == AgentActionKind.RemoveWorktree)
             || (action.Remote is not null) != (kind == AgentActionKind.Push)
             || (action.Branch is not null) != (kind == AgentActionKind.Push)
@@ -168,12 +200,18 @@ public static partial class AgentActions
 
                 return Sha().IsMatch(action.ExpectedSha!) ? null : "The expected stash commit is not a full sha.";
 
+            case AgentActionKind.UpdateAgent:
+                return SemVer.IsValid(action.Version) ? null : "The version is not a strict MAJOR.MINOR.PATCH[-prerelease] version.";
+
             default:
                 return null;
         }
     }
 
-    /// <summary>The arguments the agent passes to git (as a list, never through a shell), run inside <see cref="AgentAction.RepoPath"/>.</summary>
+    /// <summary>
+    /// The arguments the agent passes to git (as a list, never through a shell), run inside <see cref="AgentAction.RepoPath"/>.
+    /// Throws for <see cref="AgentActionKind.UpdateAgent"/>, which is not a git command.
+    /// </summary>
     public static IReadOnlyList<string> GitArgs(AgentAction action)
     {
         var (verb, values) = Parts(action);
@@ -183,8 +221,13 @@ public static partial class AgentActions
     /// <summary>The same command as something a person could paste into a terminal.</summary>
     public static string CommandLine(AgentAction action)
     {
+        if (action.Kind == AgentActionKind.UpdateAgent)
+        {
+            return $"devdash-agent update --version {action.Version}";
+        }
+
         var (verb, values) = Parts(action);
-        return string.Join(' ', ["git", "-C", ShellQuote(action.RepoPath), .. verb, .. values.Select(ShellQuote)]);
+        return string.Join(' ', ["git", "-C", ShellQuote(action.RepoPath ?? ""), .. verb, .. values.Select(ShellQuote)]);
     }
 
     /// <summary>One line on what stops this action from losing work, for the confirmation dialog.</summary>
@@ -196,6 +239,7 @@ public static partial class AgentActions
         AgentActionKind.Fetch => "Only updates remote-tracking refs. Branches and working trees are untouched.",
         AgentActionKind.Push => "Never forced. The agent fetches first and refuses if the branch is behind the remote.",
         AgentActionKind.DropStash => "The stash is deleted for good. The agent first checks it is still the stash shown here, and refuses if not.",
+        AgentActionKind.UpdateAgent => "The agent downloads the release from GitHub itself, checks its signature and checksum, and goes back to the previous version if the new one does not report in.",
         _ => "",
     };
 
@@ -208,6 +252,7 @@ public static partial class AgentActions
         AgentActionKind.Fetch => "Fetch",
         AgentActionKind.Push => $"Push {action.Branch} to {action.Remote}",
         AgentActionKind.DropStash => $"Drop stash@{{{action.StashIndex}}}",
+        AgentActionKind.UpdateAgent => $"Update the agent to {action.Version}",
         _ => action.Kind.ToString(),
     };
 
@@ -285,7 +330,7 @@ public sealed record ActionResultRequest
 {
     public bool Succeeded { get; init; }
 
-    /// <summary>Git's exit code, or null when the agent refused before running anything.</summary>
+    /// <summary>Git's exit code (0 or 1 for an agent update), or null when the agent refused before running anything.</summary>
     public int? ExitCode { get; init; }
 
     /// <summary>Git's output or the reason for refusing, truncated to <see cref="AgentActions.MaxOutputChars"/>.</summary>

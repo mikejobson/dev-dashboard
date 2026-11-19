@@ -4,6 +4,7 @@
 @inject RepoCatalog Catalog
 @inject GitHubStore GitHub
 @inject FindingsService Findings
+@inject AgentUpdates Updates
 
 <PageTitle>Overview · DevDash</PageTitle>
 
@@ -19,6 +20,14 @@
     <div class="banner info">
         No machine has reported yet. Start an agent with
         <code>dotnet run --project src/DevDash.Agent -- scan --api-key-file "$PWD/src/DevDash.Hub/devdash-data/dev-agent-key.txt"</code>.
+    </div>
+}
+
+@if (_behind > 0 && Updates.Latest is { } latestRelease)
+{
+    <div class="banner info">
+        @(_behind == 1 ? "One agent is" : $"{_behind} agents are") behind the latest release (@latestRelease.Version).
+        <a href="machines">Update on the Machines page →</a>
     </div>
 }
 
@@ -162,11 +171,13 @@
     private int _online;
     private int _dirty;
     private int _notCloned;
+    private int _behind;
 
     protected override async Task LoadAsync()
     {
         _machines = Snapshots.Machines;
         _online = _machines.Count(Snapshots.IsOnline);
+        _behind = Updates.BehindCount();
         _repos = await Catalog.GetAsync();
         _dirty = _repos.Count(r => r.AnyDirty);
 

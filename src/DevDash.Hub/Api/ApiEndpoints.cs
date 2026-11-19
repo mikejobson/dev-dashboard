@@ -5,6 +5,7 @@ using DevDash.Hub.Auth;
 using DevDash.Hub.Data;
 using DevDash.Hub.GitHub;
 using DevDash.Hub.Services;
+using DevDash.Hub.Updates;
 
 namespace DevDash.Hub.Api;
 
@@ -27,12 +28,18 @@ public static class ApiEndpoints
         api.MapPost("/actions/{id}/result", CompleteActionAsync).RequireAuthorization(AgentPolicy);
 
         // ---- browser / curl (read-only views of what the pages show) -----------------------------
-        api.MapGet("/machines", (SnapshotStore store) => store.Machines.Select(m => new
+        api.MapGet("/machines", (SnapshotStore store, AgentUpdates updates) => store.Machines.Select(m => new
         {
             m.MachineId,
             m.Machine.Hostname,
             m.Machine.Os,
             m.Machine.AgentVersion,
+            // Null from an agent that predates self-update: it cannot be updated from here.
+            m.Machine.UpdateMode,
+            LatestVersion = updates.For(m).Latest,
+            UpdateAvailable = updates.For(m).Behind,
+            CanUpdate = updates.For(m).CanUpdate,
+            m.Machine.LastUpdate,
             m.Machine.TailscaleName,
             m.FirstSeenAt,
             m.LastSeenAt,
@@ -73,6 +80,9 @@ public static class ApiEndpoints
                     c.Git?.IsLinkedWorktree,
                 }),
             }));
+
+        // The latest agent release the hub has seen on GitHub, and when it last looked.
+        api.MapGet("/releases/latest", (ReleaseStore store) => Results.Json(new { store.Status, Latest = store.Current }, SnapshotSchema.JsonOptions));
 
         api.MapGet("/github", (GitHubStore store) => Results.Json(new { store.Status, Data = store.Current }, SnapshotSchema.JsonOptions));
 
@@ -181,10 +191,11 @@ public static class ApiEndpoints
             return Results.Problem("The machine id is too long.", statusCode: StatusCodes.Status400BadRequest);
         }
 
-        if (snapshot.SchemaVersion != SnapshotSchema.Version)
+        // The current format and the one before it, so agents can be updated one at a time after the hub.
+        if (!SnapshotSchema.IsSupported(snapshot.SchemaVersion))
         {
             return Results.Problem(
-                $"Snapshot schema {snapshot.SchemaVersion} is not supported; this hub speaks schema {SnapshotSchema.Version}. Update the agent or the hub.",
+                $"Snapshot schema {snapshot.SchemaVersion} is not supported; this hub speaks schema {SnapshotSchema.MinSupportedVersion} to {SnapshotSchema.Version}. Update the agent or the hub.",
                 statusCode: StatusCodes.Status400BadRequest);
         }
 

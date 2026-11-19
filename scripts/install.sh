@@ -14,7 +14,23 @@
 #   DEVDASH_REPO         GitHub repository to download from (default: mikejobson/dev-dashboard)
 #   DEVDASH_BASE_URL     download from this URL prefix instead of GitHub Releases (mirrors, testing)
 #   DEVDASH_NO_SERVICE   set to 1 to only download the binary and skip `devdash-agent install`
+#   DEVDASH_ALLOW_UNSIGNED  set to 1 to install a release that has no signature (v0.1.0, from before
+#                        releases were signed). The checksum is still checked.
+#
+# The download is checked twice: its SHA-256 against the release's checksums.txt (always), and
+# checksums.txt against the release signature (when openssl is installed and this script carries the
+# release public key). After this first install the agent can update itself: `devdash-agent update`,
+# or the Update button in the dashboard. `--updates off|notify|auto` sets how (default notify).
 set -eu
+
+# The public half of the key that signs releases. scripts/release-signing-key.sh writes it here and into
+# the agent's source; the three copies must match.
+# devdash-release-public-key:begin
+release_public_key='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXxcXOJGHjR/atn+NdoPztGKT+yXc
+k0aXqWNBvb+qZtPvX3TI9qA4SAugIBET7+aTgkiY5g/1pS+Wq4C1LdERDg==
+-----END PUBLIC KEY-----'
+# devdash-release-public-key:end
 
 repo="${DEVDASH_REPO:-mikejobson/dev-dashboard}"
 version="${DEVDASH_VERSION:-latest}"
@@ -89,6 +105,30 @@ else
 fi
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $asset: expected $expected, got $actual"
 say "Checksum OK"
+
+# The checksum only proves the archive is the one checksums.txt describes. The signature proves
+# checksums.txt itself came out of the release workflow.
+case "$release_public_key" in
+  *PLACEHOLDER*)
+    say "Note: this installer carries no release key yet, so the release signature was not checked."
+    ;;
+  *)
+    if ! command -v openssl >/dev/null 2>&1; then
+      say "Note: openssl was not found, so the release signature was not checked (the checksum was)."
+    elif ! curl -fsSL --proto "$proto" --tlsv1.2 -o "$tmp/checksums.txt.sig" "$base/checksums.txt.sig" 2>/dev/null; then
+      if [ "${DEVDASH_ALLOW_UNSIGNED:-0}" = "1" ]; then
+        say "Warning: this release has no signature; continuing because DEVDASH_ALLOW_UNSIGNED=1."
+      else
+        fail "this release has no signature ($base/checksums.txt.sig). Releases after v0.1.0 are signed; refusing to install. To install an unsigned release anyway, set DEVDASH_ALLOW_UNSIGNED=1."
+      fi
+    else
+      printf '%s\n' "$release_public_key" >"$tmp/release-key.pem"
+      openssl dgst -sha256 -verify "$tmp/release-key.pem" -signature "$tmp/checksums.txt.sig" "$tmp/checksums.txt" >/dev/null 2>&1 \
+        || fail "the signature on checksums.txt is NOT valid for the DevDash release key. Nothing was installed."
+      say "Signature OK"
+    fi
+    ;;
+esac
 
 tar -xzf "$tmp/$asset" -C "$tmp" devdash-agent
 chmod 755 "$tmp/devdash-agent"

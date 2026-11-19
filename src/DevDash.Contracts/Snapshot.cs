@@ -3,10 +3,22 @@ using System.Text.Json.Serialization;
 
 namespace DevDash.Contracts;
 
-/// <summary>Version of the snapshot wire format. Bump on breaking changes.</summary>
+/// <summary>
+/// Version of the snapshot wire format. Bump <see cref="Version"/> only for a breaking change, and
+/// raise <see cref="MinSupportedVersion"/> one release later, so a hub always accepts the agents of
+/// the release before it: agents update one at a time, and one that has not updated yet must not be
+/// locked out. Adding an optional field is not a breaking change: both sides ignore fields they do
+/// not know and treat a missing one as "unknown" (see <see cref="MachineInfo.UpdateMode"/>).
+/// </summary>
 public static class SnapshotSchema
 {
+    /// <summary>What this build writes.</summary>
     public const int Version = 1;
+
+    /// <summary>The oldest format a hub of this build still accepts.</summary>
+    public const int MinSupportedVersion = 1;
+
+    public static bool IsSupported(int version) => version is >= MinSupportedVersion and <= Version;
 
     /// <summary>Serializer options shared by agent and hub.</summary>
     public static JsonSerializerOptions JsonOptions { get; } = Create(indented: false);
@@ -52,6 +64,68 @@ public sealed record MachineInfo
     /// (<c>Agent:Actions:Enabled</c>). Off unless the machine's owner turned it on.
     /// </summary>
     public bool ActionsEnabled { get; init; }
+
+    /// <summary>
+    /// The agent's <c>Agent:Updates:Mode</c>: one of <see cref="AgentUpdateModes"/>. Null from an agent
+    /// that predates self-update (0.1.x): the hub then offers no Update button, and that machine needs
+    /// one reinstall.
+    /// </summary>
+    public string? UpdateMode { get; init; }
+
+    /// <summary>How the agent's most recent self-update went, including a roll back. Null when it has never updated itself.</summary>
+    public AgentUpdateReport? LastUpdate { get; init; }
+}
+
+/// <summary>The values of <c>Agent:Updates:Mode</c>.</summary>
+public static class AgentUpdateModes
+{
+    /// <summary>The agent never updates itself and refuses update actions.</summary>
+    public const string Off = "off";
+
+    /// <summary>The default: the agent updates when asked from the dashboard (or by <c>devdash-agent update</c>), never on its own.</summary>
+    public const string Notify = "notify";
+
+    /// <summary>As <see cref="Notify"/>, and the agent also looks for new releases itself and installs them.</summary>
+    public const string Auto = "auto";
+
+    /// <summary>Lower-cases and checks a configured value. Null when it is not one of the three.</summary>
+    public static string? Normalize(string? mode) => mode?.Trim().ToLowerInvariant() switch
+    {
+        Off => Off,
+        Notify => Notify,
+        Auto => Auto,
+        _ => null,
+    };
+
+    /// <summary>True when an agent reporting this mode accepts an update queued from the dashboard.</summary>
+    public static bool AcceptsRequests(string? mode) => Normalize(mode) is Notify or Auto;
+}
+
+public static class AgentUpdateOutcomes
+{
+    /// <summary>The new version started and reported to the hub.</summary>
+    public const string Succeeded = "succeeded";
+
+    /// <summary>The new version did not report in, so the agent put the previous one back.</summary>
+    public const string RolledBack = "rolledBack";
+
+    /// <summary>The update was abandoned and nothing was left changed.</summary>
+    public const string Failed = "failed";
+}
+
+/// <summary>The outcome of an agent's last self-update, reported in every snapshot until the next one.</summary>
+public sealed record AgentUpdateReport
+{
+    /// <summary>One of <see cref="AgentUpdateOutcomes"/>.</summary>
+    public required string Outcome { get; init; }
+
+    /// <summary>The version the agent was on before the update.</summary>
+    public string FromVersion { get; init; } = "";
+
+    /// <summary>The version it tried to move to.</summary>
+    public string ToVersion { get; init; } = "";
+    public DateTimeOffset At { get; init; }
+    public string? Detail { get; init; }
 }
 
 public enum EntryKind

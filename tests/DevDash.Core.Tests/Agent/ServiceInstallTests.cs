@@ -508,6 +508,7 @@ public sealed class ServiceInstallTests : IDisposable
         public IReadOnlyList<ServiceCommand> UninstallCommands => inner.UninstallCommands;
         public IReadOnlyList<ServiceCommand> StartCommands => inner.StartCommands;
         public IReadOnlyList<ServiceCommand> StopCommands => inner.StopCommands;
+        public IReadOnlyList<ServiceCommand> RestartCommands => inner.RestartCommands;
         public IReadOnlyList<string> Notes => inner.Notes;
         public Task<ServiceState> GetStateAsync(ICommandRunner runner, CancellationToken ct) => inner.GetStateAsync(runner, ct);
     }

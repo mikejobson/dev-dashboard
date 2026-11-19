@@ -3,6 +3,7 @@ using DevDash.Contracts;
 using DevDash.Core;
 using DevDash.Core.Cleanup;
 using DevDash.Hub.Data;
+using DevDash.Hub.Updates;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -21,10 +22,17 @@ public sealed record QueueOutcome(AgentActionEntity? Action, string? Error)
 /// <item>It expires if no agent claims it in time, and is recorded as failed if a claim never reports a result.</item>
 /// </list>
 /// The hub never sends a command line: only the typed <see cref="AgentAction"/>, which the agent validates again.
+/// <para>
+/// Two kinds of action travel through here, each with its own switches. Git actions need
+/// <c>Hub:Actions:Enabled</c> and a machine that reports <c>ActionsEnabled</c>. An agent update
+/// (<see cref="AgentActionKind.UpdateAgent"/>) needs <c>Hub:Updates:Enabled</c> and a machine whose
+/// reported update mode is notify or auto. Neither set of switches affects the other kind.
+/// </para>
 /// </summary>
 public sealed class ActionQueue(
     IDbContextFactory<DevDashDbContext> dbFactory,
     SnapshotStore snapshots,
+    ReleaseStore releases,
     DashboardNotifier notifier,
     IOptionsMonitor<HubOptions> options,
     TimeProvider time,
@@ -36,6 +44,13 @@ public sealed class ActionQueue(
     public static readonly TimeSpan ShownOnFindingFor = TimeSpan.FromMinutes(15);
 
     private HubActionOptions Options => options.CurrentValue.Actions;
+
+    private HubUpdateOptions UpdateOptions => options.CurrentValue.Updates;
+
+    /// <summary>Whether this hub and this machine allow actions of the given kind at all.</summary>
+    private bool Allows(MachineView machine, AgentActionKind kind) => kind == AgentActionKind.UpdateAgent
+        ? UpdateOptions.Enabled && AgentUpdateModes.AcceptsRequests(machine.Machine.UpdateMode)
+        : Options.Enabled && machine.Machine.ActionsEnabled;
 
     /// <summary>
     /// True when Run buttons may be shown for the machine: actions are on at the hub, the machine's own
@@ -53,9 +68,12 @@ public sealed class ActionQueue(
     /// <summary>Queues an action that a browser user has confirmed. Returns the reason when it is refused.</summary>
     public async Task<QueueOutcome> QueueAsync(string machineId, AgentAction action, string queuedBy, Finding? finding = null, CancellationToken ct = default)
     {
-        if (!Options.Enabled)
+        var isUpdate = action is { Kind: AgentActionKind.UpdateAgent };
+        if (isUpdate ? !UpdateOptions.Enabled : !Options.Enabled)
         {
-            return new QueueOutcome(null, "Agent actions are switched off on this hub (Hub:Actions:Enabled).");
+            return new QueueOutcome(null, isUpdate
+                ? "Agent updates are switched off on this hub (Hub:Updates:Enabled)."
+                : "Agent actions are switched off on this hub (Hub:Actions:Enabled).");
         }
 
         if (string.IsNullOrWhiteSpace(queuedBy))
@@ -68,7 +86,14 @@ public sealed class ActionQueue(
             return new QueueOutcome(null, "That machine is not known to this hub.");
         }
 
-        if (!machine.Machine.ActionsEnabled)
+        if (isUpdate && !AgentUpdateModes.AcceptsRequests(machine.Machine.UpdateMode))
+        {
+            return new QueueOutcome(null, machine.Machine.UpdateMode is null
+                ? $"The agent on {machine.Machine.Hostname} predates self-update. Reinstall it once with the install one-liner."
+                : $"{machine.Machine.Hostname} has updates switched off (Agent:Updates:Mode).");
+        }
+
+        if (!isUpdate && !machine.Machine.ActionsEnabled)
         {
             return new QueueOutcome(null, $"{machine.Machine.Hostname} has not enabled agent actions. Start its agent with --enable-actions to allow them.");
         }
@@ -83,8 +108,26 @@ public sealed class ActionQueue(
             return new QueueOutcome(null, problem);
         }
 
+        if (isUpdate)
+        {
+            // The hub only ever asks for the release it currently sees as latest, and only as a step forward.
+            if (releases.Current is not { } latest || latest.Version != action.Version)
+            {
+                return new QueueOutcome(null, $"{action.Version} is not the latest release this hub knows of.");
+            }
+
+            if (!latest.Signed)
+            {
+                return new QueueOutcome(null, $"Release {latest.Version} is not signed, so agents will not install it.");
+            }
+
+            if (SemVer.TryParse(machine.Machine.AgentVersion, out var installed) && SemVer.TryParse(latest.Version, out var target) && installed >= target)
+            {
+                return new QueueOutcome(null, $"{machine.Machine.Hostname} is already on {machine.Machine.AgentVersion}.");
+            }
+        }
         // The agent checks the path against its own scan roots. This catches a stale page earlier.
-        if (!ReportedRepoPaths(machine.Snapshot).Contains(action.RepoPath))
+        else if (!ReportedRepoPaths(machine.Snapshot).Contains(action.RepoPath!))
         {
             return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports a repository at {action.RepoPath}.");
         }
@@ -109,7 +152,7 @@ public sealed class ActionQueue(
             Kind = action.Kind,
             ActionJson = json,
             CommandLine = AgentActions.CommandLine(action),
-            RepoPath = action.RepoPath,
+            RepoPath = action.RepoPath ?? "",
             FindingFingerprint = finding?.Fingerprint,
             FindingTitle = finding?.Title,
             QueuedBy = queuedBy.Trim(),
@@ -139,19 +182,24 @@ public sealed class ActionQueue(
     {
         await ExpireStaleAsync(ct);
 
-        // An agent that has since been restarted without actions gets nothing, and its queue expires.
-        if (!Options.Enabled || snapshots.Get(machineId) is not { Machine.ActionsEnabled: true } machine)
+        // An agent polls when it accepts git actions, update requests, or both. It is only ever handed
+        // the kinds its last snapshot said it accepts: one that polls for updates alone gets no git
+        // action, and one restarted with a switch turned off gets nothing of that kind (the rows expire).
+        if (snapshots.Get(machineId) is not { } machine
+            || (!Allows(machine, AgentActionKind.Fetch) && !Allows(machine, AgentActionKind.UpdateAgent)))
         {
             return [];
         }
 
         var now = time.GetUtcNow();
         await using var db = await dbFactory.CreateDbContextAsync(ct);
-        var queued = await db.AgentActions.AsNoTracking()
-            .Where(a => a.MachineId == machine.MachineId && a.Status == AgentActionStatus.Queued)
-            .OrderBy(a => a.Id)
+        var queued = (await db.AgentActions.AsNoTracking()
+                .Where(a => a.MachineId == machine.MachineId && a.Status == AgentActionStatus.Queued)
+                .OrderBy(a => a.Id)
+                .ToListAsync(ct))
+            .Where(a => Allows(machine, a.Kind))
             .Take(MaxPerClaim)
-            .ToListAsync(ct);
+            .ToList();
 
         var claimed = new List<PendingAgentAction>();
         foreach (var row in queued.Where(a => a.ExpiresAt > now))
@@ -220,7 +268,8 @@ public sealed class ActionQueue(
     public async Task<int> ExpireStaleAsync(CancellationToken ct = default)
     {
         var now = time.GetUtcNow();
-        var lease = TimeSpan.FromMinutes(Math.Max(1, Options.LeaseMinutes));
+        var gitLease = TimeSpan.FromMinutes(Math.Max(1, Options.LeaseMinutes));
+        var updateLease = TimeSpan.FromMinutes(Math.Max(1, UpdateOptions.LeaseMinutes));
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var open = await db.AgentActions.AsNoTracking()
@@ -239,7 +288,7 @@ public sealed class ActionQueue(
                         .SetProperty(a => a.CompletedAt, now)
                         .SetProperty(a => a.Output, "The agent did not pick this up in time, so it was not run."), ct);
             }
-            else if (row.Status == AgentActionStatus.Claimed && row.ClaimedAt + lease <= now)
+            else if (row.Status == AgentActionStatus.Claimed && row.ClaimedAt + (row.Kind == AgentActionKind.UpdateAgent ? updateLease : gitLease) <= now)
             {
                 changed += await db.AgentActions
                     .Where(a => a.Id == row.Id && a.Status == AgentActionStatus.Claimed)

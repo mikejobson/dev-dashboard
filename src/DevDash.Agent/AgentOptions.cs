@@ -34,6 +34,9 @@ public sealed class AgentOptions
     /// <summary>Allowlisted fixes queued from the dashboard. Off unless this machine turns them on.</summary>
     public Actions.ActionsOptions Actions { get; set; } = new();
 
+    /// <summary>Self-update: off, on request from the dashboard (the default), or automatic.</summary>
+    public Updates.UpdateOptions Updates { get; set; } = new();
+
     public IReadOnlyList<string> ResolveRoots()
     {
         var roots = Roots.Count > 0 ? Roots : ["~/Developer"];

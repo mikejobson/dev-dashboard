@@ -44,6 +44,7 @@ public sealed class SystemdUserServiceManager(ServiceEnvironment environment) : 
 
     public IReadOnlyList<ServiceCommand> StartCommands => [Systemctl("start", Unit)];
     public IReadOnlyList<ServiceCommand> StopCommands => [Systemctl("stop", Unit)];
+    public IReadOnlyList<ServiceCommand> RestartCommands => [Systemctl("restart", Unit)];
 
     public IReadOnlyList<string> Notes =>
     [

@@ -24,11 +24,16 @@ public sealed class AgentWorker : BackgroundService
     private readonly ILogger<AgentWorker> _logger;
     private readonly ConcurrentDictionary<(string Root, string Name), byte> _pending = new();
     private readonly SemaphoreSlim _signal = new(0);
+    private readonly Updates.UpdateGuard? _guard;
     private MachineSnapshot? _last;
     private int _rescanNow;
 
-    public AgentWorker(MachineScanner scanner, HubClient hub, IOptionsMonitor<AgentOptions> options, ILogger<AgentWorker> logger, Actions.RescanRequests? rescans = null)
+    /// <summary>While a new version waits to be confirmed, it keeps trying to reach the hub this often.</summary>
+    private static readonly TimeSpan VerifyRetry = TimeSpan.FromSeconds(30);
+
+    public AgentWorker(MachineScanner scanner, HubClient hub, IOptionsMonitor<AgentOptions> options, ILogger<AgentWorker> logger, Actions.RescanRequests? rescans = null, Updates.UpdateGuard? guard = null)
     {
+        _guard = guard;
         _scanner = scanner;
         _hub = hub;
         _options = options;
@@ -61,8 +66,14 @@ public sealed class AgentWorker : BackgroundService
             {
                 if (DateTimeOffset.UtcNow >= nextFull)
                 {
-                    await FullScanAsync(stoppingToken).ConfigureAwait(false);
-                    nextFull = DateTimeOffset.UtcNow.AddMinutes(Math.Max(1, _options.CurrentValue.ScanIntervalMinutes));
+                    // Just updated: the hub accepting a snapshot is what confirms the new version, so get one
+                    // there quickly (no fetching, no size scan) and keep trying until it lands. The normal
+                    // scan follows straight after.
+                    var verifying = _guard?.IsVerifying == true;
+                    await FullScanAsync(verifying, stoppingToken).ConfigureAwait(false);
+                    nextFull = verifying
+                        ? DateTimeOffset.UtcNow + (_guard!.IsVerifying ? VerifyRetry : TimeSpan.Zero)
+                        : DateTimeOffset.UtcNow.AddMinutes(Math.Max(1, _options.CurrentValue.ScanIntervalMinutes));
                     _pending.Clear();
                 }
 
@@ -98,11 +109,12 @@ public sealed class AgentWorker : BackgroundService
         }
     }
 
-    private async Task FullScanAsync(CancellationToken ct)
+    private async Task FullScanAsync(bool quick, CancellationToken ct)
     {
         try
         {
-            var snapshot = await _scanner.ScanAsync(new ScanRequest(AllowFetch: true, SizeMode.WhenDue), ct).ConfigureAwait(false);
+            var request = quick ? new ScanRequest(AllowFetch: false, SizeMode.CachedOnly) : new ScanRequest(AllowFetch: true, SizeMode.WhenDue);
+            var snapshot = await _scanner.ScanAsync(request, ct).ConfigureAwait(false);
             _last = snapshot;
             await PushAsync(snapshot, ct).ConfigureAwait(false);
         }
@@ -163,6 +175,11 @@ public sealed class AgentWorker : BackgroundService
         {
             var response = await _hub.PushAsync(snapshot, ct).ConfigureAwait(false);
             _logger.LogInformation("Pushed {Count} entries in {Ms} ms scan to hub as {Machine}", response.Entries, snapshot.ScanDurationMs, response.MachineId);
+            if (_guard?.Confirm() is { } confirmed)
+            {
+                _logger.LogWarning("Update confirmed: devdash-agent {Version} has reported to the hub (was {Previous}). The previous version has been removed.",
+                    confirmed.ToVersion, confirmed.FromVersion);
+            }
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException && !ct.IsCancellationRequested)
         {

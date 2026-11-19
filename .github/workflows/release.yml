@@ -1,8 +1,14 @@
 name: Release
 
 # Push a tag like v0.2.0 to publish:
-#   - agent binaries for every platform, with checksums.txt, on a GitHub Release
+#   - agent binaries for every platform, with version.txt, checksums.txt and its signature
+#     checksums.txt.sig, on a GitHub Release
 #   - the hub image at ghcr.io/<owner>/dev-dashboard-hub:<version> and :latest
+#
+# The release is signed with the private key in the DEVDASH_RELEASE_SIGNING_KEY secret (a PEM ECDSA
+# P-256 key; scripts/release-signing-key.sh generate makes one and writes its public half into the
+# source). Agents only install releases signed with it, so a release without the secret, or with a
+# secret that does not match the public key in the source, fails here before anything is built.
 on:
   push:
     tags: ["v*"]
@@ -39,6 +45,19 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # First, because nothing below is worth doing if the release could not be signed, or would be
+      # signed with a key the agents built from this commit do not trust.
+      - name: Check the release signing key
+        env:
+          DEVDASH_RELEASE_SIGNING_KEY: ${{ secrets.DEVDASH_RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$DEVDASH_RELEASE_SIGNING_KEY" ]; then
+            echo "::error::The DEVDASH_RELEASE_SIGNING_KEY secret is not set. Releases must be signed: see 'Signing key' in the README."
+            exit 1
+          fi
+          scripts/release-signing-key.sh check --require-key
+          scripts/release-signing-key.sh check-private
+
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
@@ -62,10 +81,22 @@ jobs:
       - name: Publish all platforms
         run: scripts/publish-agent.sh "${{ needs.test.outputs.version }}"
 
-      - name: Check the Linux binary
+      # The private key is only ever in this one step's environment. The script refuses to sign if
+      # the secret is missing or is not the other half of the public key in the source.
+      - name: Sign checksums.txt
+        env:
+          DEVDASH_RELEASE_SIGNING_KEY: ${{ secrets.DEVDASH_RELEASE_SIGNING_KEY }}
+        run: scripts/release-signing-key.sh sign dist
+
+      # verify-release is the agent's own check, run by a binary from this very build: if it passes,
+      # agents of this release will accept the next one signed with the same key.
+      - name: Check the Linux binary and the signature
         run: |
           mkdir check && tar -xzf dist/devdash-agent-linux-x64.tar.gz -C check
           test "$(check/devdash-agent --version)" = "devdash-agent ${{ needs.test.outputs.version }}"
+          test "$(cat dist/version.txt)" = "${{ needs.test.outputs.version }}"
+          test -s dist/checksums.txt.sig
+          check/devdash-agent verify-release dist
 
       - uses: actions/upload-artifact@v7
         with:
@@ -104,6 +135,8 @@ jobs:
           mkdir -p smoke/Developer && git init -q smoke/Developer/widget
           bin/devdash-agent scan --dry-run --root smoke/Developer | grep '"name": "widget"'
           bin/devdash-agent install --dry-run --hub-url https://devdash.example.ts.net --api-key ddk_release_smoke_test
+          # The signature must verify with this platform's crypto too.
+          bin/devdash-agent verify-release dist
 
   hub-image:
     name: Build and push the hub image
@@ -158,6 +191,13 @@ jobs:
         with:
           name: agent-dist
           path: dist
+
+      - name: Check the release is complete
+        run: |
+          for file in checksums.txt checksums.txt.sig version.txt; do
+            test -s "dist/$file" || { echo "::error::dist/$file is missing; refusing to publish an unsigned release."; exit 1; }
+          done
+          (cd dist && sha256sum -c checksums.txt)
 
       - name: Create the release
         env:

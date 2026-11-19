@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using DevDash.Agent.Updates;
 using DevDash.Contracts;
 
 namespace DevDash.Agent.Scanning;
@@ -26,8 +27,17 @@ public static class MachineInfoProvider
             TailscaleIp = tsIp,
             AgentVersion = AgentVersion,
             ActionsEnabled = options.Actions.Enabled,
+            UpdateMode = ReportedUpdateMode(options, UpdateInstallation.Current, ReleaseSigning.Embedded),
+            LastUpdate = UpdateInstallation.Current is { } installation ? new UpdateStateStore(installation.StateFile).Read().Last : null,
         };
     }
+
+    /// <summary>
+    /// The update mode the hub is told. An agent that could not update itself whatever it was asked
+    /// (a development build, or a build with no release key) says "off", so no Update button is offered for it.
+    /// </summary>
+    public static string ReportedUpdateMode(AgentOptions options, UpdateInstallation? installation, ReleaseTrust trust) =>
+        installation is null || !trust.IsConfigured ? AgentUpdateModes.Off : options.Updates.ResolvedMode;
 
     /// <summary>Reads this node's tailnet name and IP from <c>tailscale status --json</c>, when the CLI is installed.</summary>
     private static async Task<(string? Name, string? Ip)> TailscaleAsync(CancellationToken ct)

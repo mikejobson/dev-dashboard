@@ -65,6 +65,28 @@ jobs:
           ./out/devdash-agent scan --dry-run --root smoke/Developer | grep '"name": "widget"'
           ./out/devdash-agent install --dry-run --hub-url https://devdash.example.ts.net --api-key ddk_ci_smoke_test
 
+  # The agent's self-update, for real: two published builds, a signed release folder served from
+  # localhost, an install, an update (the file swap of a running program is different on every OS, and
+  # on Windows two programs are swapped together), a roll back, releases that must be refused, and a
+  # confirmation against a hub. Uses a throwaway signing key compiled into these test builds only.
+  ota:
+    name: Self-update end to end (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install, update, roll back, refuse, confirm
+        shell: bash
+        run: scripts/test-ota.sh
+
   scripts:
     name: Lint scripts and workflows
     runs-on: ubuntu-latest
@@ -73,6 +95,10 @@ jobs:
 
       - name: shellcheck
         run: shellcheck scripts/*.sh
+
+      # The release public key lives in the agent source and in both install scripts; they must agree.
+      - name: The release public key is the same everywhere
+        run: scripts/release-signing-key.sh check
 
       - name: Parse install.ps1
         shell: pwsh

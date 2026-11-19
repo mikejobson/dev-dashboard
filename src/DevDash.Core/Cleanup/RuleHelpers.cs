@@ -71,6 +71,19 @@ internal static class RuleHelpers
         return string.Create(CultureInfo.InvariantCulture, $"{value:0.#} {units[unit]}");
     }
 
+    /// <summary>The newest of the given moments, ignoring the unknown ones. Null when none is known.</summary>
+    public static DateTimeOffset? Latest(params DateTimeOffset?[] moments) => moments.Where(m => m is not null).Max();
+
+    /// <summary>When a working tree last saw a commit or a file edit.</summary>
+    public static DateTimeOffset? ActivityOf(DevEntry entry) => Latest(entry.LastModified, entry.Git?.LastCommit?.Date);
+
+    /// <summary>Sets what the finding is really about as its last activity, when that is known.</summary>
+    public static Finding ActiveAt(this Finding finding, DateTimeOffset? when) =>
+        when is null ? finding : finding with { LastActivityAt = when };
+
+    /// <summary>"N days", or "N months" when the threshold is a whole number of 30-day months.</summary>
+    public static string Span(int days) => days >= 60 && days % 30 == 0 ? Plural(days / 30, "month") : Plural(days, "day");
+
     public static Finding ForClone(
         this ICleanupRule rule,
         LocalClone clone,
@@ -89,6 +102,7 @@ internal static class RuleHelpers
             MachineName = clone.Machine.Hostname,
             Path = clone.Entry.Path,
             RepoKey = clone.RepoKey,
+            LastActivityAt = ActivityOf(clone.Entry),
             Fingerprint = Finding.MakeFingerprint(rule.Id, [clone.Machine.MachineId, clone.Entry.Path, .. fingerprintParts]),
         };
 
@@ -111,6 +125,9 @@ internal static class RuleHelpers
             MachineId = snapshot.Machine.MachineId,
             MachineName = snapshot.Machine.Hostname,
             Path = entry.Path,
+            // A finding about a repo's folder (its build output) still belongs to that repo.
+            RepoKey = entry is { Kind: EntryKind.GitRepo, Git: not null } ? RepoIdentity.KeyFor(snapshot.Machine.MachineId, entry) : null,
+            LastActivityAt = ActivityOf(entry),
             Fingerprint = Finding.MakeFingerprint(rule.Id, [snapshot.Machine.MachineId, entry.Path, .. fingerprintParts]),
         };
 

@@ -57,9 +57,63 @@ else
         </div>
     }
 
+    @if (Openable.Count > 0)
+    {
+        <div class="open-chips repo-open">
+            <span class="muted small">Open</span>
+            @foreach (var clone in Openable)
+            {
+                var where = Openable.Count == 1 ? clone.Machine.Machine.Hostname : $"{clone.Machine.Machine.Hostname} · {clone.DisplayName}";
+                var cd = $"cd {AgentActions.ShellQuote(clone.Entry.Path)}";
+                var edit = $"code {AgentActions.ShellQuote(clone.Entry.Path)}";
+                <span class="open-pair">
+                    <button type="button" class="chip-btn" data-copy="@cd" title="Copy: @cd">cd · @where</button>
+                    <button type="button" class="chip-btn" data-copy="@edit" title="Copy: @edit">code</button>
+                </span>
+            }
+        </div>
+    }
+
+    @if (_row.GitHub is not null || _row.PullRequests.Count > 0)
+    {
+        <h2>
+            Open pull requests <span class="muted small">@_row.PullRequests.Count</span>
+            @if (_row.GitHub is { } hub && hub.OpenPullRequests > _row.PullRequests.Count)
+            {
+                <span class="muted small"> of @hub.OpenPullRequests on GitHub · <a href="@hub.Url/pulls" target="_blank" rel="noopener">see all</a></span>
+            }
+        </h2>
+        <PrList Items="_row.PullRequests" Now="Now" Clones="_clonesByKey" ShowRepo="false" Empty="No open pull request here is yours, assigned to you or waiting on your review." />
+    }
+
+    @if (_row.Issues.Count > 0)
+    {
+        <h2>Open issues <span class="muted small">@_row.Issues.Count</span></h2>
+        <div class="table-wrap">
+            <table class="stack">
+                <tbody>
+                    @foreach (var issue in _row.Issues)
+                    {
+                        <tr @key="issue.Url">
+                            <td class="cell-main">
+                                <a class="title-link" href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span>
+                                <div class="chips">
+                                    @if (issue.Assigned) { <span class="chip info">assigned</span> }
+                                    @if (issue.Mentioned) { <span class="chip muted">mentioned</span> }
+                                    @foreach (var label in issue.Labels) { <span class="chip muted">@label</span> }
+                                </div>
+                            </td>
+                            <td data-label="Updated" class="cell-when right nowrap sub" title="@Fmt.Date(issue.UpdatedAt)">@Fmt.Ago(issue.UpdatedAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
     <h2>On your machines</h2>
     <div class="table-wrap">
-        <table>
+        <table class="stack">
             <thead>
                 <tr><th>Machine</th><th>Path</th><th>State</th><th>Last commit</th><th class="right">Fetched</th><th class="right">Size</th></tr>
             </thead>
@@ -67,28 +121,32 @@ else
                 @foreach (var clone in _row.Clones)
                 {
                     <tr>
-                        <td class="nowrap">@clone.Machine.Machine.Hostname</td>
-                        <td class="mono">@clone.Entry.Path</td>
-                        <td>
-                            <CloneChips Clone="clone" />
-                            @if (clone.Git is { Upstream: not null } g)
-                            {
-                                <div class="sub">tracks <span class="mono">@g.Upstream</span></div>
-                            }
+                        <td class="nowrap cell-main"><a class="title-link" href="machines#machine-@clone.Machine.MachineId">@clone.Machine.Machine.Hostname</a></td>
+                        <td data-label="Path" class="mono path">@clone.Entry.Path</td>
+                        <td data-label="State">
+                            <div>
+                                <CloneChips Clone="clone" />
+                                @if (clone.Git is { Upstream: not null } g)
+                                {
+                                    <div class="sub">tracks <span class="mono">@g.Upstream</span></div>
+                                }
+                            </div>
                         </td>
-                        <td>
-                            @if (clone.Git?.LastCommit is { } commit)
-                            {
-                                <span class="mono sha">@Fmt.Sha(commit.Sha)</span>@commit.Subject
-                                <div class="sub">@commit.Author · @Fmt.Ago(commit.Date, Now)</div>
-                            }
-                            else if (clone.Entry.LastModified is not null)
-                            {
-                                <span class="sub">modified @Fmt.Ago(clone.Entry.LastModified, Now)</span>
-                            }
+                        <td data-label="Last commit">
+                            <div>
+                                @if (clone.Git?.LastCommit is { } commit)
+                                {
+                                    <span class="mono sha">@Fmt.Sha(commit.Sha)</span>@commit.Subject
+                                    <div class="sub">@commit.Author · @Fmt.Ago(commit.Date, Now)</div>
+                                }
+                                else if (clone.Entry.LastModified is not null)
+                                {
+                                    <span class="sub">modified @Fmt.Ago(clone.Entry.LastModified, Now)</span>
+                                }
+                            </div>
                         </td>
-                        <td class="right nowrap sub">@(clone.Git is null ? "" : Fmt.Ago(clone.Git.LastFetchAt, Now))</td>
-                        <td class="right nowrap sub">
+                        <td data-label="Fetched" class="right nowrap sub @(clone.Git is null ? "blank" : "")">@(clone.Git is null ? "" : Fmt.Ago(clone.Git.LastFetchAt, Now))</td>
+                        <td data-label="Size" class="right nowrap sub @(clone.Entry.Size is null ? "blank" : "")">
                             @Fmt.Size(clone.Entry.Size?.TotalBytes)
                             @if (clone.Entry.Size is { ReclaimableBytes: > 0 } size)
                             {
@@ -100,30 +158,6 @@ else
             </tbody>
         </table>
     </div>
-
-    @if (_row.PullRequests.Count > 0)
-    {
-        <h2>My pull requests</h2>
-        <PrList Items="_row.PullRequests" Now="Now" Clones="_clonesByKey" />
-    }
-
-    @if (_row.Issues.Count > 0)
-    {
-        <h2>My issues</h2>
-        <div class="table-wrap">
-            <table>
-                <tbody>
-                    @foreach (var issue in _row.Issues)
-                    {
-                        <tr>
-                            <td><a href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span></td>
-                            <td class="right nowrap sub">@Fmt.Ago(issue.UpdatedAt, Now)</td>
-                        </tr>
-                    }
-                </tbody>
-            </table>
-        </div>
-    }
 
     @if (_findings.Count > 0)
     {
@@ -139,7 +173,7 @@ else
         var git = clone.Git!;
         <h2>Branches <span class="muted small">on @clone.Machine.Machine.Hostname · @git.Branches.Count · default <span class="mono">@(git.DefaultBranch ?? "unknown")</span></span></h2>
         <div class="table-wrap">
-            <table>
+            <table class="stack">
                 <thead>
                     <tr><th>Branch</th><th>Upstream</th><th>State</th><th class="right">Last commit</th></tr>
                 </thead>
@@ -147,12 +181,12 @@ else
                     @foreach (var branch in git.Branches.OrderByDescending(b => b.LastCommitDate))
                     {
                         <tr>
-                            <td>
+                            <td class="cell-main">
                                 <span class="mono">@branch.Name</span>
                                 <div class="sub">@branch.Subject</div>
                             </td>
-                            <td class="mono sub">@branch.Upstream</td>
-                            <td>
+                            <td data-label="Upstream" class="mono sub @(branch.Upstream is null ? "blank" : "")">@branch.Upstream</td>
+                            <td data-label="State">
                                 <div class="chips">
                                     @if (branch.Name == git.DefaultBranch) { <span class="chip">default</span> }
                                     @if (_checkedOut.Contains((clone.MachineKey(), branch.Name))) { <span class="chip info">checked out</span> }
@@ -163,7 +197,7 @@ else
                                     @if (branch.MergedIntoDefault == true && branch.Name != git.DefaultBranch) { <span class="chip ok">merged</span> }
                                 </div>
                             </td>
-                            <td class="right nowrap sub" title="@Fmt.Date(branch.LastCommitDate)">@Fmt.Ago(branch.LastCommitDate, Now)</td>
+                            <td data-label="Last commit" class="right nowrap sub" title="@Fmt.Date(branch.LastCommitDate)">@Fmt.Ago(branch.LastCommitDate, Now)</td>
                         </tr>
                     }
                 </tbody>
@@ -174,15 +208,15 @@ else
         {
             <h2>Worktrees <span class="muted small">on @clone.Machine.Machine.Hostname · @git.Worktrees.Count</span></h2>
             <div class="table-wrap">
-                <table>
+                <table class="stack">
                     <thead><tr><th>Path</th><th>Branch</th><th>State</th></tr></thead>
                     <tbody>
                         @foreach (var (wt, index) in git.Worktrees.Select((w, i) => (w, i)))
                         {
                             <tr>
-                                <td class="mono">@wt.Path</td>
-                                <td class="mono">@(wt.Branch ?? $"detached @ {Fmt.Sha(wt.Head)}")</td>
-                                <td>
+                                <td class="mono path cell-main">@wt.Path</td>
+                                <td data-label="Branch" class="mono">@(wt.Branch ?? $"detached @ {Fmt.Sha(wt.Head)}")</td>
+                                <td data-label="State">
                                     <div class="chips">
                                         @if (index == 0) { <span class="chip">main working tree</span> }
                                         @if (wt.Prunable) { <span class="chip danger" title="@wt.PrunableReason">prunable</span> }
@@ -224,6 +258,9 @@ else
     private List<FindingView> _findings = [];
     private IReadOnlyDictionary<string, List<CloneView>> _clonesByKey = new Dictionary<string, List<CloneView>>();
     private HashSet<(string Machine, string Branch)> _checkedOut = [];
+
+    /// <summary>Clones with a folder to open: everything but loose files.</summary>
+    private List<CloneView> Openable => (_row?.Clones ?? []).Where(c => c.Entry.Kind != EntryKind.LooseFile).ToList();
 
     /// <summary>One clone per repository per machine: branches, worktrees and stashes are shared by linked worktrees.</summary>
     private IEnumerable<CloneView> Repositories => (_row?.Clones ?? [])

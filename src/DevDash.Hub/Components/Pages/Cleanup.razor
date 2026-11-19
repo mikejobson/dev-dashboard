@@ -1,118 +1,483 @@
 @page "/cleanup"
 @inherits LivePage
 @inject FindingsService Findings
+@inject NavigationManager Nav
 
 <PageTitle>Cleanup · DevDash</PageTitle>
 
 <div class="page-head">
     <div>
         <h1>Cleanup</h1>
-        <p>Things worth tidying. Commands are there to copy. A machine that has agent actions turned on also gets a Run button on the safe ones, and asks you to confirm first.</p>
+        <p>Things worth tidying. Open a row for the commands to copy. A machine that has agent actions turned on also gets a Run button on the safe ones, and asks you to confirm first.</p>
     </div>
     <div class="toolbar" style="margin:0">
         <span class="muted small">@_all.Count(v => v.IsActive) active · @_all.Count(v => v.Status == FindingStatus.Snoozed) snoozed · @_all.Count(v => v.Status == FindingStatus.Dismissed) dismissed</span>
-        <button type="button" class="toggle @(_showHidden ? "on" : "")" aria-pressed="@_showHidden" @onclick="() => _showHidden = !_showHidden">Show snoozed and dismissed</button>
+        <button type="button" class="toggle @(_showHidden ? "on" : "")" aria-pressed="@_showHidden" @onclick="ToggleHidden">Show snoozed and dismissed</button>
     </div>
 </div>
 
-@if (Groups.Count == 0)
-{
-    <div class="card empty">@(_all.Count == 0 ? "Nothing to clean up." : "Everything is snoozed or dismissed.")</div>
+@{
+    var shown = Shown;
+    var byRepo = _view == RepoView;
+    var ruleGroups = byRepo ? [] : RuleGroups(shown);
+    var repoGroups = byRepo ? FindingTriage.ByRepo(shown, Now) : [];
+    var keys = byRepo ? repoGroups.Select(g => g.Key).ToList() : ruleGroups.Select(g => g.Key).ToList();
+    var open = OpenSet(byRepo
+        ? repoGroups.Select(g => (g.Key, g.Worst)).ToList()
+        : ruleGroups.Select(g => (g.Key, g.Worst)).ToList(), shown.Count);
 }
 
-@if (Groups.Count > 0)
+@if (_all.Count > 0)
+{
+    <div class="filters">
+        <div class="seg" role="group" aria-label="Group findings">
+            <a class="seg-btn @(byRepo ? "" : "on")" aria-current="@(byRepo ? null : "true")" href="@Url(RuleView)">By rule</a>
+            <a class="seg-btn @(byRepo ? "on" : "")" aria-current="@(byRepo ? "true" : null)" href="@Url(RepoView)">By repo</a>
+        </div>
+        <select aria-label="Machine" @bind="_machine" @bind:after="FiltersChanged">
+            <option value="">All machines</option>
+            @foreach (var machine in Machines)
+            {
+                <option value="@machine.Id">@machine.Name</option>
+            }
+        </select>
+        <select aria-label="Severity" @bind="_severity" @bind:after="FiltersChanged">
+            <option value="">Any severity</option>
+            <option value="low">Low and up</option>
+            <option value="medium">Medium and up</option>
+            <option value="high">High only</option>
+        </select>
+        <select aria-label="Last activity" @bind="_age" @bind:after="FiltersChanged">
+            <option value="">Any age</option>
+            <option value="recent">Active in the last @FindingTriage.RecentDays days</option>
+            <option value="idle">Idle @FindingTriage.RecentDays–@FindingTriage.NeglectedDays days</option>
+            <option value="old">Idle more than @FindingTriage.NeglectedDays days</option>
+        </select>
+        <input type="search" aria-label="Search findings" placeholder="Search title, repo, branch…" @bind="_text" @bind:event="oninput" @bind:after="TextChanged" @onchange="_ => SyncUrl()" />
+        @if (!Filter.IsEmpty)
+        {
+            <span class="muted small nowrap">@shown.Count of @_all.Count(v => _showHidden || v.IsActive)</span>
+            <a class="small" href="@ClearUrl">Clear filters</a>
+        }
+    </div>
+}
+
+@if (shown.Count == 0 && Loaded)
+{
+    <div class="card empty">
+        @(_all.Count == 0 ? "Nothing to clean up."
+            : !Filter.IsEmpty ? "No findings match these filters."
+            : "Everything is snoozed or dismissed.")
+    </div>
+}
+else if (shown.Count > 0)
 {
     <nav class="rule-index" aria-label="Finding groups">
-        @foreach (var group in Groups)
+        @if (!byRepo)
         {
-            <button type="button" class="rule-pill @(IsOpen(group) ? "on" : "")" aria-pressed="@IsOpen(group)" @onclick="() => Toggle(group)">
-                <span class="dot @Fmt.SeverityClass(group.Worst)"></span>@group.Rule.Title <span class="muted">@group.Items.Count</span>
-            </button>
+            <span class="rule-pills">
+                @foreach (var group in ruleGroups)
+                {
+                    <button type="button" class="rule-pill @(open.Contains(group.Key) ? "on" : "")" aria-pressed="@open.Contains(group.Key)" @onclick="() => Toggle(group.Key)">
+                        <span class="dot @Fmt.SeverityClass(group.Worst)"></span>@group.Title <span class="muted">@group.Items.Count</span>
+                    </button>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="muted small">@shown.Count @(shown.Count == 1 ? "finding" : "findings") in @repoGroups.Count @(repoGroups.Count == 1 ? "repo" : "repos and folders") · live work at risk first, then worst and most recent</span>
         }
         <span class="rule-index-actions">
-            <button type="button" class="link" @onclick="ExpandAll">Expand all</button>
+            <button type="button" class="link" @onclick="() => ExpandAll(keys)">Expand all</button>
             <button type="button" class="link" @onclick="CollapseAll">Collapse all</button>
         </span>
     </nav>
 }
 
-@foreach (var group in Groups)
+@foreach (var group in ruleGroups)
 {
-    var open = IsOpen(group);
-    <section class="rule @(open ? "open" : "")" id="@group.Rule.Id">
-        <button type="button" class="rule-head" aria-expanded="@open" @onclick="() => Toggle(group)">
+    var isOpen = open.Contains(group.Key);
+    <section class="rule @(isOpen ? "open" : "")" id="@group.Rule.Id" @key="group.Key">
+        <button type="button" class="rule-head" aria-expanded="@isOpen" @onclick="() => Toggle(group.Key)">
             <span class="chevron" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
             <span class="dot @Fmt.SeverityClass(group.Worst)"></span>
-            <h3>@group.Rule.Title</h3>
+            <h3>@group.Title</h3>
             <span class="count small">@group.Items.Count</span>
             <span class="muted small rule-desc">@group.Rule.Description</span>
         </button>
-        @if (open)
+        @if (isOpen)
         {
-            var scripts = CleanupScript.Build(group.Rule.Title, group.Items.Where(v => v.IsActive).Select(v => v.Finding), Now);
-            @if (scripts.Count > 0)
-            {
-                <div class="rule-tools">
-                    <span class="muted small">Copy the fixes as a script for</span>
-                    @foreach (var script in scripts)
-                    {
-                        <button type="button" class="copy" data-copy="@script.Text"
-                                title="Copies @script.CommandCount fix command(s) from @script.FindingCount finding(s), for @script.MachineName only. Read it before you run it.">@script.MachineName (@script.CommandCount)</button>
-                    }
-                </div>
-            }
-            @foreach (var view in group.Items)
-            {
-                <FindingCard @key="view.Finding.Fingerprint" View="view" OnSnooze="SnoozeAsync" OnDismiss="DismissAsync" OnRestore="RestoreAsync" />
-            }
+            @Body(group.Key, group.Title, group.Title, group.Items, false, null)
         }
     </section>
 }
 
+@foreach (var group in repoGroups)
+{
+    var isOpen = open.Contains(group.Key);
+    <section class="rule repo-group @(isOpen ? "open" : "")" @key="group.Key">
+        <button type="button" class="rule-head" aria-expanded="@isOpen" @onclick="() => Toggle(group.Key)">
+            <span class="chevron" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span class="dot @Fmt.SeverityClass(group.Worst)"></span>
+            <h3>@group.Name</h3>
+            <span class="chip muted">@Where(group)</span>
+            <span class="count small">@group.Items.Count</span>
+            <span class="muted small rule-desc">@RuleSummary(group)</span>
+            @if (group.LastActivityAt is { } activity)
+            {
+                <span class="muted small nowrap group-age" title="Last activity @Fmt.Date(activity)">@Fmt.Ago(activity, Now)</span>
+            }
+        </button>
+        @if (isOpen)
+        {
+            @Body(group.Key, group.Name, $"{group.Name} ({Where(group)})", group.Items, true, group.RepoKey)
+        }
+    </section>
+}
+
+@if (_bulk is { } bulk)
+{
+    <div class="modal-backdrop" @onclick="() => _bulk = null">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulk-title" @onclick:stopPropagation="true">
+            <h3 id="bulk-title">@(bulk.Dismiss ? "Dismiss" : "Snooze") @bulk.Findings.Count @(bulk.Findings.Count == 1 ? "finding" : "findings")?</h3>
+            <p>
+                @(bulk.Findings.Count == 1 ? "The one active finding" : $"All {bulk.Findings.Count} active findings") shown under <strong>@bulk.Title</strong>
+                @(bulk.Dismiss ? "will be dismissed. They stay hidden until you restore them." : $"will be hidden for {BulkSnoozeDays} days, then come back if they still apply.")
+                @if (!Filter.IsEmpty)
+                {
+                    <span> Findings the current filters hide are left alone.</span>
+                }
+            </p>
+            <p>Nothing is run or deleted on any machine. Use “Show snoozed and dismissed” to undo.</p>
+            <ul class="bulk-list small muted">
+                @foreach (var finding in bulk.Findings.Take(6))
+                {
+                    <li>@finding.Title</li>
+                }
+                @if (bulk.Findings.Count > 6)
+                {
+                    <li>and @(bulk.Findings.Count - 6) more</li>
+                }
+            </ul>
+            <div class="modal-actions">
+                <button type="button" @onclick="() => _bulk = null">Cancel</button>
+                <button type="button" class="primary" disabled="@_bulkBusy" @onclick="ConfirmBulkAsync">@(bulk.Dismiss ? "Dismiss" : $"Snooze {BulkSnoozeDays}d") @bulk.Findings.Count</button>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
+    private const string RuleView = "rule";
+    private const string RepoView = "repo";
+
+    /// <summary>Rows a group shows before "Show all": long groups stay scannable.</summary>
+    private const int RowCap = 12;
+
+    /// <summary>A filtered result this small opens every group: the user asked for exactly these.</summary>
+    private const int OpenAllBelow = 40;
+
+    private const int BulkSnoozeDays = 30;
+
     private IReadOnlyList<FindingView> _all = [];
+
+    // Filter state. The query string is where it comes from and where every change goes.
+    private string _view = RuleView;
+    private string _machine = "";
+    private string _severity = "";
+    private string _age = "";
+    private string _text = "";
     private bool _showHidden;
+    private bool _openAll;
+    private string? _appliedQuery;
 
-    private HashSet<string>? _open;
+    // What the user opened, per view. Null until the defaults have been worked out.
+    private readonly Dictionary<string, HashSet<string>> _open = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _expanded = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _uncapped = new(StringComparer.Ordinal);
+    private bool _expandRows;
 
-    /// <summary><c>?open=all</c> starts with every group expanded.</summary>
+    private Bulk? _bulk;
+    private bool _bulkBusy;
+
+    /// <summary><c>?open=all</c> starts with every group and every finding expanded.</summary>
     [SupplyParameterFromQuery(Name = "open")] public string? OpenParam { get; set; }
 
-    private sealed record Group(ICleanupRule Rule, List<FindingView> Items)
+    /// <summary><c>rule</c> (default) or <c>repo</c>.</summary>
+    [SupplyParameterFromQuery(Name = "view")] public string? ViewParam { get; set; }
+
+    [SupplyParameterFromQuery(Name = "machine")] public string? MachineParam { get; set; }
+
+    /// <summary>The least severe level to show: <c>low</c>, <c>medium</c> or <c>high</c>.</summary>
+    [SupplyParameterFromQuery(Name = "severity")] public string? SeverityParam { get; set; }
+
+    /// <summary><c>recent</c>, <c>idle</c> or <c>old</c>; see <see cref="FindingTriage"/> for the thresholds.</summary>
+    [SupplyParameterFromQuery(Name = "age")] public string? AgeParam { get; set; }
+
+    [SupplyParameterFromQuery(Name = "q")] public string? TextParam { get; set; }
+
+    /// <summary><c>?hidden=1</c> also lists snoozed and dismissed findings.</summary>
+    [SupplyParameterFromQuery(Name = "hidden")] public string? HiddenParam { get; set; }
+
+    private sealed record RuleGroup(ICleanupRule Rule, string Title, List<FindingView> Items)
     {
+        public string Key => "rule:" + Rule.Id;
+
         public FindingSeverity Worst => Items.Max(v => v.Finding.Severity);
     }
 
-    // Worst first, so the things that matter sit at the top; within a group, worst first too.
-    private List<Group> Groups => Findings.Rules
-        .Select(rule => new Group(rule, _all
-            .Where(v => v.Finding.RuleId == rule.Id && (_showHidden || v.IsActive))
-            .OrderByDescending(v => v.Finding.Severity)
-            .ToList()))
+    private sealed record Bulk(string Title, bool Dismiss, List<Finding> Findings);
+
+    private FindingFilter Filter => new()
+    {
+        MachineId = _machine.Length > 0 ? _machine : null,
+        MinSeverity = _severity switch
+        {
+            "high" => FindingSeverity.High,
+            "medium" => FindingSeverity.Medium,
+            "low" => FindingSeverity.Low,
+            _ => FindingSeverity.Info,
+        },
+        Age = _age switch
+        {
+            "recent" => FindingAge.Recent,
+            "idle" => FindingAge.Idle,
+            "old" => FindingAge.Neglected,
+            _ => null,
+        },
+        Text = _text,
+    };
+
+    private List<FindingView> Shown
+    {
+        get
+        {
+            var filter = Filter;
+            var now = Now;
+            return _all.Where(v => (_showHidden || v.IsActive) && FindingTriage.Matches(filter, v.Finding, now)).ToList();
+        }
+    }
+
+    private List<(string Id, string Name)> Machines => _all
+        .SelectMany(v => v.Finding.Commands.Where(c => c.MachineId is not null).Select(c => (Id: c.MachineId!, Name: c.MachineName ?? c.MachineId!))
+            .Append((Id: v.Finding.MachineId ?? "", Name: v.Finding.MachineName ?? v.Finding.MachineId ?? "")))
+        .Where(m => m.Id.Length > 0)
+        .DistinctBy(m => m.Id, StringComparer.OrdinalIgnoreCase)
+        .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    // Worst first, so the things that matter sit at the top; within a group, worst and most recent first.
+    private List<RuleGroup> RuleGroups(List<FindingView> shown) => Findings.Rules
+        .Select(rule => new RuleGroup(rule, Findings.TitleOf(rule), FindingTriage.Ranked(shown.Where(v => v.Finding.RuleId == rule.Id)).ToList()))
         .Where(g => g.Items.Count > 0)
         .OrderByDescending(g => g.Worst)
         .ThenByDescending(g => g.Items.Count)
         .ToList();
 
-    private bool IsOpen(Group group) => _open?.Contains(group.Rule.Id) == true;
+    /// <summary>The findings of one open group: its tools, then one compact row per finding.</summary>
+    private RenderFragment Body(string key, string title, string scriptTitle, IReadOnlyList<FindingView> items, bool underRepo, string? repoKey) =>
+        @<div class="group-body">
+            @{
+                var active = items.Where(v => v.IsActive).Select(v => v.Finding).ToList();
+                var scripts = CleanupScript.Build(scriptTitle, active, Now);
+                var capped = !_expandRows && !_uncapped.Contains(key) && items.Count > RowCap + 2;
+            }
+            @if (scripts.Count > 0 || active.Count > 0 || repoKey is not null)
+            {
+                <div class="rule-tools">
+                    @if (scripts.Count > 0)
+                    {
+                        <span class="muted small">Copy the fixes as a script for</span>
+                        @foreach (var script in scripts)
+                        {
+                            <button type="button" class="copy" data-copy="@script.Text"
+                                    title="Copies @script.CommandCount fix command(s) from @script.FindingCount finding(s), for @script.MachineName only. Read it before you run it.">@script.MachineName (@script.CommandCount)</button>
+                        }
+                    }
+                    @if (repoKey is not null)
+                    {
+                        <a class="small" href="@Fmt.RepoUrl(repoKey)">Repo page</a>
+                    }
+                    @if (active.Count > 0)
+                    {
+                        <span class="bulk">
+                            <button type="button" class="link" @onclick="() => _bulk = new Bulk(title, false, active)">Snooze all @(BulkSnoozeDays)d</button>
+                            <button type="button" class="link" @onclick="() => _bulk = new Bulk(title, true, active)">Dismiss all</button>
+                        </span>
+                    }
+                </div>
+            }
+            <div class="frows">
+                @foreach (var view in capped ? items.Take(RowCap) : items)
+                {
+                    <FindingCard @key="view.Finding.Fingerprint" View="view" Compact="true" UnderRepo="@underRepo"
+                                 Expanded="@(_expandRows || _expanded.Contains(view.Finding.Fingerprint))" OnToggle="ToggleRow"
+                                 OnSnooze="SnoozeAsync" OnDismiss="DismissAsync" OnRestore="RestoreAsync" />
+                }
+            </div>
+            @if (capped)
+            {
+                <button type="button" class="link show-more" @onclick="() => _uncapped.Add(key)">Show all @items.Count (@(items.Count - RowCap) more)</button>
+            }
+        </div>;
 
-    private void Toggle(Group group)
+    private static string Where(RepoFindings group) =>
+        group.MachineName ?? group.MachineId
+        ?? (group.Items.Any(v => v.Finding.Url is not null) ? "GitHub" : "across machines");
+
+    /// <summary>What kinds of thing are wrong with the repo, most common first: "upstream gone ×4".</summary>
+    private string RuleSummary(RepoFindings group) => string.Join(" · ", group.Items
+        .GroupBy(v => v.Finding.RuleId)
+        .OrderByDescending(g => g.Max(v => v.Finding.Severity)).ThenByDescending(g => g.Count())
+        .Select(g =>
+        {
+            var rule = Findings.Rules.FirstOrDefault(r => r.Id == g.Key);
+            var name = rule is null ? g.Key : Findings.TitleOf(rule);
+            return g.Count() == 1 ? name : $"{name} ×{g.Count()}";
+        }));
+
+    // ---- open / closed -----------------------------------------------------------------------------
+
+    /// <summary>
+    /// The open groups of the current view. First time: every group for <c>?open=all</c> or a small
+    /// filtered result; else, by rule, the groups holding high-severity findings, and by repo none (the
+    /// headings already say what is wrong with each). After that, the user's choice.
+    /// </summary>
+    private HashSet<string> OpenSet(List<(string Key, FindingSeverity Worst)> groups, int rows)
     {
-        _open ??= [];
-        if (!_open.Remove(group.Rule.Id)) { _open.Add(group.Rule.Id); }
+        if (!_open.TryGetValue(_view, out var open))
+        {
+            if (!Loaded && _all.Count == 0)
+            {
+                return [];
+            }
+
+            var everything = _openAll || (!Filter.IsEmpty && rows <= OpenAllBelow);
+            open = groups.Where(g => everything || (_view == RuleView && g.Worst >= FindingSeverity.High)).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+            _open[_view] = open;
+        }
+
+        return open;
     }
 
-    private void ExpandAll() => _open = Groups.Select(g => g.Rule.Id).ToHashSet();
+    private void Toggle(string key)
+    {
+        if (_open.TryGetValue(_view, out var open) && !open.Remove(key))
+        {
+            open.Add(key);
+        }
+    }
 
-    private void CollapseAll() => _open = [];
+    private void ExpandAll(List<string> keys) => _open[_view] = keys.ToHashSet(StringComparer.Ordinal);
+
+    private void CollapseAll()
+    {
+        _open[_view] = new(StringComparer.Ordinal);
+        _expanded.Clear();
+        _expandRows = false;
+    }
+
+    private void ToggleRow(Finding finding)
+    {
+        if (_expandRows)
+        {
+            // Leaving "everything expanded": keep the others open, close this one.
+            _expandRows = false;
+            _expanded.UnionWith(_all.Select(v => v.Finding.Fingerprint));
+        }
+
+        if (!_expanded.Remove(finding.Fingerprint))
+        {
+            _expanded.Add(finding.Fingerprint);
+        }
+    }
+
+    // ---- query string ------------------------------------------------------------------------------
+
+    protected override void OnParametersSet() => ApplyQuery();
+
+    /// <summary>Takes the filters from the URL, once per navigation. Typing in between is not overwritten.</summary>
+    private void ApplyQuery()
+    {
+        var query = string.Join('\n', ViewParam, MachineParam, SeverityParam, AgeParam, TextParam, HiddenParam, OpenParam);
+        if (query == _appliedQuery)
+        {
+            return;
+        }
+
+        var first = _appliedQuery is null;
+        _appliedQuery = query;
+        _view = string.Equals(ViewParam, RepoView, StringComparison.OrdinalIgnoreCase) ? RepoView : RuleView;
+        _machine = MachineParam?.Trim() ?? "";
+        _severity = SeverityParam?.Trim().ToLowerInvariant() is "low" or "medium" or "high" ? SeverityParam.Trim().ToLowerInvariant() : "";
+        _age = AgeParam?.Trim().ToLowerInvariant() switch
+        {
+            "recent" => "recent",
+            "idle" => "idle",
+            "old" or "neglected" => "old",
+            _ => "",
+        };
+        _text = TextParam ?? "";
+        _showHidden = HiddenParam is "1" or "true";
+        _openAll = string.Equals(OpenParam, "all", StringComparison.OrdinalIgnoreCase);
+        if (first)
+        {
+            _expandRows = _openAll;
+        }
+        else
+        {
+            // A link changed the filters: work out the open groups afresh for what is now shown.
+            _open.Clear();
+        }
+    }
+
+    private string Url(string view) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("cleanup").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    {
+        ["view"] = view == RepoView ? RepoView : null,
+        ["machine"] = _machine.Length > 0 ? _machine : null,
+        ["severity"] = _severity.Length > 0 ? _severity : null,
+        ["age"] = _age.Length > 0 ? _age : null,
+        ["q"] = string.IsNullOrWhiteSpace(_text) ? null : _text.Trim(),
+        ["hidden"] = _showHidden ? "1" : null,
+    });
+
+    private string ClearUrl => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("cleanup").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    {
+        ["view"] = _view == RepoView ? RepoView : null,
+        ["hidden"] = _showHidden ? "1" : null,
+    });
+
+    private void SyncUrl()
+    {
+        // Remember what is being pushed, so its echo through the router changes nothing.
+        _appliedQuery = string.Join('\n', _view == RepoView ? RepoView : null, Blank(_machine), Blank(_severity), Blank(_age), Blank(_text.Trim()), _showHidden ? "1" : null, null);
+        Nav.NavigateTo(Url(_view), replace: true);
+    }
+
+    private static string? Blank(string value) => value.Length > 0 ? value : null;
+
+    private void FiltersChanged()
+    {
+        _open.Clear();
+        SyncUrl();
+    }
+
+    // Typing filters at once; the URL follows when the field is committed (Enter or leaving it).
+    private void TextChanged() => _open.Clear();
+
+    private void ToggleHidden()
+    {
+        _showHidden = !_showHidden;
+        SyncUrl();
+    }
+
+    // ---- data --------------------------------------------------------------------------------------
 
     protected override async Task LoadAsync()
     {
+        ApplyQuery();
         _all = await Findings.GetAsync();
-        // First load: open only the groups that hold high-severity findings. Later reloads keep the user's choice.
-        _open ??= string.Equals(OpenParam, "all", StringComparison.OrdinalIgnoreCase)
-            ? Groups.Select(g => g.Rule.Id).ToHashSet()
-            : Groups.Where(g => g.Worst >= FindingSeverity.High).Select(g => g.Rule.Id).ToHashSet();
     }
 
     // Each action notifies the dashboard, which reloads this page (and any other open one).
@@ -121,4 +486,31 @@
     private async Task DismissAsync(Finding finding) => await Findings.DismissAsync(finding);
 
     private async Task RestoreAsync(Finding finding) => await Findings.RestoreAsync(finding.Fingerprint);
+
+    private async Task ConfirmBulkAsync()
+    {
+        if (_bulk is not { } bulk || _bulkBusy)
+        {
+            return;
+        }
+
+        _bulkBusy = true;
+        try
+        {
+            if (bulk.Dismiss)
+            {
+                await Findings.DismissManyAsync(bulk.Findings);
+            }
+            else
+            {
+                await Findings.SnoozeManyAsync(bulk.Findings, TimeSpan.FromDays(BulkSnoozeDays));
+            }
+
+            _bulk = null;
+        }
+        finally
+        {
+            _bulkBusy = false;
+        }
+    }
 }

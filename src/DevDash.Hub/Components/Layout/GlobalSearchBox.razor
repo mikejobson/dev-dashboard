@@ -1,0 +1,79 @@
+@* Search box in the navigation. Cmd/Ctrl-K focuses it (app.js); arrow keys and Enter work on the results. *@
+@implements IDisposable
+@inject RepoCatalog Catalog
+@inject GitHubStore GitHub
+@inject SnapshotStore Snapshots
+@inject DashboardNotifier Notifier
+
+<div class="gsearch" role="search">
+    <input id="global-search" type="search" placeholder="Search…" aria-label="Search repos, pull requests and machines"
+           autocomplete="off" spellcheck="false" @bind="_query" @bind:event="oninput" @bind:after="SearchAsync" @onfocus="EnsureLoadedAsync" />
+    <kbd class="gsearch-key" aria-hidden="true">⌘K</kbd>
+    @if (_query.Trim().Length > 0)
+    {
+        <div class="gsearch-results" role="listbox" aria-label="Search results">
+            @foreach (var hit in _hits)
+            {
+                <a class="gsearch-hit" role="option" href="@hit.Url" target="@(hit.External ? "_blank" : null)" rel="@(hit.External ? "noopener" : null)" @onclick="Clear">
+                    <span class="gsearch-kind">@Label(hit.Kind)</span>
+                    <span class="gsearch-text">
+                        <span class="gsearch-title">@hit.Title</span>
+                        <span class="gsearch-detail">@hit.Detail</span>
+                    </span>
+                </a>
+            }
+            @if (_hits.Count == 0)
+            {
+                <div class="gsearch-empty muted small">@(_rows is null ? "Searching…" : "Nothing matches.")</div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private IReadOnlyList<RepoRow>? _rows;
+    private IReadOnlyList<SearchHit> _hits = [];
+    private string _query = "";
+    private bool _stale;
+
+    protected override void OnInitialized() => Notifier.Changed += OnChanged;
+
+    // The repo list is built on first use and rebuilt after the data changes, not on every keystroke.
+    private void OnChanged(DashboardChange change) => _stale = true;
+
+    private async Task EnsureLoadedAsync()
+    {
+        if (_rows is null || _stale)
+        {
+            _stale = false;
+            _rows = await Catalog.GetAsync();
+        }
+    }
+
+    private async Task SearchAsync()
+    {
+        if (_query.Trim().Length == 0)
+        {
+            _hits = [];
+            return;
+        }
+
+        await EnsureLoadedAsync();
+        _hits = GlobalSearch.Search(_query, _rows ?? [], GitHub.Current.PullRequests, Snapshots.Machines);
+    }
+
+    private void Clear()
+    {
+        _query = "";
+        _hits = [];
+    }
+
+    private static string Label(SearchHitKind kind) => kind switch
+    {
+        SearchHitKind.PullRequest => "PR",
+        SearchHitKind.Machine => "Machine",
+        _ => "Repo",
+    };
+
+    public void Dispose() => Notifier.Changed -= OnChanged;
+}

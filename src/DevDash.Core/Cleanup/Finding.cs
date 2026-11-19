@@ -64,6 +64,13 @@ public sealed record Finding
     public string? RepoKey { get; init; }
     public string? Url { get; init; }
 
+    /// <summary>
+    /// When the thing the finding is about last changed: the branch's last commit, the newest edited
+    /// file, the PR's last update. Used to tell live work from abandoned work. Null when unknown.
+    /// Not part of the fingerprint.
+    /// </summary>
+    public DateTimeOffset? LastActivityAt { get; init; }
+
     /// <summary>Stable id used to remember snooze and dismiss decisions.</summary>
     public required string Fingerprint { get; init; }
 

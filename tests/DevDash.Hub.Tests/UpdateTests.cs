@@ -244,7 +244,7 @@ public class UpdateTests
         Assert.Contains("Update available: 0.3.0", html);
         Assert.Contains("up to date", html);
         Assert.Contains("Update all (2)", html);
-        Assert.Contains("updates: not supported by this version", html);
+        Assert.Contains("reinstall needed", html);
         Assert.Contains("Run the install one-liner on that machine once", html);
         Assert.Equal(2, html.Split("Ask this machine's agent to install 0.3.0").Length - 1); // an Update button for the two that accept one
 

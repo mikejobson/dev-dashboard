@@ -71,4 +71,21 @@ public class RemoteUrlNormalizerTests
         Assert.Equal("backup", remotes[1].Name);
         Assert.Null(remotes[1].Normalized);
     }
+
+    [Fact]
+    public void Remote_list_reads_partial_clones_with_a_filter_after_the_fetch_marker()
+    {
+        const string output = "origin\thttps://github.com/Acme-Corp/Gadget.git (fetch) [blob:none]\n"
+            + "origin\thttps://github.com/Acme-Corp/Gadget.git (push)\n"
+            + "shallow\tgit@github.com:acme-corp/widget.git (fetch) [tree:0]\n";
+
+        var remotes = RemoteListParser.Parse(output);
+
+        Assert.Equal(2, remotes.Count);
+        Assert.Equal("origin", remotes[0].Name);
+        Assert.Equal("https://github.com/Acme-Corp/Gadget.git", remotes[0].Url);
+        Assert.Equal("github.com/acme-corp/gadget", remotes[0].Normalized);
+        Assert.Equal("shallow", remotes[1].Name);
+        Assert.Equal("git@github.com:acme-corp/widget.git", remotes[1].Url);
+    }
 }

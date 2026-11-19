@@ -21,14 +21,15 @@ public sealed class MergedBranchRule : ICleanupRule
             }
 
             var checkedOut = CheckedOutBranches(git);
-            var merged = git.Branches
+            var mergedBranches = git.Branches
                 .Where(b => b.MergedIntoDefault == true
                     && b.Name != git.DefaultBranch
                     && !b.UpstreamGone // reported by GoneUpstreamRule
                     && !checkedOut.Contains(b.Name))
-                .Select(b => b.Name)
-                .OrderBy(n => n, StringComparer.Ordinal)
+                .OrderBy(b => b.Name, StringComparer.Ordinal)
                 .ToList();
+            var newest = Latest([.. mergedBranches.Select(b => b.LastCommitDate)]);
+            var merged = mergedBranches.Select(b => b.Name).ToList();
 
             if (merged.Count == 0)
             {
@@ -45,7 +46,7 @@ public sealed class MergedBranchRule : ICleanupRule
                     Fix(merged.Count == 1 ? "Delete the merged branch" : "Delete the merged branches", GitCmd(path, "branch -d " + names),
                         merged.Count <= AgentActions.MaxBranches ? AgentAction.DeleteBranches(path, merged) : null),
                 ],
-                [.. merged]);
+                [.. merged]).ActiveAt(newest);
         }
     }
 }

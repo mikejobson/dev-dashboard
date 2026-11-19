@@ -2,6 +2,7 @@
 @inherits LivePage
 @inject SnapshotStore Snapshots
 @inject RepoCatalog Catalog
+@inject NavigationManager Nav
 
 <PageTitle>Local · DevDash</PageTitle>
 
@@ -10,16 +11,29 @@
         <h1>Local</h1>
         <p>Every entry in your code folders, by machine.</p>
     </div>
-    <span class="muted small">@Visible.Count of @_rows.Count shown</span>
+    <span class="muted small">@(Repos.Count + (_notGit ? 0 : Folders.Count)) of @_rows.Count shown</span>
 </div>
 
 <div class="toolbar">
     <input type="search" placeholder="Search name, owner, branch…" aria-label="Search repos" @bind="_search" @bind:event="oninput" />
+    <select aria-label="Owner" value="@(Owner ?? "")" @onchange="e => SetOwner(e.Value?.ToString())">
+        <option value="">All owners</option>
+        @foreach (var (owner, count) in _owners)
+        {
+            <option value="@owner">@owner (@count)</option>
+        }
+    </select>
     <button type="button" class="toggle @(_dirty ? "on" : "")" aria-pressed="@_dirty" @onclick="() => _dirty = !_dirty">Dirty</button>
     <button type="button" class="toggle @(_ahead ? "on" : "")" aria-pressed="@_ahead" @onclick="() => _ahead = !_ahead">Ahead</button>
     <button type="button" class="toggle @(_behind ? "on" : "")" aria-pressed="@_behind" @onclick="() => _behind = !_behind">Behind</button>
     <button type="button" class="toggle @(_stale ? "on" : "")" aria-pressed="@_stale" @onclick="() => _stale = !_stale">Stale</button>
     <button type="button" class="toggle @(_notGit ? "on" : "")" aria-pressed="@_notGit" @onclick="() => _notGit = !_notGit">Not git</button>
+    <span class="sort-links small">
+        <span class="muted">Sort</span>
+        @SortLink(LocalSort.Activity, "Last activity")
+        @SortLink(LocalSort.Name, "Name")
+        @SortLink(LocalSort.State, "State")
+    </span>
 </div>
 
 @if (_machines.Count == 0)
@@ -28,26 +42,111 @@
 }
 else
 {
-    <div class="table-wrap">
-        <table>
+    @Table(Repos, true)
+
+    @if (!_notGit && Folders.Count > 0)
+    {
+        @* Folders that are not repos (backups, loose files) stay out of the way; the "Not git" filter lists them on their own. *@
+        <details class="fold" id="non-git">
+            <summary><strong>@Fmt.Count(Folders.Count, "non-git folder")</strong> <span class="muted small">backups, loose files and other folders that are not repos</span></summary>
+            @Table(Folders, false)
+        </details>
+    }
+}
+
+@code {
+    private const int StaleDays = 180;
+
+    /// <summary><c>?sort=activity|name|state</c>. Last activity is the default.</summary>
+    [SupplyParameterFromQuery] public string? Sort { get; set; }
+
+    /// <summary><c>?dir=asc|desc</c>. Without it each column sorts its natural way: newest first, A to Z.</summary>
+    [SupplyParameterFromQuery] public string? Dir { get; set; }
+
+    /// <summary><c>?owner=…</c> keeps one remote owner, or <c>(local)</c> for entries with no remote.</summary>
+    [SupplyParameterFromQuery] public string? Owner { get; set; }
+
+    private IReadOnlyList<MachineView> _machines = [];
+    private IReadOnlyList<RepoRow> _rows = [];
+    private IReadOnlyDictionary<string, string> _hints = new Dictionary<string, string>();
+    private IReadOnlyList<(string Owner, int Count)> _owners = [];
+    private string _search = "";
+    private bool _dirty, _ahead, _behind, _stale, _notGit;
+
+    private LocalSort ActiveSort => LocalView.ParseSort(Sort);
+
+    private bool Descending => Dir switch
+    {
+        "asc" => false,
+        "desc" => true,
+        _ => LocalView.DefaultDescending(ActiveSort),
+    };
+
+    private List<RepoRow> Sorted => LocalView.Sort(_rows.Where(Matches), ActiveSort, Descending);
+
+    /// <summary>The main table: git repos, or only the non-git entries when that filter is on.</summary>
+    private List<RepoRow> Repos => Sorted.Where(r => _notGit ? r.Kind != EntryKind.GitRepo : r.Kind == EntryKind.GitRepo).ToList();
+
+    private List<RepoRow> Folders => Sorted.Where(r => r.Kind != EntryKind.GitRepo).ToList();
+
+    protected override async Task LoadAsync()
+    {
+        _machines = Snapshots.Machines;
+        _rows = await Catalog.GetAsync();
+        _hints = LocalView.Disambiguators(_rows);
+        _owners = LocalView.Owners(_rows);
+    }
+
+    private string Url(LocalSort sort, bool descending, string? owner) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("local").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    {
+        ["sort"] = sort == LocalSort.Activity ? null : sort.ToString().ToLowerInvariant(),
+        ["dir"] = descending == LocalView.DefaultDescending(sort) ? null : descending ? "desc" : "asc",
+        ["owner"] = string.IsNullOrEmpty(owner) ? null : owner,
+    });
+
+    /// <summary>Clicking the active column flips its direction; another column starts in its natural one.</summary>
+    private string SortUrl(LocalSort sort) => Url(sort, sort == ActiveSort ? !Descending : LocalView.DefaultDescending(sort), Owner);
+
+    private void SetOwner(string? owner) => Nav.NavigateTo(Url(ActiveSort, Descending, owner), replace: true);
+
+    private string? AriaSort(LocalSort sort) => sort != ActiveSort ? null : Descending ? "descending" : "ascending";
+
+    private RenderFragment SortLink(LocalSort sort, string label) =>
+        @<a class="sort @(sort == ActiveSort ? "active" : "")" href="@SortUrl(sort)" title="Sort by @label.ToLowerInvariant()">@label@if (sort == ActiveSort) { <span class="sort-arrow" aria-hidden="true">@(Descending ? "↓" : "↑")</span> }</a>;
+
+    private RenderFragment Table(List<RepoRow> rows, bool sortable) => @<div class="table-wrap sticky-head">
+        <table class="stack local-table">
             <thead>
                 <tr>
-                    <th>Repo</th>
+                    <th aria-sort="@AriaSort(LocalSort.Name)">@if (sortable) { @SortLink(LocalSort.Name, "Repo") } else { <span>Folder</span> }</th>
                     @foreach (var machine in _machines)
                     {
-                        <th><span class="dot @(Snapshots.IsOnline(machine) ? "ok" : "")"></span>@machine.Machine.Hostname</th>
+                        <th aria-sort="@AriaSort(LocalSort.State)">
+                            @if (sortable)
+                            {
+                                <a class="sort @(ActiveSort == LocalSort.State ? "active" : "")" href="@SortUrl(LocalSort.State)" title="@machine.Machine.Hostname: sort by state, the repos that most need attention first"><span class="dot @(Snapshots.IsOnline(machine) ? "ok" : "")"></span>@machine.Machine.Hostname@if (ActiveSort == LocalSort.State) { <span class="sort-arrow" aria-hidden="true">@(Descending ? "↓" : "↑")</span> }</a>
+                            }
+                            else
+                            {
+                                <span title="@machine.Machine.Hostname"><span class="dot @(Snapshots.IsOnline(machine) ? "ok" : "")"></span>@machine.Machine.Hostname</span>
+                            }
+                        </th>
                     }
                     <th>GitHub</th>
-                    <th class="right">Last activity</th>
+                    <th class="right" aria-sort="@AriaSort(LocalSort.Activity)">@if (sortable) { @SortLink(LocalSort.Activity, "Last activity") } else { <span>Last activity</span> }</th>
                 </tr>
             </thead>
             <tbody>
-                @foreach (var row in Visible)
+                @foreach (var row in rows)
                 {
-                    <tr>
-                        <td class="desc">
-                            <a href="@Fmt.RepoUrl(row.Key)"><strong>@row.Name</strong></a>
-                            @if (row.Owner is not null)
+                    <tr @key="row.Key">
+                        <td class="desc cell-main">
+                            <a class="title-link" href="@Fmt.RepoUrl(row.Key)"><strong>@row.Name</strong></a>
+                            @if (_hints.TryGetValue(row.Key, out var hint))
+                            {
+                                <span class="owner hint small" title="Another entry is also called @row.Name">@hint</span>
+                            }
+                            else if (row.Owner is not null)
                             {
                                 <span class="owner muted small">@row.Owner</span>
                             }
@@ -58,20 +157,23 @@ else
                         </td>
                         @foreach (var machine in _machines)
                         {
-                            <td>
-                                @foreach (var clone in row.Clones.Where(c => c.Machine.MachineId == machine.MachineId))
-                                {
-                                    <div class="clone" title="@clone.Entry.Path">
-                                        @if (row.Clones.Count(c => c.Machine.MachineId == machine.MachineId) > 1 || clone.DisplayName != row.Name)
-                                        {
-                                            <div class="sub mono">@clone.DisplayName</div>
-                                        }
-                                        <CloneChips Clone="clone" />
-                                    </div>
-                                }
+                            var clones = row.Clones.Where(c => c.Machine.MachineId == machine.MachineId).ToList();
+                            <td data-label="@machine.Machine.Hostname" class="@(clones.Count == 0 ? "blank" : "")">
+                                <div>
+                                    @foreach (var clone in clones)
+                                    {
+                                        <div class="clone" title="@clone.Entry.Path">
+                                            @if (clones.Count > 1 || clone.DisplayName != row.Name)
+                                            {
+                                                <div class="sub mono">@clone.DisplayName</div>
+                                            }
+                                            <CloneChips Clone="clone" />
+                                        </div>
+                                    }
+                                </div>
                             </td>
                         }
-                        <td>
+                        <td data-label="GitHub" class="@(HasGitHubCell(row) ? "" : "blank")">
                             <div class="chips">
                                 @if (row.GitHub is { } gh)
                                 {
@@ -94,33 +196,18 @@ else
                                 }
                             </div>
                         </td>
-                        <td class="right nowrap sub" title="@Fmt.Date(row.LastActivity)">@Fmt.Ago(row.LastActivity, Now)</td>
+                        <td data-label="Last activity" class="cell-when right nowrap sub" title="@Fmt.Date(row.LastActivity)">@Fmt.Ago(row.LastActivity, Now)</td>
                     </tr>
                 }
-                @if (Visible.Count == 0)
+                @if (rows.Count == 0)
                 {
                     <tr><td class="empty" colspan="@(_machines.Count + 3)">Nothing matches these filters.</td></tr>
                 }
             </tbody>
         </table>
-    </div>
-}
+    </div>;
 
-@code {
-    private const int StaleDays = 180;
-
-    private IReadOnlyList<MachineView> _machines = [];
-    private IReadOnlyList<RepoRow> _rows = [];
-    private string _search = "";
-    private bool _dirty, _ahead, _behind, _stale, _notGit;
-
-    private List<RepoRow> Visible => _rows.Where(Matches).ToList();
-
-    protected override async Task LoadAsync()
-    {
-        _machines = Snapshots.Machines;
-        _rows = await Catalog.GetAsync();
-    }
+    private static bool HasGitHubCell(RepoRow row) => row.GitHub is not null || row.RemoteMissing || row.IsHosted || row.Kind == EntryKind.GitRepo;
 
     private bool Matches(RepoRow row)
     {
@@ -128,7 +215,7 @@ else
         if (_ahead && !row.AnyAhead) { return false; }
         if (_behind && !row.AnyBehind) { return false; }
         if (_stale && !(row.LastActivity is { } last && (Now - last).TotalDays >= StaleDays)) { return false; }
-        if (_notGit && row.Kind == EntryKind.GitRepo) { return false; }
+        if (!string.IsNullOrEmpty(Owner) && !string.Equals(LocalView.OwnerOf(row), Owner, StringComparison.OrdinalIgnoreCase)) { return false; }
 
         var term = _search.Trim();
         if (term.Length == 0)

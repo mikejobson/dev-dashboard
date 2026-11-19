@@ -33,6 +33,7 @@ public sealed class StalePullRequestRule : ICleanupRule
                 ],
                 RepoKey = pr.RepoKey,
                 Url = pr.Url,
+                LastActivityAt = pr.UpdatedAt,
                 Fingerprint = Finding.MakeFingerprint(Id, pr.RepoKey, pr.Number.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             };
         }

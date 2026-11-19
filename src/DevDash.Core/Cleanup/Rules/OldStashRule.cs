@@ -8,7 +8,9 @@ namespace DevDash.Core.Cleanup.Rules;
 public sealed class OldStashRule : ICleanupRule
 {
     public string Id => "old-stash";
-    public string Title => "Stashes older than N days";
+    public string Title => TitleFor(new CleanupOptions());
+
+    public string TitleFor(CleanupOptions options) => $"Stashes older than {Span(options.StashDays)}";
     public string Description => "Old stashes are easy to forget and hard to make sense of later. Apply or drop them.";
 
     public IEnumerable<Finding> Evaluate(CleanupContext context)
@@ -48,7 +50,8 @@ public sealed class OldStashRule : ICleanupRule
                 + "Look at each one, then apply or drop it. Dropping renumbers the stashes after it, so drop the highest number first.",
                 commands,
                 // Stash indexes shift, so identify stashes by their creation time.
-                [.. old.Select(s => s.Date.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture))]);
+                [.. old.Select(s => s.Date.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture))])
+                .ActiveAt(old[^1].Date);
         }
     }
 

@@ -1,0 +1,43 @@
+@* Pull requests with busy repos folded away: one collapsed row per repo with three or more, the rest in a plain list. *@
+@if (Items.Count == 0)
+{
+    <div class="card muted">@Empty</div>
+}
+else
+{
+    var (groups, singles) = PrGrouping.Group(Items);
+    @foreach (var group in groups)
+    {
+        <details class="pr-group @(group.HasTrouble ? "trouble" : "")" @key="group.RepoKey">
+            <summary>
+                <span class="pr-group-name"><strong>@group.Name</strong>@if (group.Owner is not null) { <span class="owner muted small">@group.Owner</span> }</span>
+                <span class="pr-group-summary">
+                    @foreach (var (part, index) in group.Summary().Select((p, i) => (p, i)))
+                    {
+                        @if (index > 0) { <span class="sep" aria-hidden="true">·</span> }
+                        <span class="tone-@(part.Tone.Length == 0 ? "plain" : part.Tone)">@part.Text</span>
+                    }
+                </span>
+                <span class="pr-group-when sub nowrap" title="Most recent update: @Fmt.Date(group.UpdatedAt)">@Fmt.Ago(group.UpdatedAt, Now)</span>
+            </summary>
+            <div class="pr-group-body">
+                <div class="pr-group-links small"><a href="@Fmt.RepoUrl(group.RepoKey)">Repo page</a> · <a href="https://github.com/@group.Repo/pulls" target="_blank" rel="noopener">Pull requests on GitHub</a></div>
+                <PrList Items="group.Items" Now="Now" Clones="Clones" ShowRepo="false" />
+            </div>
+        </details>
+    }
+    @if (singles.Count > 0)
+    {
+        <PrList Items="singles" Now="Now" Clones="Clones" />
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<PullRequestInfo> Items { get; set; } = [];
+
+    [Parameter] public IReadOnlyDictionary<string, List<CloneView>>? Clones { get; set; }
+
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+
+    [Parameter] public string Empty { get; set; } = "Nothing here.";
+}

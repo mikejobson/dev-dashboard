@@ -38,6 +38,7 @@ public sealed class DuplicateClonesRule : ICleanupRule
                 MachineName = first.Machine.Hostname,
                 Path = first.Entry.Path,
                 RepoKey = group.Key.RepoKey,
+                LastActivityAt = RuleHelpers.Latest([.. clones.Select(c => RuleHelpers.ActivityOf(c.Entry))]),
                 Fingerprint = Finding.MakeFingerprint(Id, [group.Key.MachineId, group.Key.RepoKey, .. clones.Select(c => c.Entry.Path)]),
             };
         }

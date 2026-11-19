@@ -78,6 +78,7 @@ builder.Services.AddSingleton(_ => new CleanupEngine());
 builder.Services.AddSingleton<ActionQueue>();
 builder.Services.AddHostedService<ActionExpiryService>();
 builder.Services.AddSingleton<FindingsService>();
+builder.Services.AddSingleton<NavCounts>();
 
 // ---- GitHub -------------------------------------------------------------------------------------
 builder.Services.AddSingleton<IGitHubTokenProvider, GitHubTokenProvider>();

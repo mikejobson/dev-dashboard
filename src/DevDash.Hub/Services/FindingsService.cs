@@ -54,6 +54,9 @@ public sealed class FindingsService(
 {
     public IReadOnlyList<ICleanupRule> Rules => engine.Rules;
 
+    /// <summary>The rule's heading with the configured thresholds in it ("older than 14 days").</summary>
+    public string TitleOf(ICleanupRule rule) => rule.TitleFor(options.CurrentValue.Cleanup);
+
     public async Task<IReadOnlyList<FindingView>> GetAsync(CancellationToken ct = default)
     {
         var now = time.GetUtcNow();
@@ -100,6 +103,47 @@ public sealed class FindingsService(
 
     public Task DismissAsync(Finding finding, CancellationToken ct = default) =>
         SetAsync(finding.Fingerprint, finding.RuleId, finding.Title, FindingStatus.Dismissed, null, ct);
+
+    /// <summary>Snoozes a whole group at once: one save, one notification.</summary>
+    public Task<int> SnoozeManyAsync(IEnumerable<Finding> findings, TimeSpan duration, CancellationToken ct = default) =>
+        SetManyAsync(findings, FindingStatus.Snoozed, time.GetUtcNow() + duration, ct);
+
+    /// <summary>Dismisses a whole group at once: one save, one notification.</summary>
+    public Task<int> DismissManyAsync(IEnumerable<Finding> findings, CancellationToken ct = default) =>
+        SetManyAsync(findings, FindingStatus.Dismissed, null, ct);
+
+    private async Task<int> SetManyAsync(IEnumerable<Finding> findings, FindingStatus status, DateTimeOffset? until, CancellationToken ct)
+    {
+        var wanted = findings.DistinctBy(f => f.Fingerprint, StringComparer.Ordinal).ToList();
+        if (wanted.Count == 0)
+        {
+            return 0;
+        }
+
+        var now = time.GetUtcNow();
+        var fingerprints = wanted.Select(f => f.Fingerprint).ToList();
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var existing = await db.FindingStates.Where(s => fingerprints.Contains(s.Fingerprint)).ToDictionaryAsync(s => s.Fingerprint, StringComparer.Ordinal, ct);
+        foreach (var finding in wanted)
+        {
+            if (!existing.TryGetValue(finding.Fingerprint, out var state))
+            {
+                state = new FindingStateEntity { Fingerprint = finding.Fingerprint };
+                db.FindingStates.Add(state);
+            }
+
+            state.Status = status;
+            state.SnoozedUntil = until;
+            state.RuleId = finding.RuleId;
+            state.Title = finding.Title;
+            state.UpdatedAt = now;
+        }
+
+        // One SaveChanges is one transaction: the whole group changes or none of it does.
+        await db.SaveChangesAsync(ct);
+        notifier.Notify(DashboardChange.Findings);
+        return wanted.Count;
+    }
 
     public async Task<bool> SetByFingerprintAsync(string fingerprint, FindingStatus status, TimeSpan? snooze, CancellationToken ct = default)
     {

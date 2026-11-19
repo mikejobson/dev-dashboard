@@ -41,6 +41,7 @@ public sealed class DivergedAcrossMachinesRule : ICleanupRule
                     + "each later machine picks up the earlier commits in its rebase.",
                 Commands = [.. perMachine.SelectMany(c => CommandsFor(c, group.Key.Branch))],
                 RepoKey = group.Key.RepoKey,
+                LastActivityAt = Latest([.. perMachine.Select(c => ActivityOf(c.Entry))]),
                 Fingerprint = Finding.MakeFingerprint(Id, [group.Key.RepoKey, group.Key.Branch, .. perMachine.Select(c => c.Machine.MachineId)]),
             };
         }

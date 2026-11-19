@@ -48,11 +48,11 @@
         <div class="value">@_reviews.Count</div>
         <div class="label">PRs waiting for my review</div>
     </a>
-    <a class="tile @(_failing.Count > 0 ? "danger" : "")" href="github">
+    <a class="tile @(_failing.Count > 0 ? "danger" : "")" href="cleanup?q=CI%20failing">
         <div class="value">@_failing.Count</div>
         <div class="label">of my PRs failing CI</div>
     </a>
-    <a class="tile @(_active.Count > 0 ? "warn" : "ok")" href="cleanup">
+    <a class="tile @(_active.Count > 0 ? "warn" : "ok")" href="cleanup?view=repo">
         <div class="value">@_active.Count</div>
         <div class="label">cleanup findings</div>
     </a>
@@ -60,21 +60,25 @@
 
 <div class="grid-2">
     <section>
-        <h2>Needs attention</h2>
+        <h2>Today</h2>
         <div class="card">
-            @if (_reviews.Count == 0 && _failing.Count == 0 && _urgent.Count == 0)
+            @if (_failingNow.Count == 0 && _reviewsShown.Count == 0 && _urgent.Count == 0)
             {
-                <span class="muted">Nothing urgent.</span>
+                <span class="muted">Nothing needs you right now.</span>
             }
             else
             {
-                <ul class="list">
-                    @foreach (var pr in _failing)
+                <ul class="list today">
+                    @foreach (var pr in _failingNow.Take(FindingTriage.TodayRows))
                     {
                         <li>
                             <span class="dot danger"></span><a href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
-                            <div class="sub muted small">CI failing · @pr.Repo#@pr.Number · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
+                            <div class="sub muted small">CI failing@(pr.IsDraft ? " (draft)" : "") · @pr.Repo#@pr.Number · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
                         </li>
+                    }
+                    @if (_failingNow.Count > FindingTriage.TodayRows)
+                    {
+                        <li class="more"><a href="github">@(_failingNow.Count - FindingTriage.TodayRows) more of my PRs failing CI →</a></li>
                     }
                     @foreach (var pr in _reviewsShown)
                     {
@@ -83,30 +87,73 @@
                             <div class="sub muted small">Review requested@(pr.IsDraft ? " (draft)" : "") · @pr.Repo#@pr.Number · @pr.Author · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
                         </li>
                     }
-                    @if (_reviewsHidden > 0)
+                    @if (_reviewsMore > 0)
                     {
-                        <li class="more"><a href="github">@_reviewsHidden more review @(_reviewsHidden == 1 ? "request" : "requests") on the GitHub page →</a></li>
+                        <li class="more"><a href="github">@_reviewsMore more review @(_reviewsMore == 1 ? "request" : "requests") on the GitHub page →</a></li>
                     }
-                    @foreach (var view in _urgent)
+                    @foreach (var group in _urgent.Take(UrgentRows))
                     {
+                        var top = group.Items[0].Finding;
                         <li>
-                            <span class="dot @Fmt.SeverityClass(view.Finding.Severity)"></span>
-                            @if (view.Finding.RepoKey is not null)
-                            {
-                                <a href="@Fmt.RepoUrl(view.Finding.RepoKey)">@view.Finding.Title</a>
-                            }
-                            else
-                            {
-                                <a href="cleanup">@view.Finding.Title</a>
-                            }
-                            <div class="sub muted small clamp-2">@view.Finding.Explanation</div>
+                            <span class="dot @Fmt.SeverityClass(group.Worst)"></span>
+                            <a href="@UrgentUrl(group)">@(group.Items.Count == 1 ? top.Title : $"{group.Name}: {group.Items.Count} things at risk")</a>
+                            <div class="sub muted small clamp-2">
+                                @(group.MachineName is null ? "" : group.MachineName + " · ")@(group.LastActivityAt is null ? "" : "last touched " + Fmt.Ago(group.LastActivityAt, Now) + " · ")@(group.Items.Count == 1 ? top.Explanation : string.Join(" · ", group.Items.Select(v => v.Finding.Title)))
+                            </div>
                         </li>
                     }
-                    @if (_active.Count > _urgent.Count)
+                    @if (_urgent.Count > UrgentRows)
                     {
-                        <li class="more"><a href="cleanup">All @_active.Count cleanup findings →</a></li>
+                        <li class="more"><a href="cleanup?view=repo&age=recent&severity=medium">@(_urgent.Count - UrgentRows) more repos with recent work at risk →</a></li>
                     }
                 </ul>
+            }
+            @if (_botDraftsHidden > 0 || _failingOld > 0)
+            {
+                <div class="muted small today-note">
+                    @if (_failingOld > 0)
+                    {
+                        <div>@_failingOld of my failing PRs @(_failingOld == 1 ? "has" : "have") been idle for more than @FindingTriage.NeglectedDays days: <a href="cleanup?q=CI%20failing">under Tidy-up →</a></div>
+                    }
+                    @if (_botDraftsHidden > 0)
+                    {
+                        <div>@_botDraftsHidden bot-authored draft @(_botDraftsHidden == 1 ? "review request" : "review requests") idle for more than @PrTriage.StaleBotDraftDays days @(_botDraftsHidden == 1 ? "is" : "are") left out: <a href="github">GitHub page →</a></div>
+                    }
+                </div>
+            }
+        </div>
+
+        <h2>Tidy-up</h2>
+        <div class="card tidy">
+            @if (_active.Count == 0)
+            {
+                <span class="muted">Nothing to clean up.</span>
+            }
+            else
+            {
+                <div class="tidy-line">
+                    <a href="cleanup"><strong>@_active.Count</strong> @(_active.Count == 1 ? "finding" : "findings")</a>
+                    across <a href="cleanup?view=repo"><strong>@_findingRepos</strong> @(_findingRepos == 1 ? "repo" : "repos and folders")</a>
+                    @if (_neglected > 0)
+                    {
+                        <span> · <a href="cleanup?age=old"><strong>@_neglected</strong> untouched &gt; @FindingTriage.NeglectedDays days</a></span>
+                    }
+                    @if (_recent > 0)
+                    {
+                        <span> · <a href="cleanup?age=recent"><strong>@_recent</strong> active in the last @FindingTriage.RecentDays days</a></span>
+                    }
+                </div>
+                <div class="tidy-rules">
+                    @foreach (var (rule, title, count, worst) in _topRules)
+                    {
+                        <a class="chip" href="cleanup#@rule"><span class="dot @Fmt.SeverityClass(worst)"></span>@title <span class="muted">@count</span></a>
+                    }
+                    @if (_otherRules > 0)
+                    {
+                        <a class="chip muted" href="cleanup">+@_otherRules more</a>
+                    }
+                </div>
+                <div class="muted small">None of this is urgent: old work is listed here, not under Today. <a href="cleanup?view=repo">By repo</a> · <a href="cleanup">By rule</a> · <a href="cleanup?severity=high">High severity only</a></div>
             }
         </div>
     </section>
@@ -165,9 +212,28 @@
     private List<PullRequestInfo> _reviews = [];
     private List<PullRequestInfo> _failing = [];
     private List<PullRequestInfo> _reviewsShown = [];
-    private int _reviewsHidden;
+    private int _reviewsMore;
+    private int _botDraftsHidden;
+    private int _findingRepos;
+    private int _neglected;
+    private int _recent;
+    private List<(string Id, string Title, int Count, FindingSeverity Worst)> _topRules = [];
+    private int _otherRules;
+
+    /// <summary>The repo's recent findings on the Cleanup page, where the commands are.</summary>
+    private static string UrgentUrl(RepoFindings group) =>
+        "cleanup?view=repo&age=recent&q=" + Uri.EscapeDataString(group.Name[(group.Name.LastIndexOf('/') + 1)..])
+        + (group.MachineId is null ? "" : "&machine=" + Uri.EscapeDataString(group.MachineId));
+
+    /// <summary>Repos with at-risk local findings the Today list shows before linking to Cleanup.</summary>
+    private const int UrgentRows = 8;
+
+    /// <summary>Rule chips in the Tidy-up block.</summary>
+    private const int TopRules = 5;
     private List<FindingView> _active = [];
-    private List<FindingView> _urgent = [];
+    private IReadOnlyList<RepoFindings> _urgent = [];
+    private List<PullRequestInfo> _failingNow = [];
+    private int _failingOld;
     private int _online;
     private int _dirty;
     private int _notCloned;
@@ -183,25 +249,40 @@
 
         var gh = GitHub.Current;
         _reviews = gh.PullRequests.Where(p => p.ReviewRequested).ToList();
-        _failing = gh.PullRequests.Where(p => p.Authored && p.Ci == CiState.Failure).ToList();
+        // Ready PRs before drafts, then the most recently updated.
+        _failing = gh.PullRequests.Where(p => p.Authored && p.Ci == CiState.Failure)
+            .OrderBy(p => p.IsDraft).ThenByDescending(p => p.UpdatedAt).ToList();
+        // A failing PR nobody has touched for months is abandoned, not urgent: Tidy-up has it.
+        var now = Now;
+        _failingNow = _failing.Where(p => (now - p.UpdatedAt).TotalDays <= FindingTriage.NeglectedDays).ToList();
+        _failingOld = _failing.Count - _failingNow.Count;
         // A PR that is both failing and awaiting my review is listed once, under failing.
-        var failingUrls = _failing.Select(p => p.Url).ToHashSet();
+        var failingUrls = _failingNow.Select(p => p.Url).ToHashSet();
         var reviewQueue = _reviews
-            .Where(p => !failingUrls.Contains(p.Url))
+            .Where(p => !failingUrls.Contains(p.Url) && !PrTriage.IsStaleBotDraft(p, now))
             .OrderBy(p => p.IsDraft)
             .ThenByDescending(p => p.UpdatedAt)
             .ToList();
-        _reviewsShown = reviewQueue.Take(5).ToList();
-        _reviewsHidden = reviewQueue.Count - _reviewsShown.Count;
+        _botDraftsHidden = _reviews.Count(p => !failingUrls.Contains(p.Url) && PrTriage.IsStaleBotDraft(p, now));
+        _reviewsShown = reviewQueue.Take(FindingTriage.TodayRows).ToList();
+        _reviewsMore = reviewQueue.Count - _reviewsShown.Count;
         var cloned = Catalog.ClonesByGitHubKey();
         _notCloned = gh.RecentRepos.Count(r => !cloned.ContainsKey(r.Key));
 
         _active = (await Findings.GetAsync()).Where(v => v.IsActive).ToList();
-        // Failing CI is already listed from the PR data above.
-        _urgent = _active
-            .Where(v => v.Finding.Severity >= FindingSeverity.Medium && v.Finding.RuleId != "failing-ci-pr")
-            .OrderByDescending(v => v.Finding.Severity)
-            .Take(8)
+        // Live work that could be lost. Anything idle for months is tidy-up, however severe its rule calls it.
+        // One row per repo and machine, so a repo with six unpushed branches does not fill the list.
+        _urgent = FindingTriage.ByRepo(_active.Where(v => FindingTriage.NeedsActionToday(v.Finding, now)), now);
+        _findingRepos = FindingTriage.RepoCount(_active);
+        _neglected = _active.Count(v => FindingTriage.AgeOf(v.Finding, now) == FindingAge.Neglected);
+        _recent = _active.Count(v => FindingTriage.AgeOf(v.Finding, now) == FindingAge.Recent);
+        var rules = Findings.Rules
+            .Select(r => (Rule: r, Items: _active.Where(v => v.Finding.RuleId == r.Id).ToList()))
+            .Where(g => g.Items.Count > 0)
+            .OrderByDescending(g => g.Items.Count)
+            .Select(g => (g.Rule.Id, Findings.TitleOf(g.Rule), g.Items.Count, g.Items.Max(v => v.Finding.Severity)))
             .ToList();
+        _topRules = rules.Take(TopRules).ToList();
+        _otherRules = rules.Count - _topRules.Count;
     }
 }

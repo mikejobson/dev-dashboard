@@ -6,7 +6,9 @@ namespace DevDash.Core.Cleanup.Rules;
 public sealed class OldUncommittedChangesRule : ICleanupRule
 {
     public string Id => "old-uncommitted";
-    public string Title => "Uncommitted changes older than N days";
+    public string Title => TitleFor(new CleanupOptions());
+
+    public string TitleFor(CleanupOptions options) => $"Uncommitted changes older than {Span(options.UncommittedDays)}";
     public string Description => "Modified or untracked files that have been sitting in a working tree. Commit, stash or discard them.";
 
     public IEnumerable<Finding> Evaluate(CleanupContext context)
@@ -28,7 +30,7 @@ public sealed class OldUncommittedChangesRule : ICleanupRule
                             Inspect("What changed", GitCmd(clone.Entry.Path, "status --short")),
                             Inspect("Size of the changes", GitCmd(clone.Entry.Path, "diff HEAD --stat")),
                         ],
-                        "tracked");
+                        "tracked").ActiveAt(tracked);
                 }
             }
             else if (!git.IsDirty && git.Untracked > 0 && git.NewestUntrackedAt is { } untracked)
@@ -40,7 +42,7 @@ public sealed class OldUncommittedChangesRule : ICleanupRule
                         $"{clone.Entry.Name}: untracked files for {days} days",
                         $"{Plural(git.Untracked, "untracked path")} that git is neither tracking nor ignoring. Add them, ignore them or delete them.",
                         [Inspect("Untracked paths", GitCmd(clone.Entry.Path, "status --short"))],
-                        "untracked");
+                        "untracked").ActiveAt(untracked);
                 }
             }
         }

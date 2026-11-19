@@ -51,7 +51,11 @@ public sealed record CleanupContext
 public interface ICleanupRule
 {
     string Id { get; }
+    /// <summary>The group heading with the default thresholds. Prefer <see cref="TitleFor"/> when the options are at hand.</summary>
     string Title { get; }
+
+    /// <summary>The group heading, naming the thresholds that are actually configured.</summary>
+    string TitleFor(CleanupOptions options) => Title;
     string Description { get; }
     IEnumerable<Finding> Evaluate(CleanupContext context);
 }

@@ -1,0 +1,41 @@
+@* The main navigation with its counts. What each count means is defined in NavCounts. *@
+@inherits LivePage
+@inject NavCounts Counts
+
+<nav class="nav" aria-label="Main">
+    <NavLink href="" Match="NavLinkMatch.All">Overview</NavLink>
+    <NavLink href="local">Local</NavLink>
+    <NavLink href="github">
+        GitHub
+        @if (_github > 0)
+        {
+            <span class="nav-count" title="@Fmt.Count(_github, "review request") waiting on you">@_github</span>
+        }
+    </NavLink>
+    <NavLink href="cleanup">
+        Cleanup
+        @if (_cleanup > 0)
+        {
+            <span class="nav-count danger" title="@Fmt.Count(_cleanup, "high-severity finding")">@_cleanup</span>
+        }
+    </NavLink>
+    <NavLink href="machines">Machines</NavLink>
+</nav>
+
+@code {
+    private int _github, _cleanup;
+
+    protected override async Task LoadAsync()
+    {
+        _github = Counts.GitHub();
+        try
+        {
+            _cleanup = await Counts.CleanupAsync();
+        }
+        catch (Exception)
+        {
+            // The count is a nicety: a rule that throws must not take the navigation down with it.
+            _cleanup = 0;
+        }
+    }
+}

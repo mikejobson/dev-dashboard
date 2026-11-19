@@ -43,7 +43,7 @@ public sealed class GoneUpstreamRule : ICleanupRule
                                 isCheckedOut ? null : AgentAction.DeleteBranches(path, [branch.Name]))
                             : Fix("Force-delete (loses any commits not merged elsewhere)", GitCmd(path, $"branch -D {Quote(branch.Name)}")),
                     ],
-                    branch.Name);
+                    branch.Name).ActiveAt(branch.LastCommitDate);
             }
         }
     }

@@ -4,10 +4,24 @@
 @inject ActionQueue Queue
 @inject AuthenticationStateProvider Auth
 @inject IOptionsMonitor<HubOptions> Options
-<div class="finding @(View.IsActive ? "" : "hidden-state")">
-    <div class="finding-top">
-        <div class="finding-title">
-            <span class="dot @Fmt.SeverityClass(Finding.Severity)" title="@Finding.Severity severity"></span>@Finding.Title
+@inject TimeProvider Time
+@{
+    RenderFragment actions =
+        @<text>
+            @if (View.IsActive)
+            {
+                <button type="button" title="Hide this for 7 days" @onclick="() => OnSnooze.InvokeAsync((Finding, 7))">Snooze 7d</button>
+                <button type="button" title="Hide this for 30 days" aria-label="Snooze 30d" @onclick="() => OnSnooze.InvokeAsync((Finding, 30))">30d</button>
+                <button type="button" title="Hide this for good. It can be restored." @onclick="() => OnDismiss.InvokeAsync(Finding)">Dismiss</button>
+            }
+            else
+            {
+                <button type="button" @onclick="() => OnRestore.InvokeAsync(Finding)">Restore</button>
+            }
+        </text>;
+
+    RenderFragment status =
+        @<text>
             @if (View.Status == FindingStatus.Snoozed)
             {
                 <span class="chip muted" title="@Fmt.Date(View.SnoozedUntil)">snoozed until @(View.SnoozedUntil?.ToLocalTime().ToString("d MMM"))</span>
@@ -16,80 +30,122 @@
             {
                 <span class="chip muted">dismissed</span>
             }
-        </div>
-        <div class="finding-actions">
-            @if (View.IsActive)
+        </text>;
+
+    RenderFragment explanation =
+        @<p>
+            @Finding.Explanation
+            @if (Finding.MachineName is not null)
             {
-                <button type="button" @onclick="() => OnSnooze.InvokeAsync((Finding, 7))">Snooze 7d</button>
-                <button type="button" @onclick="() => OnSnooze.InvokeAsync((Finding, 30))">30d</button>
-                <button type="button" @onclick="() => OnDismiss.InvokeAsync(Finding)">Dismiss</button>
+                <span class="nowrap"> · @Finding.MachineName</span>
             }
-            else
+            @if (Finding.RepoKey is not null && ShowRepoLink)
             {
-                <button type="button" @onclick="() => OnRestore.InvokeAsync(Finding)">Restore</button>
+                <span> · <a href="@Fmt.RepoUrl(Finding.RepoKey)">repo</a></span>
             }
-        </div>
-    </div>
-    <p>
-        @Finding.Explanation
-        @if (Finding.MachineName is not null)
-        {
-            <span class="nowrap"> · @Finding.MachineName</span>
-        }
-        @if (Finding.RepoKey is not null && ShowRepoLink)
-        {
-            <span> · <a href="@Fmt.RepoUrl(Finding.RepoKey)">repo</a></span>
-        }
-        @if (Finding.Url is not null)
-        {
-            <span> · <a href="@Finding.Url" target="_blank" rel="noopener">open on GitHub</a></span>
-        }
-    </p>
-    @if (Rows.Count > 0)
-    {
-        <div class="commands">
-            @foreach (var command in Rows)
+            @if (Finding.Url is not null)
             {
-                var row = View.ActionFor(command);
-                <div class="command @(command.Kind == CommandKind.Fix ? "fix" : "inspect")">
-                    <span class="command-label">
-                        @if (command.MachineId is not null)
-                        {
-                            <span class="chip muted">@Finding.MachineNameFor(command)</span>
-                        }
-                        @command.Label
-                    </span>
-                    <code>@command.Command</code>
-                    <span class="command-buttons">
-                        <button type="button" class="copy" data-copy="@command.Command" title="Copy the command">Copy</button>
-                        @if (View.CanRun(command) && row is not { IsPending: true })
-                        {
-                            <button type="button" class="run" title="Queue this for the agent on @Finding.MachineNameFor(command). You confirm first." @onclick="() => Ask(command)">Run on @Finding.MachineNameFor(command)</button>
-                        }
-                    </span>
-                    @if (row is not null)
+                <span> · <a href="@Finding.Url" target="_blank" rel="noopener">open on GitHub</a></span>
+            }
+        </p>;
+
+    RenderFragment commands =
+        @<text>
+            @if (Rows.Count > 0)
+            {
+                <div class="commands">
+                    @foreach (var command in Rows)
                     {
-                        <span class="command-status">
-                            <span class="chip @StatusClass(row)" title="Queued by @row.QueuedBy at @Fmt.Date(row.QueuedAt)">@StatusText(row)</span>
-                            @if (row.Status is AgentActionStatus.Failed or AgentActionStatus.Expired && !string.IsNullOrWhiteSpace(row.Output))
+                        var row = View.ActionFor(command);
+                        <div class="command @(command.Kind == CommandKind.Fix ? "fix" : "inspect")">
+                            <span class="command-label">
+                                @if (command.MachineId is not null)
+                                {
+                                    <span class="chip muted">@Finding.MachineNameFor(command)</span>
+                                }
+                                @command.Label
+                            </span>
+                            <code>@command.Command</code>
+                            <span class="command-buttons">
+                                <button type="button" class="copy" data-copy="@command.Command" title="Copy the command">Copy</button>
+                                @if (View.CanRun(command) && row is not { IsPending: true })
+                                {
+                                    <button type="button" class="run" title="Queue this for the agent on @Finding.MachineNameFor(command). You confirm first." @onclick="() => Ask(command)">Run on @Finding.MachineNameFor(command)</button>
+                                }
+                            </span>
+                            @if (row is not null)
                             {
-                                <span class="command-output">@row.Output</span>
+                                <span class="command-status">
+                                    <span class="chip @StatusClass(row)" title="Queued by @row.QueuedBy at @Fmt.Date(row.QueuedAt)">@StatusText(row)</span>
+                                    @if (row.Status is AgentActionStatus.Failed or AgentActionStatus.Expired && !string.IsNullOrWhiteSpace(row.Output))
+                                    {
+                                        <span class="command-output">@row.Output</span>
+                                    }
+                                </span>
                             }
-                        </span>
+                        </div>
                     }
                 </div>
             }
-        </div>
-    }
-    @if (Shortcuts.Count > 0)
-    {
-        <div class="open-chips">
-            <span class="muted small">Open</span>
-            @foreach (var command in Shortcuts)
+            @if (Shortcuts.Count > 0)
             {
-                <button type="button" class="chip-btn" data-copy="@command.Command" title="Copy: @command.Command">@(command.MachineId is null ? command.Label : $"{command.Label} · {Finding.MachineNameFor(command)}")</button>
+                <div class="open-chips">
+                    <span class="muted small">Open</span>
+                    @foreach (var command in Shortcuts)
+                    {
+                        <button type="button" class="chip-btn" data-copy="@command.Command" title="Copy: @command.Command">@(command.MachineId is null ? command.Label : $"{command.Label} · {Finding.MachineNameFor(command)}")</button>
+                    }
+                </div>
             }
+        </text>;
+}
+<div class="finding @(Compact ? "compact" : "") @(Compact && Expanded ? "open" : "") @(View.IsActive ? "" : "hidden-state")">
+    @if (Compact)
+    {
+        var pending = PendingAction;
+        <div class="frow">
+            <button type="button" class="frow-main" aria-expanded="@Expanded" title="@(Expanded ? "Hide the details" : "Show what to do about it")" @onclick="() => OnToggle.InvokeAsync(Finding)">
+                <span class="chevron" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                <span class="dot @Fmt.SeverityClass(Finding.Severity)" title="@Finding.Severity severity"></span>
+                <span class="frow-title">@ShownTitle</span>
+                <span class="frow-meta">
+                    @status
+                    @if (pending is not null)
+                    {
+                        <span class="chip @StatusClass(pending)">@StatusText(pending)</span>
+                    }
+                    @if (MachineLabel is { } machineLabel)
+                    {
+                        <span class="chip muted">@machineLabel</span>
+                    }
+                    @if (Finding.LastActivityAt is { } activity)
+                    {
+                        <span class="frow-age muted small" title="Last activity @Fmt.Date(activity)">@Fmt.Ago(activity, Time.GetUtcNow())</span>
+                    }
+                </span>
+            </button>
+            <span class="frow-actions">@actions</span>
         </div>
+        @if (Expanded)
+        {
+            <div class="fpanel">
+                @explanation
+                <div class="fpanel-actions">@actions</div>
+                @commands
+            </div>
+        }
+    }
+    else
+    {
+        <div class="finding-top">
+            <div class="finding-title">
+                <span class="dot @Fmt.SeverityClass(Finding.Severity)" title="@Finding.Severity severity"></span>@Finding.Title
+                @status
+            </div>
+            <div class="finding-actions">@actions</div>
+        </div>
+        @explanation
+        @commands
     }
     @if (_asking is { Action: { } action } asking)
     {
@@ -127,6 +183,19 @@
 
     [Parameter] public bool ShowRepoLink { get; set; } = true;
 
+    /// <summary>One line per finding; the explanation and commands show when <see cref="Expanded"/>.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    [Parameter] public bool Expanded { get; set; }
+
+    [Parameter] public EventCallback<Finding> OnToggle { get; set; }
+
+    /// <summary>
+    /// Set when the row sits under its repo's heading: the leading "folder: " comes off the title and
+    /// the machine is not repeated.
+    /// </summary>
+    [Parameter] public bool UnderRepo { get; set; }
+
     [Parameter] public EventCallback<(Finding Finding, int Days)> OnSnooze { get; set; }
 
     [Parameter] public EventCallback<Finding> OnDismiss { get; set; }
@@ -139,6 +208,35 @@
     private bool _busy;
 
     private Finding Finding => View.Finding;
+
+    private string ShownTitle
+    {
+        get
+        {
+            var title = Finding.Title;
+            if (!UnderRepo || Finding.Path is not { } path)
+            {
+                return title;
+            }
+
+            // Titles start with the folder's name, which is not always the repo's name on GitHub.
+            var folder = path.TrimEnd('/', '\\');
+            folder = folder[(folder.LastIndexOfAny(['/', '\\']) + 1)..];
+            return folder.Length > 0 && title.Length > folder.Length + 2 && title.StartsWith(folder + ": ", StringComparison.OrdinalIgnoreCase)
+                ? char.ToUpperInvariant(title[folder.Length + 2]) + title[(folder.Length + 3)..]
+                : title;
+        }
+    }
+
+    /// <summary>Where the finding lives: its machine, the machines its commands are for, or GitHub.</summary>
+    private string? MachineLabel =>
+        Finding.MachineName is { } own ? (UnderRepo ? null : own)
+        : (Finding.Commands.Where(c => c.MachineId is not null).Select(c => c.MachineName ?? c.MachineId).Distinct().ToList() is { Count: > 0 } names
+            ? string.Join(" + ", names)
+            : Finding.Url is not null ? "GitHub" : null);
+
+    /// <summary>A queued or running action on any of the finding's commands, so a collapsed row still shows it.</summary>
+    private AgentActionEntity? PendingAction => Finding.Commands.Select(View.ActionFor).FirstOrDefault(r => r is { IsPending: true });
 
     // Look first, then act: inspect rows above fix rows, each keeping the order its rule gave.
     private List<FindingCommand> Rows =>

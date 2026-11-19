@@ -74,7 +74,7 @@ public sealed class StaleWorktreeRule : ICleanupRule
                         $"Worktree for merged branch {branch.Name}",
                         $"{wt.Path} has {branch.Name} checked out, which has nothing that is not already in {git.DefaultBranch}."
                         + (dirty ? " It has uncommitted changes, so look before removing it." : ""),
-                        remove, "merged", wt.Path);
+                        remove, "merged", wt.Path).ActiveAt(Latest(branch.LastCommitDate, entry?.LastModified));
                     continue;
                 }
 
@@ -83,7 +83,7 @@ public sealed class StaleWorktreeRule : ICleanupRule
                     yield return this.ForClone(repo, FindingSeverity.Medium,
                         $"Worktree for deleted branch {branch.Name}",
                         $"{wt.Path} has {branch.Name} checked out, and its upstream branch has been deleted on the remote.",
-                        remove, "gone", wt.Path);
+                        remove, "gone", wt.Path).ActiveAt(Latest(branch.LastCommitDate, entry?.LastModified));
                     continue;
                 }
 
@@ -102,7 +102,7 @@ public sealed class StaleWorktreeRule : ICleanupRule
                         $"No activity for {DaysSince(now, last)} days"
                         + (wt.Branch is null ? " (detached HEAD)." : $" on {wt.Branch}.")
                         + " Remove it if the work is finished; git refuses if it has uncommitted changes.",
-                        remove, "idle", wt.Path);
+                        remove, "idle", wt.Path).ActiveAt(last);
                 }
             }
         }

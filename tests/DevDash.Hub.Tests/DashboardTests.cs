@@ -46,12 +46,15 @@ public class DashboardTests
     [Theory]
     [InlineData("/", "Overview", "mac-host", "Please review gadget")]
     [InlineData("/local", "Local", "widget", "Widgets, from GitHub.", "feature/login", "3 changed", "not a git repo", "Reference Docs")]
-    [InlineData("/github", "Needs my review", "Please review gadget", "Add login form", "CI failing", "Login is slow", "acme/gadget", "not cloned anywhere", "mac-host")]
+    [InlineData("/github", "Needs action", "Needs my review", "Please review gadget", "Mine, CI failing", "Add login form", "CI failing")]
+    [InlineData("/github?tab=all", "Needs my review", "Please review gadget", "Add login form", "My issues", "Login is slow", "mac-host")]
+    [InlineData("/github?tab=activity", "Recent activity in your orgs", "acme/gadget", "not cloned anywhere", "mac-host")]
     [InlineData("/cleanup?open=all", "Not a git repo: Reference Docs", "widget: uncommitted changes for 40 days", "acme/widget#7: CI failing", "data-copy=", "Snooze 7d",
         "List the folder", "ls -la '/dev/Reference Docs'", "Move it to Documents", "code '/dev/widget'", "Copy the fixes as a script for", "# DevDash cleanup: Non-git folders in Developer on mac-host, generated ")]
     [InlineData("/cleanup", "Non-git folders in Developer", "Expand all")]
-    [InlineData("/machines", "mac-host", "online", "Agent API keys", "first-run", "Agent actions", "No actions have been queued.")]
-    [InlineData("/repo?key=github.com%2Facme%2Fwidget", "Widgets, from GitHub.", "/dev/widget", "Add login form", "Login is slow", "old-fix", "merged", "Open on GitHub")]
+    [InlineData("/machines", "mac-host", "online", "Agent API keys", "first-run", "Agent actions", "No actions have been queued.", "2 entries in 123 ms", "reinstall needed")]
+    [InlineData("/repo?key=github.com%2Facme%2Fwidget", "Widgets, from GitHub.", "/dev/widget", "Open pull requests", "Add login form", "Open issues", "Login is slow", "old-fix", "merged", "Open on GitHub",
+        "data-copy=\"cd '/dev/widget'\"", "data-copy=\"code '/dev/widget'\"")]
     public async Task Pages_render_the_state_on_the_server(string url, params string[] expected)
     {
         using var factory = await SeededAsync();

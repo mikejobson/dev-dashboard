@@ -38,126 +38,226 @@ else if (!Store.HasData)
 
 @if (_gh.Warnings.Count > 0)
 {
-    <details class="banner">
-        <summary>@_gh.Warnings.Count parts of the last poll could not be read</summary>
-        <ul>
-            @foreach (var warning in _gh.Warnings)
-            {
-                <li class="small">@warning</li>
-            }
-        </ul>
-    </details>
+    var first = _gh.Warnings[0];
+    var summary = $"{Fmt.Count(_gh.Warnings.Count, "part")} of the last poll could not be read";
+    @if (_gh.Warnings.Count == 1)
+    {
+        <div class="banner poll-warning"><strong>@summary:</strong> <span class="small">@first</span></div>
+    }
+    else
+    {
+        <details class="banner poll-warning">
+            <summary><strong>@summary:</strong> <span class="small">@first</span> <span class="muted small nowrap">+@(_gh.Warnings.Count - 1) more</span></summary>
+            <ul>
+                @foreach (var warning in _gh.Warnings)
+                {
+                    <li class="small">@warning</li>
+                }
+            </ul>
+        </details>
+    }
 }
 
-<h2>Needs my review <span class="muted small">@_review.Count</span></h2>
-<PrList Items="_review" Now="Now" Clones="_clones" Empty="No one is waiting on your review." />
+<nav class="tabs" aria-label="GitHub sections">
+    <a class="tab @(ActiveTab == TabNeeds ? "active" : "")" aria-current="@(ActiveTab == TabNeeds ? "page" : null)" href="@TabUrl(TabNeeds)">Needs action <span class="tab-count @(NeedsCount > 0 ? "hot" : "")">@NeedsCount</span></a>
+    <a class="tab @(ActiveTab == TabAll ? "active" : "")" aria-current="@(ActiveTab == TabAll ? "page" : null)" href="@TabUrl(TabAll)">All <span class="tab-count">@(_gh.PullRequests.Count + _gh.Issues.Count)</span></a>
+    <a class="tab @(ActiveTab == TabActivity ? "active" : "")" aria-current="@(ActiveTab == TabActivity ? "page" : null)" href="@TabUrl(TabActivity)">Org activity <span class="tab-count">@_gh.RecentRepos.Count</span></a>
+</nav>
 
-<h2>Mine, CI failing <span class="muted small">@_failing.Count</span></h2>
-<PrList Items="_failing" Now="Now" Clones="_clones" Empty="None of your PRs are failing CI." />
-
-<h2>Mine <span class="muted small">@_mine.Count</span></h2>
-<PrList Items="_mine" Now="Now" Clones="_clones" Empty="You have no other open PRs." />
-
-@if (_assigned.Count > 0)
+@if (ActiveTab == TabNeeds)
 {
-    <h2>Assigned to me <span class="muted small">@_assigned.Count</span></h2>
-    <PrList Items="_assigned" Now="Now" Clones="_clones" />
+    <div class="section-head">
+        <h2>Needs my review <span class="muted small">@ReviewShown.Count</span></h2>
+        @ReviewFilter
+    </div>
+    <PrList Items="ReviewShown" Now="Now" Clones="_clones" Empty="@(HiddenCount > 0 ? "No one else is waiting on your review." : "No one is waiting on your review.")" />
+
+    @foreach (var (attention, title) in Sections)
+    {
+        var items = _buckets.MineNeeding(attention);
+        @if (items.Count > 0)
+        {
+            <h2>@title <span class="muted small">@items.Count</span></h2>
+            <PrList Items="items" Now="Now" Clones="_clones" />
+        }
+    }
+    @if (_buckets.MineNeedingAction == 0)
+    {
+        <h2>Mine</h2>
+        <div class="card muted">None of your @Fmt.Count(_buckets.Mine.Count, "open PR") is failing CI, conflicting, waiting on changes or ready to merge.</div>
+    }
+    <p class="muted small tab-foot">
+        @Fmt.Count(_buckets.Mine.Count - _buckets.MineNeedingAction, "other open PR") of yours and @Fmt.Count(_gh.Issues.Count, "issue") are under <a href="@TabUrl(TabAll)">All</a>.
+    </p>
 }
-
-<h2>My issues <span class="muted small">@_gh.Issues.Count</span></h2>
-@if (_gh.Issues.Count == 0)
+else if (ActiveTab == TabAll)
 {
-    <div class="card muted">No open issues assigned to you or mentioning you recently.</div>
+    <div class="section-head">
+        <h2>Needs my review <span class="muted small">@ReviewShown.Count</span></h2>
+        @ReviewFilter
+    </div>
+    <PrGroups Items="ReviewShown" Now="Now" Clones="_clones" Empty="No one is waiting on your review." />
+
+    <h2>Mine <span class="muted small">@_buckets.Mine.Count</span></h2>
+    <PrGroups Items="_buckets.Mine" Now="Now" Clones="_clones" Empty="You have no other open PRs." />
+
+    @if (_buckets.Assigned.Count > 0)
+    {
+        <h2>Assigned to me <span class="muted small">@_buckets.Assigned.Count</span></h2>
+        <PrGroups Items="_buckets.Assigned" Now="Now" Clones="_clones" />
+    }
+
+    <h2>My issues <span class="muted small">@_gh.Issues.Count</span></h2>
+    @if (_gh.Issues.Count == 0)
+    {
+        <div class="card muted">No open issues assigned to you or mentioning you recently.</div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="stack">
+                <thead><tr><th>Issue</th><th>Why</th><th class="right">Updated</th></tr></thead>
+                <tbody>
+                    @foreach (var issue in _gh.Issues)
+                    {
+                        <tr @key="issue.Url">
+                            <td class="cell-main">
+                                <a class="title-link" href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a>
+                                <div class="sub"><a class="muted" href="@Fmt.RepoUrl(issue.RepoKey)">@issue.Repo</a>#@issue.Number @string.Join(" ", issue.Labels.Select(l => "· " + l))</div>
+                            </td>
+                            <td data-label="Why">
+                                <div class="chips">
+                                    @if (issue.Assigned) { <span class="chip info">assigned</span> }
+                                    @if (issue.Mentioned) { <span class="chip muted">mentioned</span> }
+                                </div>
+                            </td>
+                            <td data-label="Updated" class="cell-when right nowrap sub" title="@Fmt.Date(issue.UpdatedAt)">@Fmt.Ago(issue.UpdatedAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
 }
 else
 {
+    <div class="section-head">
+        <h2>Recent activity in your orgs <span class="muted small">@VisibleRepos.Count repos pushed in the last @_days days</span></h2>
+        <div class="toolbar">
+            <input type="search" placeholder="Filter repos…" aria-label="Filter repos" @bind="_search" @bind:event="oninput" />
+            <button type="button" class="toggle @(_onlyUncloned ? "on" : "")" aria-pressed="@_onlyUncloned" @onclick="() => _onlyUncloned = !_onlyUncloned">Not cloned</button>
+        </div>
+    </div>
     <div class="table-wrap">
-        <table>
-            <thead><tr><th>Issue</th><th>Why</th><th class="right">Updated</th></tr></thead>
+        <table class="stack">
+            <thead>
+                <tr><th>Repo</th><th>Latest on default branch</th><th>Cloned on</th><th class="right">Open PRs</th><th class="right">Pushed</th></tr>
+            </thead>
             <tbody>
-                @foreach (var issue in _gh.Issues)
+                @foreach (var repo in VisibleRepos)
                 {
-                    <tr>
-                        <td>
-                            <a href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a>
-                            <div class="sub"><a class="muted" href="@Fmt.RepoUrl(issue.RepoKey)">@issue.Repo</a>#@issue.Number @string.Join(" ", issue.Labels.Select(l => "· " + l))</div>
+                    <tr @key="repo.Key">
+                        <td class="desc cell-main">
+                            <a class="title-link" href="@repo.Url" target="_blank" rel="noopener"><strong>@repo.NameWithOwner</strong></a>
+                            @if (repo.IsArchived) { <span class="chip warn">archived</span> }
+                            @if (repo.Description is not null) { <div class="sub">@repo.Description</div> }
                         </td>
-                        <td>
-                            <div class="chips">
-                                @if (issue.Assigned) { <span class="chip info">assigned</span> }
-                                @if (issue.Mentioned) { <span class="chip muted">mentioned</span> }
+                        <td class="desc" data-label="Latest">
+                            <div>
+                                @repo.HeadMessage
+                                <div class="sub">@repo.LastPusher @if (repo.DefaultBranch is not null) { <span>on <span class="mono">@repo.DefaultBranch</span></span> }</div>
                             </div>
                         </td>
-                        <td class="right nowrap sub" title="@Fmt.Date(issue.UpdatedAt)">@Fmt.Ago(issue.UpdatedAt, Now)</td>
+                        <td data-label="Cloned on">
+                            <div>
+                                @if (_clones.TryGetValue(repo.Key, out var clones))
+                                {
+                                    @foreach (var clone in clones)
+                                    {
+                                        <div class="clone">
+                                            <a class="sub" href="@Fmt.RepoUrl(repo.Key)">@clone.Machine.Machine.Hostname</a>
+                                            <span class="sub">(@Describe(clone, repo))</span>
+                                        </div>
+                                    }
+                                }
+                                else
+                                {
+                                    <span class="chip muted">not cloned anywhere</span>
+                                }
+                            </div>
+                        </td>
+                        <td data-label="Open PRs" class="right">@repo.OpenPullRequests</td>
+                        <td data-label="Pushed" class="cell-when right nowrap sub" title="@Fmt.Date(repo.PushedAt)">@Fmt.Ago(repo.PushedAt, Now)</td>
                     </tr>
+                }
+                @if (VisibleRepos.Count == 0)
+                {
+                    <tr><td class="empty" colspan="5">No repos to show.</td></tr>
                 }
             </tbody>
         </table>
     </div>
 }
 
-<div class="page-head" style="margin-top:28px;margin-bottom:10px">
-    <h2 style="margin:0">Recent activity in your orgs <span class="muted small">@VisibleRepos.Count repos pushed in the last @_days days</span></h2>
-    <div class="toolbar" style="margin:0">
-        <input type="search" placeholder="Filter repos…" aria-label="Filter repos" @bind="_search" @bind:event="oninput" />
-        <button type="button" class="toggle @(_onlyUncloned ? "on" : "")" aria-pressed="@_onlyUncloned" @onclick="() => _onlyUncloned = !_onlyUncloned">Not cloned</button>
-    </div>
-</div>
-<div class="table-wrap">
-    <table>
-        <thead>
-            <tr><th>Repo</th><th>Latest on default branch</th><th>Cloned on</th><th class="right">Open PRs</th><th class="right">Pushed</th></tr>
-        </thead>
-        <tbody>
-            @foreach (var repo in VisibleRepos)
-            {
-                <tr>
-                    <td class="desc">
-                        <a href="@repo.Url" target="_blank" rel="noopener"><strong>@repo.NameWithOwner</strong></a>
-                        @if (repo.IsArchived) { <span class="chip warn">archived</span> }
-                        @if (repo.Description is not null) { <div class="sub">@repo.Description</div> }
-                    </td>
-                    <td class="desc">
-                        @repo.HeadMessage
-                        <div class="sub">@repo.LastPusher @if (repo.DefaultBranch is not null) { <span>on <span class="mono">@repo.DefaultBranch</span></span> }</div>
-                    </td>
-                    <td>
-                        @if (_clones.TryGetValue(repo.Key, out var clones))
-                        {
-                            @foreach (var clone in clones)
-                            {
-                                <div class="clone">
-                                    <a class="sub" href="@Fmt.RepoUrl(repo.Key)">@clone.Machine.Machine.Hostname</a>
-                                    <span class="sub">(@Describe(clone, repo))</span>
-                                </div>
-                            }
-                        }
-                        else
-                        {
-                            <span class="chip muted">not cloned anywhere</span>
-                        }
-                    </td>
-                    <td class="right">@repo.OpenPullRequests</td>
-                    <td class="right nowrap sub" title="@Fmt.Date(repo.PushedAt)">@Fmt.Ago(repo.PushedAt, Now)</td>
-                </tr>
-            }
-            @if (VisibleRepos.Count == 0)
-            {
-                <tr><td class="empty" colspan="5">No repos to show.</td></tr>
-            }
-        </tbody>
-    </table>
-</div>
-
 @code {
     [Inject] private Microsoft.Extensions.Options.IOptionsMonitor<GitHubOptions> Options { get; set; } = default!;
 
+    private const string TabNeeds = "needs", TabAll = "all", TabActivity = "activity";
+    private const string BotsShow = "show";
+
+    private static readonly (PrAttention Attention, string Title)[] Sections =
+    [
+        (PrAttention.CiFailing, "Mine, CI failing"),
+        (PrAttention.ChangesRequested, "Mine, changes requested"),
+        (PrAttention.Conflicts, "Mine, merge conflicts"),
+        (PrAttention.ReadyToMerge, "Mine, approved and ready to merge"),
+    ];
+
+    /// <summary><c>?tab=needs|all|activity</c>. Needs action is the default.</summary>
+    [SupplyParameterFromQuery] public string? Tab { get; set; }
+
+    /// <summary><c>?bots=show</c> also lists old draft review requests from bots; they are hidden by default.</summary>
+    [SupplyParameterFromQuery] public string? Bots { get; set; }
+
+    [Inject] private NavigationManager Nav { get; set; } = default!;
+
     private GitHubSnapshot _gh = GitHubSnapshot.Empty;
     private IReadOnlyDictionary<string, List<CloneView>> _clones = new Dictionary<string, List<CloneView>>();
-    private List<PullRequestInfo> _review = [], _failing = [], _mine = [], _assigned = [];
+    private PrBuckets _buckets = new();
     private string _search = "";
     private bool _onlyUncloned;
     private int _days;
+
+    private string ActiveTab => Tab is TabAll or TabActivity ? Tab : TabNeeds;
+
+    private bool HideBotDrafts => Bots != BotsShow;
+
+    private int HiddenCount => HideBotDrafts ? _buckets.StaleBotDrafts.Count : 0;
+
+    private IReadOnlyList<PullRequestInfo> ReviewShown => HideBotDrafts ? _buckets.Review : [.. _buckets.Review, .. _buckets.StaleBotDrafts];
+
+    private int NeedsCount => _buckets.Review.Count + _buckets.MineNeedingAction;
+
+    private string TabUrl(string tab) => Url(tab, Bots);
+
+    private string Url(string tab, string? bots) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("github").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    {
+        ["tab"] = tab == TabNeeds ? null : tab,
+        ["bots"] = bots == BotsShow ? BotsShow : null,
+    });
+
+    /// <summary>The "hide bot drafts" switch and the count it hides. A link, so the choice is in the URL.</summary>
+    private RenderFragment ReviewFilter => @<div class="toolbar">
+        @if (_buckets.StaleBotDrafts.Count > 0 || !HideBotDrafts)
+        {
+            <a class="btn toggle @(HideBotDrafts ? "on" : "")" role="switch" aria-checked="@(HideBotDrafts ? "true" : "false")" href="@Url(ActiveTab, HideBotDrafts ? BotsShow : null)"
+               title="A bot is an author whose login ends in [bot], or a known agent such as copilot-swe-agent.">Hide bot drafts older than @PrTriage.StaleBotDraftDays days</a>
+        }
+        @if (HiddenCount > 0)
+        {
+            <span class="muted small">@HiddenCount hidden · <a href="@Url(ActiveTab, BotsShow)">show</a></span>
+        }
+    </div>;
 
     private List<GitHubRepo> VisibleRepos => _gh.RecentRepos
         .Where(r => !_onlyUncloned || !_clones.ContainsKey(r.Key))
@@ -171,11 +271,7 @@ else
         _gh = Store.Current;
         _days = Options.CurrentValue.RecentDays;
         _clones = Catalog.ClonesByGitHubKey();
-        _review = _gh.PullRequests.Where(p => p.ReviewRequested).ToList();
-        // Each PR appears in one group only: a review request wins, then failing CI.
-        _failing = _gh.PullRequests.Where(p => p.Authored && !p.ReviewRequested && p.Ci == CiState.Failure).ToList();
-        _mine = _gh.PullRequests.Where(p => p.Authored && !p.ReviewRequested && p.Ci != CiState.Failure).ToList();
-        _assigned = _gh.PullRequests.Where(p => p.Assigned && !p.Authored && !p.ReviewRequested).ToList();
+        _buckets = PrTriage.Split(_gh, Now);
         return Task.CompletedTask;
     }
 

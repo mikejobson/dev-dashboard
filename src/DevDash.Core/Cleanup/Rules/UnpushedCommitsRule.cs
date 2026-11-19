@@ -44,7 +44,7 @@ public sealed class UnpushedCommitsRule : ICleanupRule
                         $"{branch.Name} is {branch.Ahead} ahead of {branch.Upstream}"
                         + (branch.Behind > 0 ? $" and {branch.Behind} behind; it needs a pull or rebase before pushing." : "."),
                         AheadCommands(git, path, remote, branch),
-                        "ahead", branch.Name);
+                        "ahead", branch.Name).ActiveAt(branch.LastCommitDate);
                 }
                 else if (branch.Upstream is null && branch.MergedIntoDefault != true && branch.Name != git.DefaultBranch)
                 {
@@ -58,7 +58,7 @@ public sealed class UnpushedCommitsRule : ICleanupRule
                             Fix($"Push and track {remote}/{branch.Name}", GitCmd(path, $"push -u {Quote(remote)} {Quote(branch.Name)}"),
                                 AgentAction.Push(path, remote, branch.Name, setUpstream: true)),
                         ],
-                        "no-upstream", branch.Name);
+                        "no-upstream", branch.Name).ActiveAt(branch.LastCommitDate);
                 }
             }
         }

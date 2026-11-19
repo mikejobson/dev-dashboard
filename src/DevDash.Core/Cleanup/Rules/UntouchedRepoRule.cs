@@ -6,7 +6,9 @@ namespace DevDash.Core.Cleanup.Rules;
 public sealed class UntouchedRepoRule : ICleanupRule
 {
     public string Id => "untouched-repo";
-    public string Title => "Repo untouched for more than 6 months";
+    public string Title => TitleFor(new CleanupOptions());
+
+    public string TitleFor(CleanupOptions options) => $"Repos untouched for more than {Span(options.UntouchedDays)}";
     public string Description => "No commits and no file changes for a long time. A candidate to archive, or to delete locally once everything is pushed.";
 
     public IEnumerable<Finding> Evaluate(CleanupContext context)
@@ -40,7 +42,7 @@ public sealed class UntouchedRepoRule : ICleanupRule
                     Inspect("Commits that were never pushed", GitCmd(repo.Entry.Path, "log --branches --not --remotes --oneline")),
                     // Deleting the clone is only suggested when the scan found nothing that exists only here.
                     .. safe ? [Fix("Delete the local clone", $"rm -rf {Quote(repo.Entry.Path)}")] : Array.Empty<FindingCommand>(),
-                ]);
+                ]).ActiveAt(last);
         }
     }
 }

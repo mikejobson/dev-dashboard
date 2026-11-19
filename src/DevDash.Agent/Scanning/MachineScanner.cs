@@ -17,7 +17,8 @@ public enum SizeMode
     Force,
 }
 
-public sealed record ScanRequest(bool AllowFetch, SizeMode Sizes);
+/// <param name="ForcedFetch">Set for a refresh asked for from the dashboard: fetch now instead of when due. Needs <paramref name="AllowFetch"/>.</param>
+public sealed record ScanRequest(bool AllowFetch, SizeMode Sizes, Git.ForcedFetch? ForcedFetch = null);
 
 /// <summary>Scans the configured roots into a <see cref="MachineSnapshot"/>. Reads only, apart from optional fetches.</summary>
 public sealed class MachineScanner
@@ -124,7 +125,13 @@ public sealed class MachineScanner
             return null;
         }
 
-        return await ScanEntryAsync(root, path, request, _options.CurrentValue.WorktreeContainerDepth, ct).ConfigureAwait(false);
+        var entry = await ScanEntryAsync(root, path, request, _options.CurrentValue.WorktreeContainerDepth, ct).ConfigureAwait(false);
+        if (request.Sizes != SizeMode.CachedOnly)
+        {
+            _sizes.Save();
+        }
+
+        return entry;
     }
 
     private static IEnumerable<string> TopLevel(string dir)
@@ -163,7 +170,7 @@ public sealed class MachineScanner
         {
             try
             {
-                var git = await _repos.ScanAsync(path, request.AllowFetch, ct).ConfigureAwait(false);
+                var git = await _repos.ScanAsync(path, request.AllowFetch, ct, request.ForcedFetch).ConfigureAwait(false);
                 var stats = Walk(path, request);
                 return new DevEntry
                 {

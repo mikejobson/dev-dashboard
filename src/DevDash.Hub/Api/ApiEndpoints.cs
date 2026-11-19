@@ -156,14 +156,25 @@ public static class ApiEndpoints
     /// <summary>The machine an agent's key is bound to. A key binds when it first pushes a snapshot.</summary>
     private static string? MachineOf(ClaimsPrincipal user) => user.FindFirstValue(AgentKeyAuthenticationHandler.MachineClaim);
 
-    private static async Task<IResult> ClaimActionsAsync(ClaimsPrincipal user, ActionQueue actions, CancellationToken ct)
+    /// <summary>
+    /// An agent's poll for work. With <c>?wait=N</c> (0.5.0 agents) it is a long poll: when nothing is
+    /// queued for the machine the request is held for up to N seconds and answered the moment something
+    /// is, so a click in the dashboard reaches the agent at once. Without it (older agents) the answer
+    /// is immediate, as it always was. The hub still never opens a connection to an agent.
+    /// </summary>
+    private static async Task<IResult> ClaimActionsAsync(int? wait, ClaimsPrincipal user, ActionQueue actions, IHostApplicationLifetime lifetime, CancellationToken ct)
     {
         if (MachineOf(user) is not { } machineId)
         {
             return Results.Problem("This API key is not bound to a machine yet. Push a snapshot first.", statusCode: StatusCodes.Status409Conflict);
         }
 
-        return Results.Json(new ActionClaimResponse { Actions = await actions.ClaimAsync(machineId, ct) }, SnapshotSchema.JsonOptions);
+        // Held polls end when the hub stops, so shutting down does not wait out every agent's poll.
+        var hold = TimeSpan.FromSeconds(Math.Clamp(wait ?? 0, 0, AgentActions.MaxClaimWaitSeconds));
+        var claimed = hold > TimeSpan.Zero
+            ? await actions.ClaimAsync(machineId, hold, ct, lifetime.ApplicationStopping)
+            : await actions.ClaimAsync(machineId, ct);
+        return Results.Json(new ActionClaimResponse { Actions = claimed }, SnapshotSchema.JsonOptions);
     }
 
     private static async Task<IResult> CompleteActionAsync(string id, ActionResultRequest? result, ClaimsPrincipal user, ActionQueue actions, CancellationToken ct)

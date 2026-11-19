@@ -72,6 +72,13 @@ public sealed record MachineInfo
     /// </summary>
     public string? UpdateMode { get; init; }
 
+    /// <summary>
+    /// True when this agent checks the hub for requests and knows the Refresh action, so the dashboard
+    /// can ask it to rescan one entry now. False from agents before 0.5.0, and from an agent with both
+    /// actions and updates switched off, which only reports.
+    /// </summary>
+    public bool AcceptsRefresh { get; init; }
+
     /// <summary>How the agent's most recent self-update went, including a roll back. Null when it has never updated itself.</summary>
     public AgentUpdateReport? LastUpdate { get; init; }
 }

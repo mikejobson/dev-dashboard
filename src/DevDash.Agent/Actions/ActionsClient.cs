@@ -11,13 +11,28 @@ public sealed class ActionsClient(HttpClient http, IOptionsMonitor<AgentOptions>
 {
     public const string ClaimPath = "api/v1/actions/claim";
 
+    /// <summary>How much longer than the wait it asked for the agent gives the hub to answer a poll.</summary>
+    private static readonly TimeSpan ClaimSlack = TimeSpan.FromSeconds(20);
+
+    private static readonly TimeSpan ReportTimeout = TimeSpan.FromSeconds(30);
+
     /// <summary>
     /// Takes the actions queued for this machine. The hub hands each one out once, so anything returned
     /// here must be run (or refused) and reported.
     /// </summary>
-    public async Task<IReadOnlyList<PendingAgentAction>> ClaimAsync(CancellationToken ct)
+    /// <param name="waitSeconds">
+    /// Above 0, asks the hub to hold the request open that long when nothing is queued, and answer the
+    /// moment something is (a long poll). A hub from before 0.5.0 ignores it and answers at once.
+    /// </param>
+    public async Task<IReadOnlyList<PendingAgentAction>> ClaimAsync(CancellationToken ct, int waitSeconds = 0)
     {
-        using var request = Request(HttpMethod.Post, ClaimPath);
+        waitSeconds = Math.Clamp(waitSeconds, 0, AgentActions.MaxClaimWaitSeconds);
+        using var request = Request(HttpMethod.Post, waitSeconds > 0 ? $"{ClaimPath}?wait={waitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}" : ClaimPath);
+
+        // The client itself has no timeout (a long poll outlasts any sensible fixed one): each call sets its own.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(waitSeconds) + ClaimSlack);
+        ct = deadline.Token;
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
 
         // 409: the key has not pushed a snapshot yet, so it is not bound to a machine. 404: a hub from before actions.
@@ -39,7 +54,9 @@ public sealed class ActionsClient(HttpClient http, IOptionsMonitor<AgentOptions>
     {
         using var request = Request(HttpMethod.Post, $"api/v1/actions/{Uri.EscapeDataString(actionId)}/result");
         request.Content = JsonContent.Create(result, options: SnapshotSchema.JsonOptions);
-        using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(ReportTimeout);
+        using var response = await http.SendAsync(request, deadline.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new HttpRequestException($"Hub refused the result for action {actionId}: {(int)response.StatusCode} {response.ReasonPhrase}.");

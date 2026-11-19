@@ -9,7 +9,9 @@ namespace DevDash.Agent;
 
 /// <summary>
 /// The long-running service: a full scan on a timer, plus a debounced rescan of a single entry when
-/// files under it change. Every scan is pushed to the hub.
+/// files under it change, and a refresh of a single entry when the dashboard asks for one. Every scan is
+/// pushed to the hub. All of it happens on this one loop, so there is only ever one scan at a time and
+/// one writer of the last snapshot.
 /// </summary>
 public sealed class AgentWorker : BackgroundService
 {
@@ -24,6 +26,11 @@ public sealed class AgentWorker : BackgroundService
     private readonly ILogger<AgentWorker> _logger;
     private readonly ConcurrentDictionary<(string Root, string Name), byte> _pending = new();
     private readonly SemaphoreSlim _signal = new(0);
+
+    // Refreshes asked for from the dashboard, by entry. Kept apart from _pending: a full scan clears that,
+    // and a refresh still has to happen (it forces sizes and a fetch) and be answered.
+    private readonly Lock _refreshLock = new();
+    private Dictionary<(string Root, string Name), List<TaskCompletionSource<Actions.RefreshOutcome>>> _refreshes = [];
     private readonly Updates.UpdateGuard? _guard;
     private MachineSnapshot? _last;
     private int _rescanNow;
@@ -48,8 +55,37 @@ public sealed class AgentWorker : BackgroundService
                 Volatile.Write(ref _rescanNow, 1);
                 _signal.Release();
             };
+
+            // A refresh from the dashboard: same loop, no debounce. Requests for one entry share one rescan.
+            rescans.RefreshRequested += requests =>
+            {
+                lock (_refreshLock)
+                {
+                    foreach (var request in requests)
+                    {
+                        if (!_refreshes.TryGetValue((request.Root, request.Name), out var waiting))
+                        {
+                            _refreshes[(request.Root, request.Name)] = waiting = [];
+                        }
+
+                        waiting.Add(request.Completion);
+                    }
+                }
+
+                Volatile.Write(ref _rescanNow, 1);
+                _signal.Release();
+            };
         }
     }
+
+    /// <summary>
+    /// Runs the entry rescans that are waiting: file changes, and refreshes asked for from the dashboard.
+    /// The service loop calls this between full scans; it must never run alongside one.
+    /// </summary>
+    public Task RescanPendingNowAsync(CancellationToken ct) => RescanPendingAsync(ct);
+
+    /// <summary>One full scan and push, as the service loop does on its timer.</summary>
+    public Task FullScanNowAsync(CancellationToken ct) => FullScanAsync(quick: false, ct);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -126,33 +162,74 @@ public sealed class AgentWorker : BackgroundService
 
     private async Task RescanPendingAsync(CancellationToken ct)
     {
-        if (_last is null)
+        Dictionary<(string Root, string Name), List<TaskCompletionSource<Actions.RefreshOutcome>>> refreshes;
+        lock (_refreshLock)
         {
-            return;
+            refreshes = _refreshes;
+            _refreshes = [];
         }
 
-        var changed = _pending.Keys.ToList();
-        foreach (var key in changed)
+        // Whatever happens below, everyone waiting on a refresh gets an answer.
+        void Answer((string Root, string Name) key, Actions.RefreshOutcome outcome)
         {
-            _pending.TryRemove(key, out _);
-        }
-
-        if (changed.Count == 0)
-        {
-            return;
+            foreach (var waiting in refreshes[key])
+            {
+                waiting.TrySetResult(outcome);
+            }
         }
 
         try
         {
-            var entries = _last.Entries.ToList();
-            foreach (var (root, name) in changed)
+            if (_last is null)
             {
-                var entry = await _scanner.ScanEntryAsync(root, name, new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), ct).ConfigureAwait(false);
-                entries.RemoveAll(e => e.Root == root && e.Name == name);
+                foreach (var key in refreshes.Keys)
+                {
+                    Answer(key, new Actions.RefreshOutcome(false, "The agent has not completed its first scan yet. Try again in a moment."));
+                }
+
+                return;
+            }
+
+            // An entry that is being refreshed needs no second, lighter rescan for its file changes.
+            var changed = _pending.Keys.ToList();
+            foreach (var key in changed)
+            {
+                _pending.TryRemove(key, out _);
+            }
+
+            changed.RemoveAll(refreshes.ContainsKey);
+            if (changed.Count == 0 && refreshes.Count == 0)
+            {
+                return;
+            }
+
+            var entries = _last.Entries.ToList();
+            void Replace((string Root, string Name) key, DevEntry? entry)
+            {
+                entries.RemoveAll(e => e.Root == key.Root && e.Name == key.Name);
                 if (entry is not null)
                 {
                     entries.Add(entry);
                 }
+            }
+
+            foreach (var key in changed)
+            {
+                Replace(key, await _scanner.ScanEntryAsync(key.Root, key.Name, new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), ct).ConfigureAwait(false));
+            }
+
+            // A refresh fetches now instead of when due, but only on a machine that fetches at all:
+            // one with Agent:AutoFetch off stays a machine whose repositories the agent never writes to.
+            var fetches = _options.CurrentValue.AutoFetch.Enabled;
+            var since = DateTimeOffset.UtcNow;
+            var notes = new Dictionary<(string Root, string Name), Actions.RefreshOutcome>();
+            foreach (var key in refreshes.Keys)
+            {
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var forced = fetches ? new Git.ForcedFetch(since) : null;
+                var entry = await _scanner.ScanEntryAsync(key.Root, key.Name, new ScanRequest(AllowFetch: fetches, SizeMode.Force, forced), ct).ConfigureAwait(false);
+                Replace(key, entry);
+                notes[key] = Describe(key.Name, entry, forced, stopwatch.ElapsedMilliseconds);
             }
 
             _last = _last with
@@ -160,16 +237,69 @@ public sealed class AgentWorker : BackgroundService
                 ScannedAt = DateTimeOffset.UtcNow,
                 Entries = MachineScanner.WithOneGraphPerRepository(entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
             };
-            _logger.LogInformation("Rescanned {Names} after file changes", string.Join(", ", changed.Select(c => c.Name)));
-            await PushAsync(_last, ct).ConfigureAwait(false);
+            if (changed.Count > 0)
+            {
+                _logger.LogInformation("Rescanned {Names} after file changes", string.Join(", ", changed.Select(c => c.Name)));
+            }
+
+            if (refreshes.Count > 0)
+            {
+                _logger.LogInformation("Refreshed {Names} as asked from the dashboard", string.Join(", ", refreshes.Keys.Select(c => c.Name)));
+            }
+
+            var pushError = await PushAsync(_last, ct).ConfigureAwait(false);
+            foreach (var (key, note) in notes)
+            {
+                Answer(key, pushError is null ? note : new Actions.RefreshOutcome(false, $"Rescanned {key.Name}, but the snapshot could not be pushed to the hub: {pushError}"));
+            }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            foreach (var waiting in refreshes.Values.SelectMany(w => w))
+            {
+                waiting.TrySetCanceled(CancellationToken.None);
+            }
+
+            throw;
+        }
+        catch (Exception ex)
         {
             _logger.LogError(ex, "Rescan failed");
+            foreach (var key in refreshes.Keys)
+            {
+                Answer(key, new Actions.RefreshOutcome(false, "The rescan failed: " + ex.Message));
+            }
         }
     }
 
-    private async Task PushAsync(MachineSnapshot snapshot, CancellationToken ct)
+    /// <summary>What a refresh of one entry is reported as. A fetch that failed is a failure: the remote-tracking branches are not current.</summary>
+    private static Actions.RefreshOutcome Describe(string name, DevEntry? entry, Git.ForcedFetch? forced, long milliseconds)
+    {
+        if (entry is null)
+        {
+            return new Actions.RefreshOutcome(true, $"{name} no longer exists on this machine, so it was removed from the snapshot.");
+        }
+
+        if (entry.Error is { } error)
+        {
+            return new Actions.RefreshOutcome(false, $"Rescanned {name}, but it could not be read as a git repository: {error}");
+        }
+
+        if (forced is not null && !forced.Failures.IsEmpty)
+        {
+            return new Actions.RefreshOutcome(false,
+                $"Rescanned {name} and measured its size, but git fetch failed, so its remote-tracking branches may be out of date.\n{string.Join('\n', forced.Failures)}");
+        }
+
+        var fetched = forced is null ? "auto-fetch is off on this machine, so nothing was fetched"
+            : forced.Fetched == 0 ? "nothing to fetch"
+            : forced.Fetched == 1 ? "fetched"
+            : $"fetched {forced.Fetched} repositories";
+        return new Actions.RefreshOutcome(true, $"Rescanned {name} in {milliseconds} ms: {fetched}, size measured, snapshot pushed.");
+    }
+
+    /// <summary>Pushes the snapshot. Returns null when the hub accepted it, otherwise why it did not.</summary>
+    private async Task<string?> PushAsync(MachineSnapshot snapshot, CancellationToken ct)
     {
         try
         {
@@ -180,11 +310,14 @@ public sealed class AgentWorker : BackgroundService
                 _logger.LogWarning("Update confirmed: devdash-agent {Version} has reported to the hub (was {Previous}). The previous version has been removed.",
                     confirmed.ToVersion, confirmed.FromVersion);
             }
+
+            return null;
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException && !ct.IsCancellationRequested)
         {
             // The hub may be asleep or unreachable; the next scan tries again.
             _logger.LogWarning("Could not push snapshot: {Error}", ex.Message);
+            return ex.Message;
         }
     }
 

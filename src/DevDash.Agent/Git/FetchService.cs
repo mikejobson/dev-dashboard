@@ -4,6 +4,26 @@ using Microsoft.Extensions.Options;
 
 namespace DevDash.Agent.Git;
 
+/// <summary>
+/// A fetch asked for by a refresh from the dashboard: fetch now, whatever the interval says, but only
+/// once per repository since <see cref="Since"/>, so a repository and its linked worktrees fetch once.
+/// It never overrides <c>Agent:AutoFetch:Enabled</c>: a machine with fetching off does not fetch.
+/// </summary>
+public sealed class ForcedFetch(DateTimeOffset since)
+{
+    private int _fetched;
+
+    public DateTimeOffset Since => since;
+
+    /// <summary>How many repositories were fetched.</summary>
+    public int Fetched => Volatile.Read(ref _fetched);
+
+    /// <summary>One line per fetch that failed.</summary>
+    public ConcurrentQueue<string> Failures { get; } = new();
+
+    internal void Succeeded() => Interlocked.Increment(ref _fetched);
+}
+
 /// <summary>Decides when a repository is due for <c>git fetch --prune --quiet</c> and runs it.</summary>
 public sealed class FetchService
 {
@@ -25,7 +45,8 @@ public sealed class FetchService
     }
 
     /// <summary>Fetches when auto-fetch is on and the last fetch is older than the interval. Never throws.</summary>
-    public async Task<bool> FetchIfDueAsync(string repoPath, string commonDir, bool hasRemotes, CancellationToken ct)
+    /// <param name="forced">A refresh asked for from the dashboard: skips the interval, not the on/off switch.</param>
+    public async Task<bool> FetchIfDueAsync(string repoPath, string commonDir, bool hasRemotes, CancellationToken ct, ForcedFetch? forced = null)
     {
         var options = _options.CurrentValue.AutoFetch;
         if (!options.Enabled || !hasRemotes)
@@ -34,6 +55,27 @@ public sealed class FetchService
         }
 
         var now = _time.GetUtcNow();
+        if (forced is not null)
+        {
+            // Already tried for this refresh (a linked worktree of a repository just fetched).
+            if (_lastAttempt.TryGetValue(commonDir, out var attempted) && attempted >= forced.Since)
+            {
+                return false;
+            }
+
+            _lastAttempt[commonDir] = now;
+            var fetched = await _git.FetchAsync(repoPath, TimeSpan.FromSeconds(options.TimeoutSeconds), ct).ConfigureAwait(false);
+            if (!fetched.Ok)
+            {
+                _logger.LogWarning("git fetch failed in {Path}: {Error}", repoPath, fetched.StdErr.Trim());
+                forced.Failures.Enqueue($"{repoPath}: {(fetched.StdErr.Trim() is { Length: > 0 } error ? error : $"git fetch exited with {fetched.ExitCode}")}");
+                return false;
+            }
+
+            forced.Succeeded();
+            return true;
+        }
+
         var interval = TimeSpan.FromHours(options.IntervalHours);
         var last = LastFetch(commonDir);
         if (last is not null && now - last < interval)

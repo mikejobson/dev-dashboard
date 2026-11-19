@@ -8,9 +8,10 @@ namespace DevDash.Contracts;
 /// command" kind: an agent builds the git arguments itself from these typed fields, and nothing here
 /// can discard work (no force, no <c>-D</c>, no reset, no rebase, no pull).
 /// <para>
-/// Every kind but <see cref="UpdateAgent"/> is a git action on one repository, and only runs on a
-/// machine that turned on <c>Agent:Actions:Enabled</c>. <see cref="UpdateAgent"/> touches no repository
-/// and is gated by the machine's own <c>Agent:Updates:Mode</c> instead.
+/// Every kind but <see cref="UpdateAgent"/> and <see cref="Refresh"/> is a git action on one repository,
+/// and only runs on a machine that turned on <c>Agent:Actions:Enabled</c>. <see cref="UpdateAgent"/>
+/// touches no repository and is gated by the machine's own <c>Agent:Updates:Mode</c> instead.
+/// <see cref="Refresh"/> only asks for a scan the agent would do anyway, sooner, so it needs neither.
 /// </para>
 /// </summary>
 public enum AgentActionKind
@@ -39,6 +40,13 @@ public enum AgentActionKind
     /// key it was built with, so the hub can never supply a binary or a URL.
     /// </summary>
     UpdateAgent,
+
+    /// <summary>
+    /// Rescan one top-level entry now and push the result, instead of waiting for the next full scan.
+    /// Read-only: the scan fetches only if this machine has auto-fetch on (the one write its owner
+    /// already opted into), and re-measures the entry's size. It runs no other command.
+    /// </summary>
+    Refresh,
 }
 
 /// <summary>One allowlisted action. Fields that a kind does not use must be null.</summary>
@@ -48,6 +56,7 @@ public sealed record AgentAction
 
     /// <summary>
     /// Git actions: absolute path of the working tree to run in, as the agent reported it.
+    /// <see cref="AgentActionKind.Refresh"/>: the path of an entry (or of anything inside one), as the agent reported it.
     /// Null for <see cref="AgentActionKind.UpdateAgent"/>, which is not about a repository.
     /// </summary>
     public string? RepoPath { get; init; }
@@ -96,6 +105,9 @@ public sealed record AgentAction
 
     public static AgentAction UpdateAgent(string version) =>
         new() { Kind = AgentActionKind.UpdateAgent, Version = version };
+
+    public static AgentAction Refresh(string entryPath) =>
+        new() { Kind = AgentActionKind.Refresh, RepoPath = entryPath };
 }
 
 /// <summary>
@@ -115,8 +127,20 @@ public static partial class AgentActions
     [GeneratedRegex(@"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")]
     private static partial Regex Sha();
 
-    /// <summary>True for the kinds that run git in a repository; false for <see cref="AgentActionKind.UpdateAgent"/>.</summary>
-    public static bool IsRepoAction(AgentActionKind kind) => kind != AgentActionKind.UpdateAgent;
+    /// <summary>The first agent release that knows <see cref="AgentActionKind.Refresh"/> and long-polls for requests.</summary>
+    public const string RefreshMinAgentVersion = "0.5.0";
+
+    /// <summary>The longest an agent may ask the hub to hold its poll for work open (<c>?wait=</c> on the claim endpoint).</summary>
+    public const int MaxClaimWaitSeconds = 60;
+
+    /// <summary>
+    /// True for the kinds that run git in a repository, which need <c>Agent:Actions:Enabled</c>. False for
+    /// <see cref="AgentActionKind.UpdateAgent"/> and <see cref="AgentActionKind.Refresh"/>, which change no repository.
+    /// </summary>
+    public static bool IsRepoAction(AgentActionKind kind) => kind is not (AgentActionKind.UpdateAgent or AgentActionKind.Refresh);
+
+    /// <summary>True for the kinds that name a path on the machine: everything but <see cref="AgentActionKind.UpdateAgent"/>.</summary>
+    public static bool TakesPath(AgentActionKind kind) => kind != AgentActionKind.UpdateAgent;
 
     /// <summary>POSIX single-quote escaping.</summary>
     public static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
@@ -142,9 +166,9 @@ public static partial class AgentActions
         }
 
         var kind = action.Kind;
-        if (IsRepoAction(kind))
+        if (TakesPath(kind))
         {
-            if (PathProblem(action.RepoPath, "Repository path") is { } repoProblem)
+            if (PathProblem(action.RepoPath, kind == AgentActionKind.Refresh ? "Entry path" : "Repository path") is { } repoProblem)
             {
                 return repoProblem;
             }
@@ -210,7 +234,7 @@ public static partial class AgentActions
 
     /// <summary>
     /// The arguments the agent passes to git (as a list, never through a shell), run inside <see cref="AgentAction.RepoPath"/>.
-    /// Throws for <see cref="AgentActionKind.UpdateAgent"/>, which is not a git command.
+    /// Throws for <see cref="AgentActionKind.UpdateAgent"/> and <see cref="AgentActionKind.Refresh"/>, which are not git commands.
     /// </summary>
     public static IReadOnlyList<string> GitArgs(AgentAction action)
     {
@@ -224,6 +248,12 @@ public static partial class AgentActions
         if (action.Kind == AgentActionKind.UpdateAgent)
         {
             return $"devdash-agent update --version {action.Version}";
+        }
+
+        // Not something to paste: there is no command for it. This is the line the audit trail shows.
+        if (action.Kind == AgentActionKind.Refresh)
+        {
+            return $"refresh {ShellQuote(action.RepoPath ?? "")}";
         }
 
         var (verb, values) = Parts(action);
@@ -240,6 +270,7 @@ public static partial class AgentActions
         AgentActionKind.Push => "Never forced. The agent fetches first and refuses if the branch is behind the remote.",
         AgentActionKind.DropStash => "The stash is deleted for good. The agent first checks it is still the stash shown here, and refuses if not.",
         AgentActionKind.UpdateAgent => "The agent downloads the release from GitHub itself, checks its signature and checksum, and goes back to the previous version if the new one does not report in.",
+        AgentActionKind.Refresh => "Read-only: the agent rescans this one entry and reports. It fetches only if that machine has auto-fetch on.",
         _ => "",
     };
 
@@ -253,6 +284,7 @@ public static partial class AgentActions
         AgentActionKind.Push => $"Push {action.Branch} to {action.Remote}",
         AgentActionKind.DropStash => $"Drop stash@{{{action.StashIndex}}}",
         AgentActionKind.UpdateAgent => $"Update the agent to {action.Version}",
+        AgentActionKind.Refresh => $"Refresh {action.RepoPath}",
         _ => action.Kind.ToString(),
     };
 

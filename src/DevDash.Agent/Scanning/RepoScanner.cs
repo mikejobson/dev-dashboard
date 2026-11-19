@@ -26,7 +26,7 @@ public sealed class RepoScanner
     }
 
     /// <summary>Returns the git state, or throws <see cref="GitScanException"/> when the folder cannot be read as a repo.</summary>
-    public async Task<GitState> ScanAsync(string path, bool allowFetch, CancellationToken ct)
+    public async Task<GitState> ScanAsync(string path, bool allowFetch, CancellationToken ct, ForcedFetch? forcedFetch = null)
     {
         var timeout = TimeSpan.FromSeconds(_options.CurrentValue.GitTimeoutSeconds);
         Task<GitResult> Run(params string[] args) => _git.RunAsync(path, args, timeout, ct);
@@ -45,7 +45,7 @@ public sealed class RepoScanner
 
         if (allowFetch)
         {
-            await _fetch.FetchIfDueAsync(path, commonDir, remotes.Count > 0, ct).ConfigureAwait(false);
+            await _fetch.FetchIfDueAsync(path, commonDir, remotes.Count > 0, ct, forcedFetch).ConfigureAwait(false);
         }
 
         var statusResult = await Run("status", "--porcelain=v2", "--branch").ConfigureAwait(false);

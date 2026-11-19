@@ -27,6 +27,7 @@ public static class MachineInfoProvider
             TailscaleIp = tsIp,
             AgentVersion = AgentVersion,
             ActionsEnabled = options.Actions.Enabled,
+            AcceptsRefresh = Actions.ActionWorker.ShouldPoll(options),
             UpdateMode = ReportedUpdateMode(options, UpdateInstallation.Current, ReleaseSigning.Embedded),
             LastUpdate = UpdateInstallation.Current is { } installation ? new UpdateStateStore(installation.StateFile).Read().Last : null,
         };

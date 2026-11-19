@@ -3,6 +3,7 @@
 @inject SnapshotStore Snapshots
 @inject RepoCatalog Catalog
 @inject NavigationManager Nav
+@inject RefreshBoard Refreshes
 
 <PageTitle>Local · DevDash</PageTitle>
 
@@ -35,6 +36,11 @@
         @SortLink(LocalSort.State, "State")
     </span>
 </div>
+
+@if (Refreshes.Error is { } refreshError)
+{
+    <div class="banner danger">Could not ask for a refresh: @refreshError</div>
+}
 
 @if (_machines.Count == 0)
 {
@@ -72,6 +78,7 @@ else
     private IReadOnlyList<(string Owner, int Count)> _owners = [];
     private string _search = "";
     private bool _dirty, _ahead, _behind, _stale, _notGit;
+    private Dictionary<string, RefreshAvailability> _refreshable = new(StringComparer.OrdinalIgnoreCase);
 
     private LocalSort ActiveSort => LocalView.ParseSort(Sort);
 
@@ -95,6 +102,15 @@ else
         _rows = await Catalog.GetAsync();
         _hints = LocalView.Disambiguators(_rows);
         _owners = LocalView.Owners(_rows);
+        _refreshable = _machines.ToDictionary(m => m.MachineId, Refreshes.For, StringComparer.OrdinalIgnoreCase);
+        await Refreshes.LoadAsync();
+        TickWhile(() => Refreshes.Ticking);
+    }
+
+    private async Task RefreshAsync(RefreshTarget target)
+    {
+        await Refreshes.QueueAsync([target]);
+        TickWhile(() => Refreshes.Ticking);
     }
 
     private string Url(LocalSort sort, bool descending, string? owner) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("local").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
@@ -162,12 +178,20 @@ else
                                 <div>
                                     @foreach (var clone in clones)
                                     {
-                                        <div class="clone" title="@clone.Entry.Path">
-                                            @if (clones.Count > 1 || clone.DisplayName != row.Name)
+                                        var target = RefreshTargets.For(clone);
+                                        <div class="clone with-refresh" title="@clone.Entry.Path">
+                                            <div class="clone-state">
+                                                @if (clones.Count > 1 || clone.DisplayName != row.Name)
+                                                {
+                                                    <div class="sub mono">@clone.DisplayName</div>
+                                                }
+                                                <CloneChips Clone="clone" />
+                                            </div>
+                                            @if (target is not null)
                                             {
-                                                <div class="sub mono">@clone.DisplayName</div>
+                                                <RefreshButton Compact="true" ShowStatus="false" Availability="_refreshable[machine.MachineId]" Status="Refreshes.StatusOf(target)"
+                                                               What="@($"Rescan {clone.Entry.Name} on {machine.Machine.Hostname} now")" OnRefresh="() => RefreshAsync(target)" />
                                             }
-                                            <CloneChips Clone="clone" />
                                         </div>
                                     }
                                 </div>

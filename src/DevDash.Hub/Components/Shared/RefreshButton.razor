@@ -1,0 +1,81 @@
+@* Asks an agent to rescan one entry (or, on the repo page, every clone) now. Read-only, so no dialog: a click queues it. *@
+<span class="refresh @(Compact ? "compact" : "") @PhaseClass">
+    <button type="button" class="refresh-btn @(Blocked ? "is-disabled" : "")" aria-disabled="@(Blocked ? "true" : "false")" aria-busy="@(Status.InFlight ? "true" : "false")"
+            title="@Title" aria-label="@(Compact ? Title : null)" @onclick="ClickAsync">
+        @if (Compact && Status.Phase == RefreshPhase.Done)
+        {
+            <svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+        }
+        else if (Compact && Status.Phase == RefreshPhase.Failed)
+        {
+            <svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" y1="7" x2="12" y2="13" /><line x1="12" y1="17" x2="12" y2="17.01" /></svg>
+        }
+        else
+        {
+            <svg class="refresh-icon @(Status.InFlight || _busy ? "spin" : "")" viewBox="0 0 24 24" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
+        }
+        @if (!Compact)
+        {
+            <span>Refresh</span>
+        }
+    </button>
+    @if (ShowStatus && Status.Phase != RefreshPhase.Idle)
+    {
+        <span class="refresh-status small" role="status" title="@Status.Detail">@Status.Text</span>
+    }
+</span>
+
+@code {
+    /// <summary>Whether a refresh can be asked for, and the explanation when it cannot.</summary>
+    [Parameter, EditorRequired] public RefreshAvailability Availability { get; set; } = new(false, null);
+
+    [Parameter] public RefreshStatus Status { get; set; } = RefreshStatus.Idle;
+
+    /// <summary>What a click does, for the tooltip: "Rescan widget on work-mac now".</summary>
+    [Parameter] public string What { get; set; } = "Rescan now";
+
+    /// <summary>Icon only. The state shows in the icon and the tooltip.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    /// <summary>Write the state out beside the button.</summary>
+    [Parameter] public bool ShowStatus { get; set; } = true;
+
+    [Parameter] public EventCallback OnRefresh { get; set; }
+
+    private bool _busy;
+
+    // aria-disabled, not disabled: a disabled button shows no tooltip in some browsers, and the tooltip is the explanation.
+    private bool Blocked => !Availability.Available || Status.InFlight || _busy;
+
+    private string Title =>
+        !Availability.Available ? Availability.WhyNot ?? "This cannot be refreshed from here."
+        : Status.Phase == RefreshPhase.Idle ? What
+        : Status.InFlight ? Status.Text
+        : $"{Status.Text}. {What}.{(Status.Phase == RefreshPhase.Failed && !string.IsNullOrWhiteSpace(Status.Detail) ? "\n" + Status.Detail : "")}";
+
+    private string PhaseClass => Status.Phase switch
+    {
+        RefreshPhase.Refreshing => "refreshing",
+        RefreshPhase.Done => "done",
+        RefreshPhase.Failed => "failed",
+        _ => "",
+    };
+
+    private async Task ClickAsync()
+    {
+        if (Blocked)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            await OnRefresh.InvokeAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

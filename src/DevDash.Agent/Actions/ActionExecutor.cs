@@ -27,7 +27,8 @@ public sealed record ActionOutcome(bool Succeeded, int? ExitCode, string Output,
 /// <para>
 /// Two separate switches, both local to this machine: git actions need <c>Agent:Actions:Enabled</c>;
 /// <see cref="AgentActionKind.UpdateAgent"/> needs <c>Agent:Updates:Mode</c> to be notify or auto.
-/// Neither turns the other on.
+/// Neither turns the other on. <see cref="AgentActionKind.Refresh"/> needs neither: it runs no command
+/// here at all, only asks the scan loop for a scan of one entry sooner than it would have done it.
 /// </para>
 /// </summary>
 public sealed class ActionExecutor(
@@ -36,7 +37,8 @@ public sealed class ActionExecutor(
     IOptionsMonitor<AgentOptions> options,
     ILogger<ActionExecutor> logger,
     AgentGate? gate = null,
-    AgentUpdater? updater = null)
+    AgentUpdater? updater = null,
+    RescanRequests? rescans = null)
 {
     /// <summary>No background maintenance and no fsmonitor daemon as a side effect of an action.</summary>
     private static readonly string[] Prefix = ["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
@@ -44,10 +46,67 @@ public sealed class ActionExecutor(
     // Shared with auto-update, so an update never starts while an action is running, and the reverse.
     private readonly AgentGate _gate = gate ?? new AgentGate();
 
+    /// <summary>
+    /// Refreshes: each path's top-level entry is rescanned by the scan loop (forced sizes, and a fetch
+    /// only if this machine has auto-fetch on) and pushed. Allowed whatever <c>Actions:Enabled</c> says.
+    /// The batch is handed to the scan loop in one go, so several requests for one entry are one rescan.
+    /// Returns one outcome per action, in order.
+    /// </summary>
+    public async Task<IReadOnlyList<ActionOutcome>> RefreshAsync(IReadOnlyList<AgentAction?> actions, CancellationToken ct)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var outcomes = new ActionOutcome?[actions.Count];
+        var accepted = new List<int>();
+        for (var i = 0; i < actions.Count; i++)
+        {
+            var refusal = validator.RefreshRefusal(actions[i]) ?? (rescans is null ? "this agent cannot rescan on request." : null);
+            if (refusal is null)
+            {
+                accepted.Add(i);
+            }
+            else
+            {
+                logger.LogWarning("Refused refresh of {Path}: {Reason}", actions[i]?.RepoPath, refusal);
+                outcomes[i] = new ActionOutcome(false, null, "Refused: " + refusal, [], stopwatch.ElapsedMilliseconds);
+            }
+        }
+
+        if (accepted.Count > 0)
+        {
+            var timeout = TimeSpan.FromSeconds(Math.Max(5, options.CurrentValue.Actions.RefreshTimeoutSeconds));
+            var tasks = rescans!.Refresh([.. accepted.Select(i => actions[i]!.RepoPath!)]);
+            for (var n = 0; n < accepted.Count; n++)
+            {
+                RefreshOutcome result;
+                try
+                {
+                    // Every wait started at the same moment: this is one deadline for the batch, not one each.
+                    var remaining = timeout - stopwatch.Elapsed;
+                    result = await tasks[n].WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, ct).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    result = new RefreshOutcome(false, "The agent is busy with another scan. This entry is rescanned as soon as that finishes, and the result arrives with it.");
+                }
+
+                logger.LogInformation("Refresh of {Path} asked for from the dashboard: {Message}", actions[accepted[n]]!.RepoPath, result.Message);
+                outcomes[accepted[n]] = new ActionOutcome(result.Succeeded, result.Succeeded ? 0 : 1, AgentActions.Truncate(result.Message), [], stopwatch.ElapsedMilliseconds);
+            }
+        }
+
+        return outcomes!;
+    }
+
     public async Task<ActionOutcome> ExecuteAsync(AgentAction? action, CancellationToken ct)
     {
         var stopwatch = Stopwatch.StartNew();
         ActionOutcome Refuse(string why) => new(false, null, "Refused: " + why, [], stopwatch.ElapsedMilliseconds);
+
+        if (action is { Kind: AgentActionKind.Refresh })
+        {
+            // Not a git action: nothing is run in the repository, so Actions:Enabled does not come into it.
+            return (await RefreshAsync([action], ct).ConfigureAwait(false))[0];
+        }
 
         if (action is { Kind: AgentActionKind.UpdateAgent })
         {

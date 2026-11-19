@@ -225,6 +225,7 @@ else
         Off unless that machine's agent was started with <code>--enable-actions</code>. Only a fixed list of safe git operations exists, each one is
         confirmed first, and the agent checks it again before running. Agent updates are listed here too; they follow each machine's own update
         setting, not <code>--enable-actions</code>. Paths under the machine's home folder are shown as <code>~/…</code>; hover for the full command.
+        Refreshes asked for from the Repo and Local pages change nothing, so they are kept out of this list and summarised under it.
     </p>
 </details>
 <div class="table-wrap">
@@ -293,6 +294,43 @@ else
     </div>
 }
 
+@if (_refreshes.Count > 0)
+{
+    var failed = _refreshes.Count(r => r.Status is AgentActionStatus.Failed or AgentActionStatus.Expired);
+    <details class="fold refresh-log">
+        <summary>
+            <strong>@Fmt.Count(_refreshes.Count, "refresh", "refreshes")</strong>
+            <span class="muted small">
+                read-only rescans asked for from the dashboard · last @RefreshStatus.Ago(_refreshes[0].QueuedAt, Now) on @_refreshes[0].MachineName@(failed > 0 ? $" · {failed} did not complete" : "")
+            </span>
+        </summary>
+        <div class="table-wrap">
+            <table class="stack actions-table">
+                <thead>
+                    <tr><th>Entry</th><th>Machine</th><th>By</th><th>Status</th><th>Result</th><th class="right">Asked</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var refresh in _refreshes.Take(RefreshesShown))
+                    {
+                        <tr @key="refresh.Id">
+                            <td class="cell-main cell-action"><code class="cmd" title="@refresh.RepoPath">@Fmt.Tilde(refresh.RepoPath, HomeFor(refresh.MachineId))</code></td>
+                            <td data-label="Machine" class="nowrap" title="@refresh.MachineId">@refresh.MachineName</td>
+                            <td data-label="By" class="sub">@refresh.QueuedBy</td>
+                            <td data-label="Status" class="nowrap"><span class="chip @ActionClass(refresh.Status)">@refresh.Status.ToString().ToLowerInvariant()</span></td>
+                            <td data-label="Result" class="sub @(string.IsNullOrWhiteSpace(refresh.Output) ? "blank" : "")">@refresh.Output</td>
+                            <td data-label="Asked" class="cell-when right sub nowrap" title="@Fmt.Date(refresh.QueuedAt)">@Fmt.Ago(refresh.QueuedAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (_refreshes.Count > RefreshesShown)
+        {
+            <div class="more-row"><span class="muted small">The newest @RefreshesShown of @_refreshes.Count. Only the last @ActionQueue.KeepRefreshes are kept.</span></div>
+        }
+    </details>
+}
+
 <h2>Agent API keys</h2>
 
 @if (_issued is not null)
@@ -350,7 +388,7 @@ else
 @code {
     [Inject] private IOptionsMonitor<HubOptions> Options { get; set; } = default!;
 
-    private const int ActionsPage = 10, ActionsLoaded = 200;
+    private const int ActionsPage = 10, ActionsLoaded = 200, RefreshesShown = 20;
     private const string ReinstallWhy = "This agent predates self-update, so it cannot be updated from here. Run the install one-liner on that machine once; after that it updates itself or on request.";
 
     private int _actionsShown = ActionsPage;
@@ -363,6 +401,7 @@ else
     private IReadOnlyList<MachineView> _machines = [];
     private IReadOnlyList<ApiKeyEntity> _keys = [];
     private IReadOnlyList<AgentActionEntity> _actions = [];
+    private IReadOnlyList<AgentActionEntity> _refreshes = [];
     private IssuedKey? _issued;
     private string _label = "";
 
@@ -370,7 +409,9 @@ else
     {
         _machines = Snapshots.Machines;
         _keys = await Keys.ListAsync();
-        _actions = await Actions.RecentAsync(ActionsLoaded);
+        // Refreshes are read-only and frequent: listing each one with the fixes and updates would bury those.
+        _actions = await Actions.RecentAsync(refreshes: false, ActionsLoaded);
+        _refreshes = await Actions.RecentAsync(refreshes: true, ActionQueue.KeepRefreshes);
         _pendingUpdates = await Updates.PendingAsync();
         _updatable = Updates.Updatable().Where(m => !_pendingUpdates.ContainsKey(m.MachineId)).ToList();
     }

@@ -93,7 +93,7 @@ public sealed class AgentUpdates(ReleaseStore releases, SnapshotStore snapshots,
     public async Task<IReadOnlyDictionary<string, AgentActionEntity>> PendingAsync(CancellationToken ct = default)
     {
         var result = new Dictionary<string, AgentActionEntity>(StringComparer.OrdinalIgnoreCase);
-        foreach (var row in await queue.RecentAsync(200, ct))
+        foreach (var row in await queue.RecentAsync(refreshes: false, 200, ct))
         {
             if (row.Kind == AgentActionKind.UpdateAgent && row.IsPending)
             {

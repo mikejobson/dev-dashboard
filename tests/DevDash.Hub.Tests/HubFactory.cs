@@ -119,12 +119,13 @@ public sealed class HubFactory : WebApplicationFactory<Program>
     }
 
     /// <param name="updateMode">What the agent reports as its update mode. Null is an agent from before self-update (0.1.x).</param>
-    public static MachineSnapshot Snapshot(string machineId = "mac", DateTimeOffset? now = null, bool actions = false, string? updateMode = null, string version = "0.1.0")
+    /// <param name="refresh">What the agent reports about taking refreshes. False is an agent from before 0.5.0, or one that does not poll.</param>
+    public static MachineSnapshot Snapshot(string machineId = "mac", DateTimeOffset? now = null, bool actions = false, string? updateMode = null, string version = "0.1.0", bool refresh = false)
     {
         var at = now ?? DateTimeOffset.UtcNow;
         return new MachineSnapshot
         {
-            Machine = new MachineInfo { MachineId = machineId, Hostname = machineId + "-host", Os = "macOS", AgentVersion = version, ActionsEnabled = actions, UpdateMode = updateMode },
+            Machine = new MachineInfo { MachineId = machineId, Hostname = machineId + "-host", Os = "macOS", AgentVersion = version, ActionsEnabled = actions, UpdateMode = updateMode, AcceptsRefresh = refresh },
             ScannedAt = at,
             ScanDurationMs = 123,
             Roots = ["/dev"],

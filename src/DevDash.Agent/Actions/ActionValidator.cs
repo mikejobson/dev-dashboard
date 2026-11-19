@@ -24,7 +24,7 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return shape;
         }
 
-        // An agent update is not a git action and is never validated, or run, as one.
+        // An agent update or a refresh is not a git action and is never validated, or run, as one.
         if (!AgentActions.IsRepoAction(action!.Kind) || action.RepoPath is not { } repoPath)
         {
             return "Not a repository action.";
@@ -44,6 +44,36 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             AgentActionKind.PruneWorktrees or AgentActionKind.Fetch => null,
             _ => "Unknown action kind.",
         };
+    }
+
+    /// <summary>
+    /// Why a refresh is refused, or null. A refresh runs no command, so all that matters is that the path
+    /// is a plain absolute one inside an entry this agent scans (symlinks resolved): anything else would
+    /// have the agent read, and report on, a folder its owner never pointed it at.
+    /// </summary>
+    public string? RefreshRefusal(AgentAction? action)
+    {
+        if (AgentActions.Validate(action) is { } shape)
+        {
+            return shape;
+        }
+
+        if (action is not { Kind: AgentActionKind.Refresh, RepoPath: { } path })
+        {
+            return "Not a refresh.";
+        }
+
+        if (!Path.IsPathFullyQualified(path) || PathSafety.HasDotSegments(path))
+        {
+            return "The entry path is not a plain absolute path.";
+        }
+
+        if (RescanRequests.Find(options.CurrentValue.ResolveRoots(), path) is not { } entry)
+        {
+            return $"{path} is outside this agent's scan roots.";
+        }
+
+        return entry.Name.StartsWith('.') ? $"{path} is not an entry this agent scans." : null;
     }
 
     /// <summary>

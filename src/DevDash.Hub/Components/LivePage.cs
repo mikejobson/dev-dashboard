@@ -11,6 +11,8 @@ public abstract class LivePage : ComponentBase, IDisposable
 {
     private int _reloadQueued;
     private bool _disposed;
+    private Timer? _ticker;
+    private Func<bool>? _tickWhile;
 
     [Inject] protected DashboardNotifier Notifier { get; set; } = default!;
 
@@ -33,6 +35,45 @@ public abstract class LivePage : ComponentBase, IDisposable
     {
         await LoadAsync();
         StateHasChanged();
+    }
+
+    /// <summary>
+    /// Re-renders once a second for as long as <paramref name="condition"/> holds, for text that counts
+    /// ("Refreshed 3 s ago"). Call it again whenever the condition may have become true; it stops itself.
+    /// </summary>
+    protected void TickWhile(Func<bool> condition)
+    {
+        _tickWhile = condition;
+        if (_ticker is null && !_disposed && condition())
+        {
+            _ticker = new Timer(_ => OnTick(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        }
+    }
+
+    private void OnTick()
+    {
+        try
+        {
+            _ = InvokeAsync(() =>
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                if (_tickWhile?.Invoke() != true)
+                {
+                    _ticker?.Dispose();
+                    _ticker = null;
+                }
+
+                StateHasChanged();
+            });
+        }
+        catch (Exception)
+        {
+            // The circuit went away between ticks.
+        }
     }
 
     private void OnChanged(DashboardChange change)
@@ -66,6 +107,7 @@ public abstract class LivePage : ComponentBase, IDisposable
     public void Dispose()
     {
         _disposed = true;
+        _ticker?.Dispose();
         Notifier.Changed -= OnChanged;
         GC.SuppressFinalize(this);
     }

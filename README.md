@@ -48,17 +48,50 @@ under an `Agent` section, or in `DEVDASH_Agent__*` environment variables.
 ### What the agent does to your repos
 
 It reads them with `git status`, `for-each-ref`, `worktree list`, `stash list`, `remote -v`, `log`
-and `rev-list --count`. Its only write is `git fetch --prune --quiet`, at most every 4 hours per repo, which updates
-remote-tracking refs and nothing else. Turn that off with `--no-fetch` or
-`"Agent": { "AutoFetch": { "Enabled": false } }`. Credential prompts are disabled and every git call
+and `rev-list --count`. Its only write is `git fetch --prune --quiet`, at most every 4 hours per repo (and when
+you click **Refresh** for that repo), which updates remote-tracking refs and nothing else. Turn that off with
+`--no-fetch` or `"Agent": { "AutoFetch": { "Enabled": false } }`; a machine with it off never fetches, Refresh included. Credential prompts are disabled and every git call
 has a timeout.
 
 That is all it does to your repos unless you turn on agent actions for that machine (see Cleanup
 below). They are off by default, and nothing the hub sends can turn them on.
 
-Separately, an installed agent asks the hub every 30 seconds whether you have clicked **Update** for
-it on the Machines page. That is the default update mode (`notify`); `--updates off` stops it. An
-update never touches a repository: see [Updating the agent](#updating-the-agent).
+Separately, an installed agent keeps one request open to the hub, waiting to hear that you have clicked
+**Update** for it on the Machines page or **Refresh** for one of its folders. That is the default update
+mode (`notify`); `--updates off` stops it (unless agent actions are on, which also need it). An update
+never touches a repository: see [Updating the agent](#updating-the-agent).
+
+### Refresh one project
+
+The agent rescans everything every 15 minutes, and a folder about 20 seconds after files in it change.
+That misses what happens elsewhere: a push from another machine, a branch deleted on GitHub. For that,
+the repo page has a **Refresh** button (every machine that has the repo, or one machine's row) and the
+Local page has a small ⟳ on every entry. A click asks that machine's agent to rescan that one top-level
+folder now, without waiting for the next full scan:
+
+- it fetches, whatever the 4 hour interval says, but only if that machine has auto-fetch on;
+- it measures the folder's size again, which is otherwise done once a day;
+- it re-reads the git state, and the branch map follows if the fetch moved anything;
+- then it pushes the snapshot and reports. The button shows "Refreshing on work-mac…", then
+  "Refreshed 3 s ago" or what went wrong (a fetch that failed counts as wrong).
+
+It is read-only apart from that fetch, so there is no confirmation dialog and it does **not** need
+`--enable-actions`. What it does need is an agent on 0.5.0 or newer that listens for requests, which
+is every agent unless both updates and actions are off. Where it is not available the button is greyed
+out and its tooltip says why. The agent checks that the path is inside its scan roots before doing
+anything, runs one scan at a time (a refresh waits for a full scan in progress), and treats several
+requests for the same folder as one. Refreshes are not listed among the agent actions on the Machines
+page; the last 100 are folded away under that list, so they cannot crowd out the record of a fix.
+
+**How a click reaches the agent.** The hub never connects to an agent. The agent asks the hub for
+work with `POST /api/v1/actions/claim?wait=25`, and when there is none the hub holds that request for
+up to 25 seconds and answers the moment something is queued for that machine; the agent then asks
+again straight away. A click therefore arrives in well under a second instead of on the next 30 second
+poll, and that goes for Run and Update too. 25 seconds is under the idle timeout of `tailscale serve`
+and most proxies; change it with `Agent:Actions:LongPollSeconds` (0 turns it off). If the hub answers
+at once with nothing (a hub older than 0.5.0) or cannot be reached, the agent goes back to asking every
+`Agent:Actions:PollSeconds` (30), backing off from 2 seconds after an error. An agent older than 0.5.0
+sends no `wait` and is answered at once, as before.
 
 ### Branch map
 
@@ -110,7 +143,7 @@ devdash-agent run --enable-actions        # or "Agent": { "Actions": { "Enabled"
 
 That machine then gets a **Run on \<machine\>** button beside the fixes that have an allowlisted
 action. Clicking it shows the machine, the repo and the exact git command, and nothing is queued until
-you confirm. The agent picks it up on its next poll (every 30 seconds), runs it, reports the result
+you confirm. The agent picks it up at once (see [how a click reaches the agent](#refresh-one-project)), runs it, reports the result
 and rescans, so the finding goes away. The Machines page lists every action: who queued it, when it
 was claimed, and what git printed.
 

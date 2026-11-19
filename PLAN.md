@@ -176,7 +176,7 @@ Uses structured outputs for (1) and (3). The API key comes from a hub secret (`A
 findings that span machines). `CleanupScript` builds the per-machine "copy as script" text from the Fix commands. Fingerprints did not change.
 
 **Flow.** Dashboard Run button → confirmation dialog (machine, repo, exact git command) → `ActionQueue` row (Queued) → the agent's
-`ActionWorker` polls `POST /api/v1/actions/claim` every 30s → row becomes Claimed → `ActionValidator` + `ActionExecutor` run it →
+`ActionWorker` polls `POST /api/v1/actions/claim` (every 30s; a long poll since 0.5.0, see §13) → row becomes Claimed → `ActionValidator` + `ActionExecutor` run it →
 `POST /api/v1/actions/{id}/result` (Succeeded / Failed) → the agent rescans that entry at once and pushes a snapshot.
 Polling keeps the "hub never dials agents" rule from §1; SignalR was not needed.
 
@@ -248,3 +248,28 @@ and never hands it an `UpdateAgent` action. Those machines need one reinstall.
 **Tests.** Unit tests cover signature and checksum verification (good, changed asset, changed checksums, other key, no signature, replay),
 version ordering, swap planning for both platforms, the confirm/roll back state machine with a fake clock, and the two-switch policy on
 both sides. `scripts/test-ota.sh` does it for real with two published builds, in CI on Linux, macOS and Windows.
+
+## 13. Refresh and long-poll delivery (0.5.0, built 2026-11-19)
+
+**Refresh.** A new typed action, `AgentActionKind.Refresh { RepoPath }`: rescan the top-level entry that holds that path, now. It is not a
+git action (`AgentActions.IsRepoAction` is false), so neither side gates it on the actions switch. Agent: `ActionValidator.RefreshRefusal`
+(plain absolute path, inside a scan root after resolving symlinks, not a dot entry) → `RescanRequests.Refresh` hands the batch to the scan
+loop → `AgentWorker` rescans each entry with `SizeMode.Force` and, only when `Agent:AutoFetch:Enabled`, a `ForcedFetch` (skips the 4 h
+interval; once per common dir per refresh, so a repository and its worktrees fetch once) → one push → the action's result. The scan loop
+stays the only scanner and the only writer of the last snapshot; refreshes wait in their own table (a full scan clears the file-change
+set, not that one), requests for one entry share one rescan, and a refresh stuck behind a long full scan reports "busy" after 4 minutes
+and still happens afterwards. A failed fetch or a failed push is a failed refresh.
+
+**Who can be asked.** `MachineInfo.AcceptsRefresh` (optional field, schema still 1) is true when the agent polls at all
+(`ActionWorker.ShouldPoll`: actions on, or updates notify/auto). `RefreshGate` turns that and the agent version into "offer it", "update
+the agent on X" (before 0.5.0) or "this agent doesn't check for requests". The hub never hands a Refresh to an agent that did not say it
+takes them: an older agent could not even parse the kind.
+
+**Long poll.** `POST /api/v1/actions/claim?wait=N` (N ≤ 60): `ActionQueue.ClaimAsync(machine, wait, ...)` takes the machine's
+`ActionSignals` task, looks, and if there is nothing waits on that task, the deadline, the request and `ApplicationStopping`. Queueing
+pulses the machine's signal. No `wait`: answered at once, as before. The agent (`ActionWorker.NextDelay`) asks again immediately after work
+or after a held poll, keeps the 30 s cadence when an empty answer came straight back (an older hub), and backs off 2 s → 30 s on errors.
+`ActionsClient` has no client-wide timeout; a claim gets wait + 20 s. Still agent-initiated only, so §1's "hub never dials agents" holds.
+
+**Audit.** Refresh rows live in `AgentActions` like any action (who, when, result) but are trimmed separately (last 100) and shown on the
+Machines page as one folded summary under the list of fixes and updates, never in it. `GET /api/v1/actions` returns everything.

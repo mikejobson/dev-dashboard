@@ -2,6 +2,7 @@
 @inherits LivePage
 @inject RepoCatalog Catalog
 @inject FindingsService Findings
+@inject RefreshBoard Refreshes
 
 <PageTitle>@(_row?.Name ?? "Repo") · DevDash</PageTitle>
 
@@ -27,6 +28,10 @@ else
             </p>
         </div>
         <div class="chips">
+            @if (_targets.Count > 0)
+            {
+                <RefreshButton Availability="AllAvailability" Status="AllStatus" What="@AllWhat" OnRefresh="() => RefreshAsync(_targets)" />
+            }
             @if (_row.GitHub is { } gh)
             {
                 <a class="btn" href="@gh.Url" target="_blank" rel="noopener">Open on GitHub</a>
@@ -44,6 +49,11 @@ else
             }
         </div>
     </div>
+
+    @if (Refreshes.Error is { } refreshError)
+    {
+        <div class="banner danger">Could not ask for a refresh: @refreshError</div>
+    }
 
     @if (_row.GitHub is { } repo)
     {
@@ -120,12 +130,13 @@ else
     <div class="table-wrap">
         <table class="stack">
             <thead>
-                <tr><th>Machine</th><th>Path</th><th>State</th><th>Last commit</th><th class="right">Fetched</th><th class="right">Size</th></tr>
+                <tr><th>Machine</th><th>Path</th><th>State</th><th>Last commit</th><th class="right">Fetched</th><th class="right">Size</th><th></th></tr>
             </thead>
             <tbody>
                 @foreach (var clone in _row.Clones)
                 {
-                    <tr>
+                    var target = RefreshTargets.For(clone);
+                    <tr @key="(clone.Machine.MachineId, clone.Entry.Path)">
                         <td class="nowrap cell-main"><a class="title-link" href="machines#machine-@clone.Machine.MachineId">@clone.Machine.Machine.Hostname</a></td>
                         <td data-label="Path" class="mono path">@clone.Entry.Path</td>
                         <td data-label="State">
@@ -156,6 +167,13 @@ else
                             @if (clone.Entry.Size is { ReclaimableBytes: > 0 } size)
                             {
                                 <div title="Build output that can be regenerated">@Fmt.Size(size.ReclaimableBytes) reclaimable</div>
+                            }
+                        </td>
+                        <td class="right cell-buttons cell-refresh">
+                            @if (target is not null)
+                            {
+                                <RefreshButton Compact="true" Availability="Refreshes.For(clone.Machine)" Status="Refreshes.StatusOf(target)"
+                                               What="@($"Rescan {clone.Entry.Name} on {clone.Machine.Machine.Hostname} now")" OnRefresh="() => RefreshAsync([target])" />
                             }
                         </td>
                     </tr>
@@ -263,6 +281,38 @@ else
     private List<FindingView> _findings = [];
     private IReadOnlyDictionary<string, List<CloneView>> _clonesByKey = new Dictionary<string, List<CloneView>>();
     private HashSet<(string Machine, string Branch)> _checkedOut = [];
+    private IReadOnlyList<RefreshTarget> _targets = [];
+
+    /// <summary>The top button is offered when any machine can take a refresh; otherwise it says why none can.</summary>
+    private RefreshAvailability AllAvailability
+    {
+        get
+        {
+            var each = _targets.Select(t => Refreshes.For(t.Machine)).ToList();
+            return each.Any(a => a.Available)
+                ? new RefreshAvailability(true, null)
+                : new RefreshAvailability(false, string.Join(" ", each.Select(a => a.WhyNot).Distinct()));
+        }
+    }
+
+    private RefreshStatus AllStatus => RefreshStatus.Combine(_targets.Where(t => Refreshes.For(t.Machine).Available || Refreshes.StatusOf(t).Phase != RefreshPhase.Idle).Select(Refreshes.StatusOf).ToList());
+
+    private string AllWhat
+    {
+        get
+        {
+            var able = _targets.Where(t => Refreshes.For(t.Machine).Available).Select(t => t.Machine.Machine.Hostname).Distinct().ToList();
+            var unable = _targets.Select(t => Refreshes.For(t.Machine)).Where(a => !a.Available).Select(a => a.WhyNot).Distinct().ToList();
+            return $"Rescan this repo on {string.Join(", ", able)} now: fetch (where that machine fetches), sizes and state"
+                + (unable.Count == 0 ? "" : ". Not included: " + string.Join(" ", unable));
+        }
+    }
+
+    private async Task RefreshAsync(IReadOnlyList<RefreshTarget> targets)
+    {
+        await Refreshes.QueueAsync(targets);
+        TickWhile(() => Refreshes.Ticking);
+    }
 
     /// <summary>Clones with a folder to open: everything but loose files.</summary>
     private List<CloneView> Openable => (_row?.Clones ?? []).Where(c => c.Entry.Kind != EntryKind.LooseFile).ToList();
@@ -285,6 +335,9 @@ else
     {
         _row = string.IsNullOrEmpty(Key) ? null : await Catalog.FindAsync(Key);
         _clonesByKey = Catalog.ClonesByGitHubKey();
+        _targets = RefreshTargets.For(_row?.Clones ?? []);
+        await Refreshes.LoadAsync();
+        TickWhile(() => Refreshes.Ticking);
         if (_row is null)
         {
             _findings = [];

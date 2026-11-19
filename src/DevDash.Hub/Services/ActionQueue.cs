@@ -27,6 +27,8 @@ public sealed record QueueOutcome(AgentActionEntity? Action, string? Error)
 /// <c>Hub:Actions:Enabled</c> and a machine that reports <c>ActionsEnabled</c>. An agent update
 /// (<see cref="AgentActionKind.UpdateAgent"/>) needs <c>Hub:Updates:Enabled</c> and a machine whose
 /// reported update mode is notify or auto. Neither set of switches affects the other kind.
+/// A refresh (<see cref="AgentActionKind.Refresh"/>) is a third kind with no switch: it is read-only,
+/// so it only needs an agent that says it takes them (<see cref="RefreshGate"/>).
 /// </para>
 /// </summary>
 public sealed class ActionQueue(
@@ -34,11 +36,18 @@ public sealed class ActionQueue(
     SnapshotStore snapshots,
     ReleaseStore releases,
     DashboardNotifier notifier,
+    ActionSignals signals,
     IOptionsMonitor<HubOptions> options,
     TimeProvider time,
     ILogger<ActionQueue> logger)
 {
     private const int MaxPerClaim = 20;
+
+    /// <summary>How many refreshes are kept. They are housekeeping, not fixes, and are trimmed apart from the audit trail's <c>KeepLast</c>.</summary>
+    public const int KeepRefreshes = 100;
+
+    /// <summary>How long a finished refresh keeps showing beside its button.</summary>
+    public static readonly TimeSpan RefreshShownFor = TimeSpan.FromMinutes(5);
 
     /// <summary>How long a finished action keeps showing on its finding, while the rescan catches up.</summary>
     public static readonly TimeSpan ShownOnFindingFor = TimeSpan.FromMinutes(15);
@@ -48,9 +57,12 @@ public sealed class ActionQueue(
     private HubUpdateOptions UpdateOptions => options.CurrentValue.Updates;
 
     /// <summary>Whether this hub and this machine allow actions of the given kind at all.</summary>
-    private bool Allows(MachineView machine, AgentActionKind kind) => kind == AgentActionKind.UpdateAgent
-        ? UpdateOptions.Enabled && AgentUpdateModes.AcceptsRequests(machine.Machine.UpdateMode)
-        : Options.Enabled && machine.Machine.ActionsEnabled;
+    private bool Allows(MachineView machine, AgentActionKind kind) => kind switch
+    {
+        AgentActionKind.UpdateAgent => UpdateOptions.Enabled && AgentUpdateModes.AcceptsRequests(machine.Machine.UpdateMode),
+        AgentActionKind.Refresh => RefreshGate.WhyUnsupported(machine.Machine) is null,
+        _ => Options.Enabled && machine.Machine.ActionsEnabled,
+    };
 
     /// <summary>
     /// True when Run buttons may be shown for the machine: actions are on at the hub, the machine's own
@@ -69,7 +81,8 @@ public sealed class ActionQueue(
     public async Task<QueueOutcome> QueueAsync(string machineId, AgentAction action, string queuedBy, Finding? finding = null, CancellationToken ct = default)
     {
         var isUpdate = action is { Kind: AgentActionKind.UpdateAgent };
-        if (isUpdate ? !UpdateOptions.Enabled : !Options.Enabled)
+        var isRefresh = action is { Kind: AgentActionKind.Refresh };
+        if (!isRefresh && (isUpdate ? !UpdateOptions.Enabled : !Options.Enabled))
         {
             return new QueueOutcome(null, isUpdate
                 ? "Agent updates are switched off on this hub (Hub:Updates:Enabled)."
@@ -93,7 +106,12 @@ public sealed class ActionQueue(
                 : $"{machine.Machine.Hostname} has updates switched off (Agent:Updates:Mode).");
         }
 
-        if (!isUpdate && !machine.Machine.ActionsEnabled)
+        if (isRefresh && RefreshGate.WhyUnsupported(machine.Machine) is { } noRefresh)
+        {
+            return new QueueOutcome(null, noRefresh);
+        }
+
+        if (!isUpdate && !isRefresh && !machine.Machine.ActionsEnabled)
         {
             return new QueueOutcome(null, $"{machine.Machine.Hostname} has not enabled agent actions. Start its agent with --enable-actions to allow them.");
         }
@@ -127,7 +145,14 @@ public sealed class ActionQueue(
             }
         }
         // The agent checks the path against its own scan roots. This catches a stale page earlier.
-        else if (!ReportedRepoPaths(machine.Snapshot).Contains(action.RepoPath!))
+        else if (isRefresh)
+        {
+            if (!RepoIdentity.Flatten(machine.Snapshot.Entries).Any(e => e.Path == action!.RepoPath))
+            {
+                return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports anything at {action!.RepoPath}.");
+            }
+        }
+        else if (!ReportedRepoPaths(machine.Snapshot).Contains(action!.RepoPath!))
         {
             return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports a repository at {action.RepoPath}.");
         }
@@ -163,15 +188,59 @@ public sealed class ActionQueue(
         db.AgentActions.Add(entity);
         await db.SaveChangesAsync(ct);
 
-        var oldest = entity.Id - Math.Max(50, Options.KeepLast);
-        if (oldest > 0)
+        // Refreshes are trimmed on their own, shorter, leash: clicking Refresh a lot must not push
+        // the record of a deleted branch or an agent update out of the audit trail.
+        var keep = isRefresh ? KeepRefreshes : Math.Max(50, Options.KeepLast);
+        var cutoff = await db.AgentActions
+            .Where(OfSort(isRefresh))
+            .OrderByDescending(a => a.Id)
+            .Select(a => (int?)a.Id)
+            .Skip(keep)
+            .FirstOrDefaultAsync(ct);
+        if (cutoff is { } oldest)
         {
-            await db.AgentActions.Where(a => a.Id <= oldest).ExecuteDeleteAsync(ct);
+            await db.AgentActions.Where(a => a.Id <= oldest).Where(OfSort(isRefresh)).ExecuteDeleteAsync(ct);
         }
 
         logger.LogInformation("Action {Id} queued for {Machine} by {User}: {Command}", entity.Id, entity.MachineId, entity.QueuedBy, entity.CommandLine);
         notifier.Notify(DashboardChange.Actions);
+        signals.Pulse(entity.MachineId); // wakes the agent's long poll, if it has one open
         return new QueueOutcome(entity, null);
+    }
+
+    /// <summary>
+    /// A claim that waits: when nothing is queued for the machine, holds on until something is, or
+    /// <paramref name="wait"/> has passed, or the hub is stopping, and then answers (with nothing, in
+    /// the last two cases). Nothing is ever handed out to a request that has gone away.
+    /// </summary>
+    public async Task<IReadOnlyList<PendingAgentAction>> ClaimAsync(string machineId, TimeSpan wait, CancellationToken ct = default, CancellationToken stopping = default)
+    {
+        var deadline = time.GetUtcNow() + wait;
+        while (true)
+        {
+            // Taken before looking, so an action queued between the look and the wait still wakes this.
+            var queued = signals.Next(machineId);
+            var claimed = await ClaimAsync(machineId, ct);
+            var remaining = deadline - time.GetUtcNow();
+            if (claimed.Count > 0 || remaining <= TimeSpan.Zero || stopping.IsCancellationRequested)
+            {
+                return claimed;
+            }
+
+            using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping);
+            try
+            {
+                await queued.WaitAsync(remaining, time, cancel.Token);
+            }
+            catch (TimeoutException)
+            {
+                return [];
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                return [];
+            }
+        }
     }
 
     /// <summary>
@@ -186,7 +255,7 @@ public sealed class ActionQueue(
         // the kinds its last snapshot said it accepts: one that polls for updates alone gets no git
         // action, and one restarted with a switch turned off gets nothing of that kind (the rows expire).
         if (snapshots.Get(machineId) is not { } machine
-            || (!Allows(machine, AgentActionKind.Fetch) && !Allows(machine, AgentActionKind.UpdateAgent)))
+            || (!Allows(machine, AgentActionKind.Fetch) && !Allows(machine, AgentActionKind.UpdateAgent) && !Allows(machine, AgentActionKind.Refresh)))
         {
             return [];
         }
@@ -307,11 +376,40 @@ public sealed class ActionQueue(
         return changed;
     }
 
-    /// <summary>The audit trail, newest first.</summary>
+    /// <summary>The audit trail, newest first: every action, refreshes included.</summary>
     public async Task<IReadOnlyList<AgentActionEntity>> RecentAsync(int take = 50, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         return await db.AgentActions.AsNoTracking().OrderByDescending(a => a.Id).Take(take).ToListAsync(ct);
+    }
+
+    /// <summary>The audit trail without refreshes (fixes and agent updates), or only the refreshes. Newest first.</summary>
+    public async Task<IReadOnlyList<AgentActionEntity>> RecentAsync(bool refreshes, int take, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.AgentActions.AsNoTracking().Where(OfSort(refreshes)).OrderByDescending(a => a.Id).Take(take).ToListAsync(ct);
+    }
+
+    private static System.Linq.Expressions.Expression<Func<AgentActionEntity, bool>> OfSort(bool refreshes) =>
+        refreshes ? a => a.Kind == AgentActionKind.Refresh : a => a.Kind != AgentActionKind.Refresh;
+
+    /// <summary>
+    /// The newest refresh per (machine, entry path) that is still worth showing beside its button:
+    /// on its way, or finished in the last few minutes.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<(string MachineId, string Path), AgentActionEntity>> ShownRefreshesAsync(CancellationToken ct = default)
+    {
+        var cutoff = time.GetUtcNow() - RefreshShownFor;
+        var result = new Dictionary<(string, string), AgentActionEntity>();
+        foreach (var row in await RecentAsync(refreshes: true, KeepRefreshes, ct))
+        {
+            if (row.IsPending || row.CompletedAt >= cutoff)
+            {
+                result.TryAdd((row.MachineId.ToLowerInvariant(), row.RepoPath), row); // newest first, so the first one wins
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -322,7 +420,7 @@ public sealed class ActionQueue(
     {
         var cutoff = time.GetUtcNow() - ShownOnFindingFor;
         var result = new Dictionary<(string, string), AgentActionEntity>();
-        foreach (var row in await RecentAsync(200, ct))
+        foreach (var row in await RecentAsync(refreshes: false, 200, ct))
         {
             if (row.IsPending || row.CompletedAt >= cutoff)
             {
@@ -349,6 +447,28 @@ public sealed class ActionQueue(
         }
 
         return paths;
+    }
+}
+
+/// <summary>
+/// Wakes an agent's long poll when something is queued for its machine. In memory only: a poll that
+/// misses a pulse (it cannot, see <see cref="ActionQueue.ClaimAsync(string, TimeSpan, CancellationToken, CancellationToken)"/>)
+/// would still find the action on its next attempt.
+/// </summary>
+public sealed class ActionSignals
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource> _waiting = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Completes the next time something is queued for the machine.</summary>
+    public Task Next(string machineId) =>
+        _waiting.GetOrAdd(machineId, _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+
+    public void Pulse(string machineId)
+    {
+        if (_waiting.TryRemove(machineId, out var waiting))
+        {
+            waiting.TrySetResult();
+        }
     }
 }
 

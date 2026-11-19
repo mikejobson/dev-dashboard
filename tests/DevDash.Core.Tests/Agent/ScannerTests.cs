@@ -193,6 +193,30 @@ public sealed class ScannerTests : IDisposable
         Assert.True(full.LastModified > new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero));
     }
 
+    [Fact]
+    public async Task A_deleted_build_folder_leaves_the_cached_size_without_waiting_for_a_new_measurement()
+    {
+        var modules = Directory.CreateDirectory(Path.Combine(Widget, "node_modules", "pkg")).FullName;
+        File.WriteAllBytes(Path.Combine(modules, "big.bin"), new byte[64 * 1024]);
+        var dist = Directory.CreateDirectory(Path.Combine(Widget, "dist")).FullName; // beside package.json
+        File.WriteAllBytes(Path.Combine(dist, "app.js"), new byte[16 * 1024]);
+        var scanner = CreateScanner(autoFetch: false);
+
+        var measured = Find(await scanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.Force), CancellationToken.None)).Size!;
+        Assert.Equal(2, measured.ReclaimableDirs.Count);
+
+        Directory.Delete(Path.Combine(Widget, "node_modules"), recursive: true);
+        var after = Find(await scanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Size!;
+
+        var left = Assert.Single(after.ReclaimableDirs);
+        Assert.EndsWith("dist", left.Path);
+        Assert.Equal(left.Bytes, after.ReclaimableBytes);
+        Assert.True(after.ReclaimableBytes < measured.ReclaimableBytes);
+        Assert.Equal(measured.MeasuredAt, after.MeasuredAt);
+
+        static DevEntry Find(MachineSnapshot snapshot) => snapshot.Entries.Single(e => e.Name == "widget");
+    }
+
     private MachineScanner CreateScanner(bool autoFetch)
     {
         var options = new StaticOptions(new AgentOptions

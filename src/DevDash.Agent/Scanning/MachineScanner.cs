@@ -205,7 +205,31 @@ public sealed class MachineScanner
             return stats;
         }
 
-        return stats with { Size = cached };
+        return stats with { Size = WithoutDeletedDirs(path, cached) };
+    }
+
+    /// <summary>
+    /// A cached size, less any build folder that has since been deleted (by hand, or by the finding's
+    /// own <c>rm -rf</c>). Checking that a folder exists is cheap, unlike measuring it again, so a
+    /// deletion shows on the next scan instead of when the size is next due.
+    /// </summary>
+    private SizeInfo? WithoutDeletedDirs(string path, SizeInfo? cached)
+    {
+        if (cached is null || cached.ReclaimableDirs.All(d => Directory.Exists(d.Path)))
+        {
+            return cached;
+        }
+
+        var kept = cached.ReclaimableDirs.Where(d => Directory.Exists(d.Path)).ToList();
+        var removed = cached.ReclaimableBytes - kept.Sum(d => d.Bytes);
+        var updated = cached with
+        {
+            ReclaimableDirs = kept,
+            ReclaimableBytes = kept.Sum(d => d.Bytes),
+            TotalBytes = Math.Max(0, cached.TotalBytes - removed),
+        };
+        _sizes.Set(path, updated);
+        return updated;
     }
 
     /// <summary>

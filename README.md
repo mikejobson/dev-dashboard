@@ -47,8 +47,8 @@ under an `Agent` section, or in `DEVDASH_Agent__*` environment variables.
 
 ### What the agent does to your repos
 
-It reads them with `git status`, `for-each-ref`, `worktree list`, `stash list`, `remote -v` and
-`log`. Its only write is `git fetch --prune --quiet`, at most every 4 hours per repo, which updates
+It reads them with `git status`, `for-each-ref`, `worktree list`, `stash list`, `remote -v`, `log`
+and `rev-list --count`. Its only write is `git fetch --prune --quiet`, at most every 4 hours per repo, which updates
 remote-tracking refs and nothing else. Turn that off with `--no-fetch` or
 `"Agent": { "AutoFetch": { "Enabled": false } }`. Credential prompts are disabled and every git call
 has a timeout.
@@ -59,6 +59,27 @@ below). They are off by default, and nothing the hub sends can turn them on.
 Separately, an installed agent asks the hub every 30 seconds whether you have clicked **Update** for
 it on the Machines page. That is the default update mode (`notify`); `--updates off` stops it. An
 update never touches a repository: see [Updating the agent](#updating-the-agent).
+
+### Branch map
+
+A repo's page opens with a branch map: its commits drawn like `git log --graph`, for every device
+that has the repo at once. It shows where each branch, checked-out HEAD (ringed), linked worktree,
+stash and remote-tracking ref sits, with a colour per device. A commit that only one device has is
+drawn in that device's colour, and a dot per device on every row says whether the commit is on a
+local branch there, only fetched, or absent. Unpushed commits are hollow, uncommitted changes are a
+dashed "ghost" commit on top of the HEAD they sit on, merged branches are dimmed (or hidden), and
+open pull requests sit on their branch with their CI state. A branch that is at different commits on
+two devices is called out above the map: "3 commits ahead" when one only has to catch up, "diverged"
+when each has commits the other lacks. `origin/main` appears twice when one device fetched more
+recently than another. Click a commit for its full sha, author and which devices have it; click a
+device in the legend to take it out of the picture.
+
+For this the agent sends a compact commit graph per repo (three or four `git log` calls, cached
+until a ref moves): up to 250 commits that are not on the default branch yet, the default branch's
+newest 20, and the commits branches fork from. Long stretches of the default branch in between are
+drawn as "… N commits". Agents older than this feature send no graph: the map says which device
+needs [updating](#updating-the-agent), and still places that device's branches where another device
+knows the commit.
 
 ### GitHub
 

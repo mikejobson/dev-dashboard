@@ -1,0 +1,577 @@
+@* The branch map: one repository's commits, branches and working trees across every device that has it. *@
+@using System.Globalization
+@using System.Text
+@inject SnapshotStore Snapshots
+
+@if (_map.Sources.Count > 0)
+{
+    <section class="bm" style="--bm-w:@(GraphWidth)px;--bm-dots:@(_map.Sources.Count(s => s.Visible) * 12 - 4)px">
+        <div class="section-head">
+            <h2>Branch map <span class="muted small">@Summary()</span></h2>
+            <div class="toolbar">
+                @if (_map.MergedBranches > 0)
+                {
+                    <button type="button" class="toggle @(_hideMerged ? "on" : "")" aria-pressed="@(_hideMerged ? "true" : "false")" @onclick="ToggleMerged"
+                            title="Branches already merged into the default branch">@(_hideMerged ? "Show" : "Hide") @Fmt.Count(_map.MergedBranches, "merged branch", "merged branches")</button>
+                }
+                @if (_map.HasFolds)
+                {
+                    <button type="button" class="toggle @(_expandAll ? "on" : "")" aria-pressed="@(_expandAll ? "true" : "false")" @onclick="ToggleExpand">@(_expandAll ? "Fold quiet runs" : "Show every commit")</button>
+                }
+            </div>
+        </div>
+
+        <div class="bm-devices" role="group" aria-label="Devices">
+            @foreach (var source in _map.Sources)
+            {
+                <button type="button" class="bm-dev @Dev(source) @(source.Visible ? "on" : "")" aria-pressed="@(source.Visible ? "true" : "false")"
+                        title="@(source.Visible ? "Hide" : "Show") @source.Label" @onclick="() => ToggleSource(source.Id)">
+                    <span class="bm-swatch"></span>
+                    <span class="bm-dev-name">@source.Label</span>
+                    <span class="bm-dev-stats">@SourceStats(source)</span>
+                </button>
+            }
+        </div>
+
+        @foreach (var warning in _map.Warnings)
+        {
+            <div class="bm-warning @(warning.Diverged ? "diverged" : "")">
+                <span class="bm-warning-mark">@(warning.Diverged ? "⚠" : "↕")</span>
+                <span><span class="mono">@warning.Branch</span> @(warning.Diverged ? warning.Text : "is not at the same commit everywhere: " + warning.Text)</span>
+            </div>
+        }
+
+        @if (!_map.HasGraph)
+        {
+            <div class="card muted">
+                No device has sent this repository's history yet. The map needs a newer agent: update it on
+                @string.Join(", ", _map.Sources.Select(s => s.Label)) from the <a href="machines">Machines page</a>.
+            </div>
+        }
+        else if (_map.Rows.Count == 0)
+        {
+            <div class="card muted">Nothing to draw: every device is switched off, or this repository has no commits.</div>
+        }
+        else
+        {
+            <div class="bm-scroll">
+                <div class="bm-rows">
+                    @foreach (var row in _map.Rows.Take(_showAllRows ? int.MaxValue : RowLimit))
+                    {
+                        var open = _selected == row.Key && row.Kind == MapRowKind.Commit;
+                        <div class="bm-row @RowClass(row) @(open ? "open" : "")" @key="row.Key">
+                            <div class="bm-g" aria-hidden="true">@((MarkupString)Svg(row))</div>
+                            <div class="bm-p" aria-hidden="true">
+                                @if (row.Kind != MapRowKind.Gap)
+                                {
+                                    @foreach (var source in _map.Sources.Where(s => s.Visible))
+                                    {
+                                        var presence = row.Presence[IndexOf(source)];
+                                        <i class="@Dev(source) @presence.ToString().ToLowerInvariant()" title="@source.Label: @PresenceText(presence)"></i>
+                                    }
+                                }
+                            </div>
+                            @switch (row.Kind)
+                            {
+                                case MapRowKind.Commit:
+                                    <div class="bm-c" role="button" tabindex="0" aria-expanded="@(open ? "true" : "false")" @onclick="() => Select(row.Key)" @onkeydown="e => KeySelect(e, row.Key)">
+                                        @foreach (var r in row.Refs)
+                                        {
+                                            <span class="bm-ref @RefClass(r)" title="@RefTitle(r)">
+                                                @if (r.Kind == MapRefKind.Remote)
+                                                {
+                                                    <svg class="bm-cloud" viewBox="0 0 16 12" aria-hidden="true"><path d="M4.2 11h7.3a3 3 0 0 0 .5-5.96A4.2 4.2 0 0 0 3.9 4.3 3.4 3.4 0 0 0 4.2 11z" /></svg>
+                                                }
+                                                @if (r.Sources.Count > 1 || (r.Kind == MapRefKind.Remote && r.Split))
+                                                {
+                                                    <span class="bm-ref-dots">@foreach (var s in r.Sources) { <i class="@Dev(_map.Sources[s]) @(r.HeadOf.Contains(s) ? "head" : "")"></i> }</span>
+                                                }
+                                                @if (r.HeadOf.Count > 0)
+                                                {
+                                                    <span class="bm-head-mark" aria-label="checked out"></span>
+                                                }
+                                                <span class="bm-ref-name">@r.Name</span>
+                                                @if (r.Ahead > 0) { <span class="bm-ref-n">↑@r.Ahead</span> }
+                                                @if (r.Behind > 0) { <span class="bm-ref-n">↓@r.Behind</span> }
+                                                @if (r.Merged) { <span class="bm-ref-n">merged</span> }
+                                                @if (r.UpstreamGone) { <span class="bm-ref-n gone">gone</span> }
+                                                @if (r.Diverged) { <span class="bm-ref-n split">diverged</span> }
+                                                else if (r.Split && r.Kind == MapRefKind.Local) { <span class="bm-ref-n">≠</span> }
+                                                @if (r.FetchedAt is not null) { <span class="bm-ref-n">fetched @Fmt.Ago(r.FetchedAt, Now)</span> }
+                                            </span>
+                                        }
+                                        @foreach (var pr in row.PullRequests)
+                                        {
+                                            <a class="bm-ref pr" href="@pr.Url" target="_blank" rel="noopener" title="@PrTitle(pr)" @onclick:stopPropagation="true">
+                                                <span class="dot @CiClass(pr)"></span>#@pr.Number
+                                                @if (pr.IsDraft) { <span class="bm-ref-n">draft</span> }
+                                                else if (pr.ReviewDecision == "APPROVED") { <span class="bm-ref-n ok">approved</span> }
+                                                else if (pr.ReviewDecision == "CHANGES_REQUESTED") { <span class="bm-ref-n gone">changes</span> }
+                                            </a>
+                                        }
+                                        @foreach (var group in row.Stashes.GroupBy(s => s.Source))
+                                        {
+                                            <span class="bm-ref stash @Dev(_map.Sources[group.Key])" title="@StashTitle(group)">@(group.Count() == 1 ? "stash" : $"{group.Count()} stashes")</span>
+                                        }
+                                        @if (row.Unpushed)
+                                        {
+                                            <span class="bm-tag" title="On no remote yet">unpushed</span>
+                                        }
+                                        <span class="bm-subject">@row.Commit!.Subject</span>
+                                    </div>
+                                    <div class="bm-m" @onclick="() => Select(row.Key)">
+                                        <span class="bm-author">@row.Commit!.Author</span>
+                                        <span class="bm-age" title="@Fmt.Date(row.Commit.Date)">@Fmt.Ago(row.Commit.Date, Now)</span>
+                                        <span class="bm-sha mono">@Fmt.Sha(row.Commit.Sha)</span>
+                                    </div>
+                                    @if (open)
+                                    {
+                                        <div class="bm-detail">
+                                            <div class="bm-detail-subject">@row.Commit!.Subject</div>
+                                            <div class="bm-detail-line">
+                                                <code class="bm-fullsha">@row.Commit.Sha</code>
+                                                <button type="button" class="copy" data-copy="@row.Commit.Sha">Copy</button>
+                                                @if (GitHubUrl is not null && !row.Unpushed)
+                                                {
+                                                    <a href="@GitHubUrl/commit/@row.Commit.Sha" target="_blank" rel="noopener">Open on GitHub</a>
+                                                }
+                                            </div>
+                                            <div class="bm-detail-line muted">@row.Commit.Author · @Fmt.Date(row.Commit.Date) · @Fmt.Ago(row.Commit.Date, Now)@(row.IsMerge ? " · merge commit" : "")</div>
+                                            <ul class="bm-detail-devices">
+                                                @foreach (var source in _map.Sources.Where(s => s.Visible))
+                                                {
+                                                    var presence = row.Presence[IndexOf(source)];
+                                                    <li class="@Dev(source) @presence.ToString().ToLowerInvariant()">
+                                                        <i></i><b>@source.Label</b>
+                                                        <span>@DeviceLine(row, source, presence)</span>
+                                                    </li>
+                                                }
+                                            </ul>
+                                            @if (row.Unpushed)
+                                            {
+                                                <div class="bm-detail-line"><span class="bm-tag">unpushed</span> This commit is on no remote: it exists only where the list above says.</div>
+                                            }
+                                            @foreach (var stash in row.Stashes)
+                                            {
+                                                <div class="bm-detail-line muted">Stash on @_map.Sources[stash.Source].Label: @stash.Stash.Message · @Fmt.Ago(stash.Stash.Date, Now)</div>
+                                            }
+                                        </div>
+                                    }
+                                    break;
+
+                                case MapRowKind.Ghost:
+                                    var tree = row.Tree!;
+                                    <div class="bm-c ghost">
+                                        <span class="bm-ref ghost @Dev(_map.Sources[tree.Source])">uncommitted</span>
+                                        @if (tree.Conflicted > 0) { <span class="bm-ref-n gone">@tree.Conflicted conflicted</span> }
+                                        @if (tree.Staged > 0) { <span class="bm-ref-n">@tree.Staged staged</span> }
+                                        @if (tree.Unstaged > 0) { <span class="bm-ref-n">@tree.Unstaged modified</span> }
+                                        @if (tree.Untracked > 0) { <span class="bm-ref-n">@tree.Untracked untracked</span> }
+                                        <span class="bm-subject">on @_map.Sources[tree.Source].Label@(tree.Linked || tree.Label != Name ? $" · {tree.Label}" : "")</span>
+                                    </div>
+                                    <div class="bm-m">
+                                        <span class="bm-age" title="@Fmt.Date(tree.ChangedAt)">@(tree.ChangedAt is null ? "" : Fmt.Ago(tree.ChangedAt, Now))</span>
+                                    </div>
+                                    break;
+
+                                case MapRowKind.Fold:
+                                    <div class="bm-c quiet">
+                                        <button type="button" class="link bm-fold" @onclick="() => Expand(row.Key)">@Fmt.Count(row.Hidden, "more commit") · show</button>
+                                    </div>
+                                    <div class="bm-m"></div>
+                                    break;
+
+                                default:
+                                    <div class="bm-c quiet">
+                                        <span class="muted small">
+                                            @(row.Older
+                                                ? $"{row.Hidden.ToString("N0", CultureInfo.InvariantCulture)} older {(row.Hidden == 1 ? "commit" : "commits")} on {Trunk}"
+                                                : row.Hidden > 0 ? $"{row.Hidden.ToString("N0", CultureInfo.InvariantCulture)} {(row.Hidden == 1 ? "commit" : "commits")} further down {Trunk}"
+                                                : $"further down {Trunk}")
+                                        </span>
+                                    </div>
+                                    <div class="bm-m"></div>
+                                    break;
+                            }
+                        </div>
+                    }
+                    @if (!_showAllRows && _map.Rows.Count > RowLimit)
+                    {
+                        var rest = _map.Rows.Skip(RowLimit).ToList();
+                        var names = rest.SelectMany(r => r.Refs).Where(r => r.Kind == MapRefKind.Local).Select(r => r.Name).Distinct().Count();
+                        <div class="bm-more">
+                            <button type="button" @onclick="() => _showAllRows = true">Show @Fmt.Count(rest.Count, "more row")</button>
+                            <span class="muted small">older history@(names > 0 ? $", with {Fmt.Count(names, "branch", "branches")}" : "")</span>
+                        </div>
+                    }
+                </div>
+            </div>
+
+            <div class="bm-key muted small">
+                <span><svg viewBox="0 0 14 14"><circle class="n cs" cx="7" cy="7" r="4.5" /></svg>on more than one device</span>
+                <span><svg viewBox="0 0 14 14"><circle class="n c0" cx="7" cy="7" r="4.5" /></svg>on one device only, in its colour</span>
+                <span><svg viewBox="0 0 14 14"><circle class="n c0 hollow" cx="7" cy="7" r="4" /></svg>unpushed</span>
+                <span><svg viewBox="0 0 14 14"><circle class="n cr" cx="7" cy="7" r="3.2" /></svg>only on the remote</span>
+                <span><svg viewBox="0 0 20 20"><circle class="head c0" cx="10" cy="10" r="8" /><circle class="n c0" cx="10" cy="10" r="4.5" /></svg>checked out</span>
+                <span><svg viewBox="0 0 14 14"><circle class="n c0 ghost" cx="7" cy="7" r="4.5" /></svg>uncommitted changes</span>
+                <span class="bm-p"><i class="c0 local"></i>local <i class="c0 fetched"></i>fetched only</span>
+            </div>
+        }
+
+        @foreach (var source in _map.Sources.Where(s => s.Visible))
+        {
+            @if (!source.HasGraph && _map.HasGraph)
+            {
+                <p class="bm-note muted small">
+                    <span class="bm-swatch @Dev(source)"></span> The agent on <b>@source.Label</b>@(source.AgentVersion.Length > 0 ? $" ({source.AgentVersion})" : "") is too old to send its commits.
+                    <a href="machines#machine-@source.MachineId">Update it</a> to see its branches in the map@(source.Unplaced > 0 ? $": {Fmt.Count(source.Unplaced, "branch", "branches")} could not be placed" : "").
+                </p>
+            }
+            else if (source.Truncated)
+            {
+                <p class="bm-note muted small">
+                    <span class="bm-swatch @Dev(source)"></span> <b>@source.Label</b> has @(source.SideCommitCount is { } n ? n.ToString("N0", CultureInfo.InvariantCulture) : "many") commits off @Trunk; the map shows the newest of them.
+                </p>
+            }
+        }
+        @if (_map.UnplacedPullRequests.Count > 0 && _map.HasGraph)
+        {
+            <p class="bm-note muted small">
+                Not on any device:
+                @foreach (var pr in _map.UnplacedPullRequests.Take(8))
+                {
+                    <a class="bm-ref pr" href="@pr.Url" target="_blank" rel="noopener" title="@PrTitle(pr)"><span class="dot @CiClass(pr)"></span>#@pr.Number <span class="bm-ref-n mono">@pr.HeadRef</span></a>
+                }
+                @if (_map.UnplacedPullRequests.Count > 8) { <span>and @(_map.UnplacedPullRequests.Count - 8) more</span> }
+            </p>
+        }
+    </section>
+}
+
+@code {
+    /// <summary>The line the map is drawn along, for the "N commits further down …" rows.</summary>
+    private string Trunk => _map?.TrunkName ?? "the default branch";
+
+    /// <summary>Rows drawn before "show more": the top of the map is what is recent.</summary>
+    private const int RowLimit = 120;
+
+    /// <summary>Lanes sit closer together when there are many, so the text keeps most of the width.</summary>
+    private int LaneWidth => _map.LaneCount <= 8 ? 16 : _map.LaneCount <= 14 ? 12 : 9;
+    private const int Pad = 12;
+    private const int RowHeight = 30;
+    private const int Mid = RowHeight / 2;
+    private int Corner => Math.Min(8, LaneWidth - 2);
+    private const int Far = 2000;
+
+    /// <summary>Above this many merged branches they start hidden: they are noise until you go looking.</summary>
+    private const int AutoHideMerged = 6;
+
+    [Parameter, EditorRequired] public IReadOnlyList<CloneView> Clones { get; set; } = [];
+
+    [Parameter] public IReadOnlyList<PullRequestInfo> PullRequests { get; set; } = [];
+
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>The repository's page on GitHub, for commit links.</summary>
+    [Parameter] public string? GitHubUrl { get; set; }
+
+    /// <summary>The repository's name: a working tree is only named when it is not simply that.</summary>
+    [Parameter] public string? Name { get; set; }
+
+    private BranchMap _map = new();
+    private readonly HashSet<string> _hidden = [];
+    private readonly HashSet<string> _expanded = [];
+    private bool? _hideMergedChoice;
+    private bool _hideMerged;
+    private bool _expandAll;
+    private string? _selected;
+    private bool _showAllRows;
+
+    private int GraphWidth => Pad * 2 + Math.Max(0, _map.LaneCount - 1) * LaneWidth;
+
+    protected override void OnParametersSet() => Rebuild();
+
+    private void Rebuild()
+    {
+        var options = new BranchMapOptions
+        {
+            HiddenSources = _hidden,
+            ExpandAll = _expandAll,
+            Expanded = _expanded,
+            MachineOrder = Snapshots.Machines.Select(m => m.MachineId).ToList(),
+        };
+
+        if (_hideMergedChoice is null)
+        {
+            // Until the user says otherwise: a handful of merged branches are shown dimmed, a pile is hidden.
+            var probe = BranchGraph.Build(Clones, PullRequests, options);
+            _hideMerged = probe.MergedBranches > AutoHideMerged;
+            if (!_hideMerged)
+            {
+                _map = probe;
+                return;
+            }
+        }
+        else
+        {
+            _hideMerged = _hideMergedChoice.Value;
+        }
+
+        _map = BranchGraph.Build(Clones, PullRequests, options with { HideMerged = _hideMerged });
+    }
+
+    private void ToggleSource(string id)
+    {
+        if (!_hidden.Remove(id))
+        {
+            _hidden.Add(id);
+        }
+
+        Rebuild();
+    }
+
+    private void ToggleMerged()
+    {
+        _hideMergedChoice = !_hideMerged;
+        Rebuild();
+    }
+
+    private void ToggleExpand()
+    {
+        _expandAll = !_expandAll;
+        _expanded.Clear();
+        Rebuild();
+    }
+
+    private void Expand(string key)
+    {
+        _expanded.Add(key);
+        Rebuild();
+    }
+
+    private void Select(string key) => _selected = _selected == key ? null : key;
+
+    private void KeySelect(KeyboardEventArgs e, string key)
+    {
+        if (e.Key is "Enter" or " ")
+        {
+            Select(key);
+        }
+    }
+
+    private int IndexOf(MapSource source)
+    {
+        for (var i = 0; i < _map.Sources.Count; i++)
+        {
+            if (ReferenceEquals(_map.Sources[i], source))
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    private static string Dev(MapSource source) => "c" + (source.Color % 6).ToString(CultureInfo.InvariantCulture);
+
+    private string ColorClass(int key) => key switch
+    {
+        MapColor.Shared => "cs",
+        MapColor.Remote => "cr",
+        _ => Dev(_map.Sources[key]),
+    };
+
+    private string Summary()
+    {
+        var devices = _map.Sources.Count;
+        var commits = _map.Rows.Count(r => r.Kind == MapRowKind.Commit);
+        return $"{Fmt.Count(devices, "device")} · {Fmt.Count(commits, "commit")} shown";
+    }
+
+    private string SourceStats(MapSource source)
+    {
+        if (!source.HasGraph)
+        {
+            return "agent too old";
+        }
+
+        var parts = new List<string> { Fmt.Count(source.Branches, "branch", "branches") };
+        if (source.Unpushed > 0)
+        {
+            parts.Add($"{source.Unpushed} unpushed");
+        }
+
+        if (source.Dirty > 0)
+        {
+            parts.Add("uncommitted");
+        }
+
+        parts.Add(source.LastFetchAt is null ? "never fetched" : "fetched " + Fmt.Ago(source.LastFetchAt, Now));
+        return string.Join(" · ", parts);
+    }
+
+    private static string PresenceText(MapPresence presence) => presence switch
+    {
+        MapPresence.Local => "on a local branch",
+        MapPresence.Fetched => "fetched, on no local branch",
+        _ => "not here",
+    };
+
+    private string DeviceLine(MapRow row, MapSource source, MapPresence presence)
+    {
+        var index = IndexOf(source);
+        var parts = new List<string> { PresenceText(presence) };
+        var heads = row.Heads.Where(t => t.Source == index).ToList();
+        if (heads.Count > 0)
+        {
+            parts.Add("checked out in " + string.Join(", ", heads.Select(t => t.Label)));
+        }
+
+        var names = row.Refs.Where(r => r.Sources.Contains(index) && r.Kind != MapRefKind.Detached).Select(r => r.Name).ToList();
+        if (names.Count > 0)
+        {
+            parts.Add("tip of " + string.Join(", ", names));
+        }
+
+        return string.Join(" · ", parts);
+    }
+
+    private static string RowClass(MapRow row) =>
+        row.Kind.ToString().ToLowerInvariant() + (row.Dim ? " dim" : "") + (row.OnTrunk ? " trunk" : "");
+
+    private string RefClass(MapRef r)
+    {
+        var css = new StringBuilder(r.Kind.ToString().ToLowerInvariant());
+        css.Append(' ').Append(r.Sources.Count == 1 && !(r.Kind == MapRefKind.Remote && !r.Split) ? Dev(_map.Sources[r.Sources[0]]) : "cs");
+        if (r.HeadOf.Count > 0) { css.Append(" head"); }
+        if (r.IsDefault) { css.Append(" default"); }
+        if (r.Merged) { css.Append(" merged"); }
+        if (r.UpstreamGone) { css.Append(" gone"); }
+        if (r.Split) { css.Append(" split"); }
+        if (r.Diverged) { css.Append(" diverged"); }
+        return css.ToString();
+    }
+
+    private string RefTitle(MapRef r)
+    {
+        var where = string.Join(", ", r.Sources.Select(s => _map.Sources[s].Label + (r.HeadOf.Contains(s) ? " (checked out)" : "")));
+        var text = r.Kind switch
+        {
+            MapRefKind.Remote => $"{r.Name} as last fetched on {where}",
+            MapRefKind.Detached => $"Detached HEAD on {where}" + (r.Tree is null ? "" : $" in {r.Tree}"),
+            _ => $"{r.Name} on {where}",
+        };
+        if (r.Kind == MapRefKind.Local)
+        {
+            text += r.UpstreamGone ? " · its upstream is gone" : r.NoUpstream ? " · no upstream" : "";
+            text += r.Ahead > 0 ? $" · {r.Ahead} ahead of its upstream" : "";
+            text += r.Behind > 0 ? $" · {r.Behind} behind its upstream" : "";
+            text += r.Merged ? " · merged into the default branch" : "";
+            text += r.Diverged ? " · has diverged from the same branch on another device" : r.Split ? " · at a different commit on another device" : "";
+        }
+        else if (r.Split)
+        {
+            text += " · another device has fetched a different commit";
+        }
+
+        return text;
+    }
+
+    private static string CiClass(PullRequestInfo pr) => pr.Ci switch
+    {
+        CiState.Success => "ok",
+        CiState.Failure => "danger",
+        CiState.Pending => "warn",
+        _ => "",
+    };
+
+    private static string PrTitle(PullRequestInfo pr)
+    {
+        var state = pr.Ci switch { CiState.Success => "CI passing", CiState.Failure => "CI failing", CiState.Pending => "CI running", _ => null };
+        string?[] parts = [$"#{pr.Number} {pr.Title}", pr.IsDraft ? "draft" : null, state, pr.ReviewDecision?.Replace('_', ' ').ToLowerInvariant(), pr.Mergeable == "CONFLICTING" ? "conflicts" : null];
+        return string.Join(" · ", parts.Where(p => p is not null));
+    }
+
+    private string StashTitle(IGrouping<int, MapStash> group) =>
+        $"Stashed on {_map.Sources[group.Key].Label}: " + string.Join("; ", group.Select(s => s.Stash.Message));
+
+    // ---- the graph column: one small SVG per row, with lines running past its bottom edge so a row can be any height ----
+
+    private int X(int lane) => Pad + lane * LaneWidth;
+
+    private string Svg(MapRow row)
+    {
+        var sb = new StringBuilder(512);
+        var x = X(row.Lane);
+        sb.Append(CultureInfo.InvariantCulture, $"<svg width=\"{GraphWidth}\" height=\"{RowHeight}\">");
+
+        void Line(MapLine line, string d) =>
+            sb.Append(CultureInfo.InvariantCulture, $"<path class=\"l {ColorClass(line.Color)}{(line.Style == MapLineStyle.Dashed ? " dash" : "")}\" d=\"{d}\"/>");
+
+        foreach (var line in row.Through)
+        {
+            Line(line, $"M{X(line.Lane)} 0V{Far}");
+        }
+
+        var broken = row.Kind is MapRowKind.Gap or MapRowKind.Fold;
+        if (row.Up)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"<path class=\"l {ColorClass(row.Color)}{(row.Kind == MapRowKind.Ghost ? " dash" : "")} up\" d=\"M{x} 0V{(broken ? 5 : Mid)}\"/>");
+        }
+
+        foreach (var line in row.In)
+        {
+            var lx = X(line.Lane);
+            var toward = lx > x ? -1 : 1;
+            Line(line, $"M{lx} 0V{Mid - Corner}Q{lx} {Mid} {lx + (toward * Corner)} {Mid}H{x}");
+        }
+
+        foreach (var line in row.Out)
+        {
+            var lx = X(line.Lane);
+            var toward = lx > x ? -1 : 1;
+            Line(line, $"M{x} {Mid}H{lx + (toward * Corner)}Q{lx} {Mid} {lx} {Mid + Corner}V{Far}");
+        }
+
+        if (row.Down is { } down)
+        {
+            Line(down, $"M{x} {(broken ? RowHeight - 5 : Mid)}V{Far}");
+        }
+        else if (row.Stub)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"<path class=\"l {ColorClass(row.Color)} stub\" d=\"M{x} {Mid}V{RowHeight - 2}\"/>");
+        }
+
+        var color = ColorClass(row.Color);
+        switch (row.Kind)
+        {
+            case MapRowKind.Gap or MapRowKind.Fold:
+                foreach (var y in (int[])[Mid - 5, Mid, Mid + 5])
+                {
+                    sb.Append(CultureInfo.InvariantCulture, $"<circle class=\"n {color} pip\" cx=\"{x}\" cy=\"{y}\" r=\"1.3\"/>");
+                }
+
+                break;
+
+            case MapRowKind.Ghost:
+                sb.Append(CultureInfo.InvariantCulture, $"<circle class=\"n {color} ghost\" cx=\"{x}\" cy=\"{Mid}\" r=\"4.5\"/>");
+                break;
+
+            default:
+                var ring = 8.0;
+                foreach (var source in row.Heads.Select(t => t.Source).Distinct())
+                {
+                    sb.Append(CultureInfo.InvariantCulture, $"<circle class=\"head {Dev(_map.Sources[source])}\" cx=\"{x}\" cy=\"{Mid}\" r=\"{ring:0.#}\"/>");
+                    ring += 2.6;
+                }
+
+                var kind = row.Unpushed ? " hollow" : "";
+                var radius = row.Color == MapColor.Remote ? 3.2 : row.Unpushed ? 4.0 : row.IsMerge ? 3.5 : 4.5;
+                sb.Append(CultureInfo.InvariantCulture, $"<circle class=\"n {color}{kind}\" cx=\"{x}\" cy=\"{Mid}\" r=\"{radius:0.#}\"/>");
+                break;
+        }
+
+        sb.Append("</svg>");
+        return sb.ToString();
+    }
+}

@@ -60,6 +60,7 @@ public sealed class GitRunner
             "for-each-ref" => true,
             "rev-parse" => true,
             "log" => true,
+            "rev-list" => args.Count >= 3 && args[1] == "--count", // counts commits, prints one number
             "symbolic-ref" => args.Count == 3 && args[1] == "--short", // read form only
             "remote" => args.Count == 2 && args[1] == "-v",
             "worktree" => args.Count >= 2 && args[1] == "list",

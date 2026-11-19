@@ -13,6 +13,7 @@ public class GitRunnerTests
     [InlineData("symbolic-ref", "--short", "refs/remotes/origin/HEAD")]
     [InlineData("rev-parse", "--git-common-dir")]
     [InlineData("log", "-1", "--format=%H")]
+    [InlineData("rev-list", "--count", "--first-parent", "origin/main")]
     public void Allows_the_read_only_commands_the_scanner_uses(params string[] args) =>
         GitRunner.EnsureReadOnly(args);
 
@@ -32,6 +33,8 @@ public class GitRunnerTests
     [InlineData("remote", "set-url", "origin", "x")]
     [InlineData("symbolic-ref", "HEAD", "refs/heads/x")]
     [InlineData("gc")]
+    [InlineData("rev-list", "--all")] // only the counting form
+    [InlineData("rev-list", "--count")]
     [InlineData("status", "some-path")]
     public void Refuses_anything_that_could_change_a_repository(params string[] args) =>
         Assert.Throws<InvalidOperationException>(() => GitRunner.EnsureReadOnly(args));

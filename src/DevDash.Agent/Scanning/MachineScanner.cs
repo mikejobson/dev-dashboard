@@ -74,8 +74,45 @@ public sealed class MachineScanner
             ScannedAt = _time.GetUtcNow(),
             ScanDurationMs = stopwatch.ElapsedMilliseconds,
             Roots = roots,
-            Entries = entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+            Entries = WithOneGraphPerRepository(entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
         };
+    }
+
+    /// <summary>
+    /// A repository and its linked worktrees share one commit graph. When the main working tree is in the
+    /// snapshot it carries the graph and the linked worktrees' copies are dropped; a linked worktree whose
+    /// main working tree is outside the scan roots keeps its own.
+    /// </summary>
+    public static IReadOnlyList<DevEntry> WithOneGraphPerRepository(IReadOnlyList<DevEntry> entries)
+    {
+        var carried = new HashSet<string>(StringComparer.Ordinal);
+        void Collect(IEnumerable<DevEntry> list)
+        {
+            foreach (var entry in list)
+            {
+                if (entry.Git is { IsLinkedWorktree: false, Graph: not null, CommonDir: { } dir })
+                {
+                    carried.Add(dir);
+                }
+
+                Collect(entry.Children);
+            }
+        }
+
+        DevEntry Strip(DevEntry entry)
+        {
+            var children = entry.Children.Count == 0 ? entry.Children : entry.Children.Select(Strip).ToList();
+            var git = entry.Git;
+            if (git is { IsLinkedWorktree: true, Graph: not null, CommonDir: { } dir } && !carried.Add(dir))
+            {
+                git = git with { Graph = null };
+            }
+
+            return ReferenceEquals(git, entry.Git) && ReferenceEquals(children, entry.Children) ? entry : entry with { Git = git, Children = children };
+        }
+
+        Collect(entries);
+        return entries.Select(Strip).ToList();
     }
 
     /// <summary>Scans a single top-level entry (used for debounced rescans). Returns null when it no longer exists.</summary>

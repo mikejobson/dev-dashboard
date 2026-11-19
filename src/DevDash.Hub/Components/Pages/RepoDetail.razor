@@ -74,6 +74,11 @@ else
         </div>
     }
 
+    @if (_row.Kind == EntryKind.GitRepo)
+    {
+        <BranchMapView Clones="_row.Clones" PullRequests="_row.PullRequests" Now="Now" GitHubUrl="@_row.GitHub?.Url" Name="@_row.Clones.FirstOrDefault()?.Entry.Name" />
+    }
+
     @if (_row.GitHub is not null || _row.PullRequests.Count > 0)
     {
         <h2>

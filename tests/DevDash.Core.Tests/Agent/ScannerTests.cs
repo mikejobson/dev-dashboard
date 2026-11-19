@@ -165,6 +165,153 @@ public sealed class ScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task Reports_a_compact_commit_graph_for_the_branch_map()
+    {
+        string Commit(string subject)
+        {
+            File.AppendAllText(Path.Combine(Widget, "log.txt"), subject + "\n");
+            Git(Widget, "add", ".");
+            Git(Widget, "commit", "-q", "-m", subject);
+            return Git(Widget, "rev-parse", "HEAD");
+        }
+
+        var root = Git(Widget, "rev-parse", "HEAD");
+
+        // An old branch that forks from the very first commit, far below what is sent of main.
+        Git(Widget, "checkout", "-q", "-b", "old");
+        var old = Commit("old work");
+        Git(Widget, "push", "-q", "-u", "origin", "old");
+
+        // main moves on by more than the context the agent sends, then merges a topic branch.
+        Git(Widget, "checkout", "-q", "main");
+        for (var i = 1; i <= CommitGraphCollector.TrunkContext + 4; i++)
+        {
+            Commit($"main {i}");
+        }
+
+        Git(Widget, "checkout", "-q", "-b", "topic");
+        var topic = Commit("topic work");
+        Git(Widget, "checkout", "-q", "main");
+        Git(Widget, "merge", "-q", "--no-ff", "topic", "-m", "Merge topic");
+        var merge = Git(Widget, "rev-parse", "HEAD");
+        Git(Widget, "push", "-q", "origin", "main");
+
+        // A feature branch with one pushed commit and one that is on no remote, and a stash on top of it.
+        Git(Widget, "checkout", "-q", "-b", "feature");
+        var pushed = Commit("feature, pushed");
+        Git(Widget, "push", "-q", "-u", "origin", "feature");
+        var unpushed = Commit("feature, not pushed");
+        File.AppendAllText(Path.Combine(Widget, "log.txt"), "parked\n");
+        Git(Widget, "stash", "push", "-q", "-m", "parked");
+        Directory.CreateDirectory(Path.Combine(_dev, "widget.worktrees"));
+        Git(Widget, "worktree", "add", "-q", "--detach", Path.Combine(_dev, "widget.worktrees", "look"), "main~3");
+        var detached = Git(Widget, "rev-parse", "main~3");
+
+        var scanner = CreateScanner(autoFetch: false);
+        var snapshot = await scanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None);
+        var git = snapshot.Entries.Single(e => e.Name == "widget").Git!;
+        var graph = git.Graph!;
+        var commits = graph.Commits.ToDictionary(c => c.Sha);
+
+        Assert.Equal("origin/main", graph.TrunkRef);
+        Assert.False(graph.Truncated);
+        Assert.Equal(["origin/feature", "origin/main", "origin/old"], graph.RemoteRefs.Select(r => r.Name).Order());
+        Assert.Equal(merge, graph.RemoteRefs.Single(r => r.Name == "origin/main").Sha);
+
+        // The default branch: its newest commits, numbered from the root, and nothing in between down to the fork point.
+        var trunkLength = 1 + CommitGraphCollector.TrunkContext + 4 + 1;
+        Assert.Equal(trunkLength, commits[merge].TrunkPos);
+        Assert.Equal(2, commits[merge].Parents.Count);
+        Assert.Equal(1, commits[root].TrunkPos);
+        Assert.Equal(CommitGraphCollector.TrunkContext + 1, graph.Commits.Count(c => c.TrunkPos is not null));
+        Assert.DoesNotContain(graph.Commits, c => c.TrunkPos is > 1 and < 7);
+        Assert.Equal(trunkLength - 3, commits[detached].TrunkPos); // main~3: three first parents below the merge
+
+        // Off the default branch: the old branch hangs off the root, the feature off the merge.
+        Assert.Null(commits[old].TrunkPos);
+        Assert.Equal([root], commits[old].Parents);
+        Assert.False(commits[old].Unpushed);
+        Assert.False(commits[old].InTrunk);
+        Assert.Equal("old work", commits[old].Subject);
+        Assert.Equal("DevDash Test", commits[old].Author);
+        Assert.Equal([merge], commits[pushed].Parents);
+        Assert.False(commits[pushed].Unpushed);
+        Assert.True(commits[unpushed].Unpushed);
+
+        // A merged branch's tip is part of main's history without being on its first-parent line.
+        Assert.True(commits[topic].InTrunk);
+        Assert.Null(commits[topic].TrunkPos);
+        Assert.Contains(topic, commits[merge].Parents);
+
+        // The stash knows the commit it was made on.
+        Assert.Equal(unpushed, Assert.Single(git.Stashes).BaseSha);
+
+        // The linked worktree shares the repository, so it does not repeat the graph.
+        var look = snapshot.Entries.Single(e => e.Name == "widget.worktrees").Children.Single(c => c.Name == "look");
+        Assert.True(look.Git!.IsLinkedWorktree);
+        Assert.Null(look.Git.Graph);
+
+        // Nothing moved: the same graph comes back. A new commit shows up on the next scan.
+        var again = (await scanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!.Graph;
+        Assert.Same(graph, again);
+        var next = Commit("one more");
+        var after = (await scanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!.Graph!;
+        Assert.True(after.Commits.Single(c => c.Sha == next).Unpushed);
+
+        // It survives the trip to the hub, and an old agent's snapshot simply has none.
+        var json = System.Text.Json.JsonSerializer.Serialize(git, SnapshotSchema.JsonOptions);
+        Assert.DoesNotContain("\"unpushed\":false", json);
+        Assert.DoesNotContain("\"inTrunk\":false", json);
+        var back = System.Text.Json.JsonSerializer.Deserialize<GitState>(json, SnapshotSchema.JsonOptions)!;
+        Assert.Equal(graph.Commits.Count, back.Graph!.Commits.Count);
+        Assert.Equal(trunkLength, back.Graph.Commits.Single(c => c.Sha == merge).TrunkPos);
+        Assert.Null(System.Text.Json.JsonSerializer.Deserialize<GitState>("{\"branch\":\"main\"}", SnapshotSchema.JsonOptions)!.Graph);
+    }
+
+    [Fact]
+    public void A_linked_worktree_keeps_the_graph_when_its_repository_is_not_in_the_snapshot()
+    {
+        static DevEntry Entry(string name, string commonDir, bool linked) => new()
+        {
+            Root = "/dev", Name = name, Path = "/dev/" + name, Kind = EntryKind.GitRepo,
+            Git = new GitState { CommonDir = commonDir, IsLinkedWorktree = linked, Graph = new CommitGraph { TrunkRef = "origin/main" } },
+        };
+
+        var container = new DevEntry
+        {
+            Root = "/dev", Name = "widget.worktrees", Path = "/dev/widget.worktrees", Kind = EntryKind.WorktreeContainer,
+            Children = [Entry("a", "/dev/widget/.git", linked: true), Entry("b", "/elsewhere/gadget/.git", linked: true), Entry("c", "/elsewhere/gadget/.git", linked: true)],
+        };
+
+        var result = MachineScanner.WithOneGraphPerRepository([container, Entry("widget", "/dev/widget/.git", linked: false)]);
+
+        Assert.NotNull(result[1].Git!.Graph);
+        Assert.Null(result[0].Children[0].Git!.Graph);    // widget is scanned itself
+        Assert.NotNull(result[0].Children[1].Git!.Graph); // gadget's main working tree is not: the first worktree carries it
+        Assert.Null(result[0].Children[2].Git!.Graph);
+    }
+
+    [Fact]
+    public async Task Caps_the_commits_off_the_default_branch_and_says_so()
+    {
+        Git(Widget, "checkout", "-q", "-b", "long");
+        for (var i = 0; i < CommitGraphCollector.MaxSideCommits + 5; i++)
+        {
+            Git(Widget, "commit", "-q", "--allow-empty", "-m", $"step {i}");
+        }
+
+        var graph = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single().Git!.Graph!;
+
+        Assert.True(graph.Truncated);
+        Assert.Equal(CommitGraphCollector.MaxSideCommits + 5, graph.SideCommitCount);
+        // The newest 250, and the one commit the oldest of them hangs off.
+        Assert.Equal(CommitGraphCollector.MaxSideCommits + 1, graph.Commits.Count(c => c.TrunkPos is null));
+        Assert.DoesNotContain(graph.Commits, c => c.InTrunk);
+        Assert.Contains(graph.Commits, c => c.Subject == $"step {CommitGraphCollector.MaxSideCommits + 4}"); // the newest are the ones kept
+        Assert.DoesNotContain(graph.Commits, c => c.Subject == "step 0");
+    }
+
+    [Fact]
     public void Tree_walker_separates_build_output_and_ignores_it_for_last_modified()
     {
         var repo = Directory.CreateDirectory(Path.Combine(_root, "walk")).FullName;
@@ -217,6 +364,29 @@ public sealed class ScannerTests : IDisposable
         static DevEntry Find(MachineSnapshot snapshot) => snapshot.Entries.Single(e => e.Name == "widget");
     }
 
+    [Theory]
+    [InlineData(true, "origin/develop")]
+    [InlineData(false, "origin/main")]
+    public async Task The_branch_map_follows_develop_when_it_is_where_the_newest_work_is(bool developIsNewer, string expectedTrunk)
+    {
+        Git(Widget, "checkout", "-q", "-b", "develop");
+        File.WriteAllText(Path.Combine(Widget, "dev.txt"), "dev");
+        Git(Widget, "add", "dev.txt");
+        GitAt(developIsNewer ? "2030-01-02T00:00:00Z" : "2020-01-01T00:00:00Z", Widget, "commit", "-q", "-m", "develop work");
+        Git(Widget, "push", "-q", "-u", "origin", "develop");
+        Git(Widget, "checkout", "-q", "main");
+        File.WriteAllText(Path.Combine(Widget, "rel.txt"), "release");
+        Git(Widget, "add", "rel.txt");
+        GitAt("2025-06-01T00:00:00Z", Widget, "commit", "-q", "-m", "release");
+        Git(Widget, "push", "-q", "origin", "main");
+
+        var snapshot = await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None);
+        var git = snapshot.Entries.Single(e => e.Name == "widget").Git!;
+
+        Assert.Equal(expectedTrunk, git.Graph!.TrunkRef);
+        Assert.Equal("main", git.DefaultBranch); // the default branch itself is unchanged
+    }
+
     private MachineScanner CreateScanner(bool autoFetch)
     {
         var options = new StaticOptions(new AgentOptions
@@ -232,7 +402,10 @@ public sealed class ScannerTests : IDisposable
     }
 
     /// <summary>Test-only git, used to build fixtures. The agent itself can only go through <see cref="GitRunner"/>.</summary>
-    private static string Git(string workingDirectory, params string[] args)
+    private static string Git(string workingDirectory, params string[] args) => GitAt(null, workingDirectory, args);
+
+    /// <summary>Test-only git with a fixed committer date, for tests that compare commit times.</summary>
+    private static string GitAt(string? committerDate, string workingDirectory, params string[] args)
     {
         var psi = new ProcessStartInfo("git")
         {
@@ -247,6 +420,12 @@ public sealed class ScannerTests : IDisposable
         }
 
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        if (committerDate is not null)
+        {
+            psi.Environment["GIT_COMMITTER_DATE"] = committerDate;
+            psi.Environment["GIT_AUTHOR_DATE"] = committerDate;
+        }
+
         psi.Environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
         psi.Environment["GIT_CONFIG_SYSTEM"] = "/dev/null";
         using var process = Process.Start(psi)!;

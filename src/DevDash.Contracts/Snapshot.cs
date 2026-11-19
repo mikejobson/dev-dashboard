@@ -195,6 +195,13 @@ public sealed record GitState
     public IReadOnlyList<WorktreeInfo> Worktrees { get; init; } = [];
     public IReadOnlyList<StashInfo> Stashes { get; init; } = [];
 
+    /// <summary>
+    /// A compact commit graph for the branch map: what is not on the default branch yet, a little of the
+    /// default branch for context, and the commits branches fork from. Null from an agent that predates
+    /// it (0.3.x and older), and on a linked worktree whose main working tree is scanned as well.
+    /// </summary>
+    public CommitGraph? Graph { get; init; }
+
     [JsonIgnore]
     public int DirtyCount => Staged + Unstaged + Conflicted;
 
@@ -258,6 +265,68 @@ public sealed record StashInfo
     public DateTimeOffset Date { get; init; }
     public string Message { get; init; } = "";
     public string? Branch { get; init; }
+
+    /// <summary>The commit the stash was made on. Null from older agents.</summary>
+    public string? BaseSha { get; init; }
+}
+
+/// <summary>
+/// Part of a repository's commit graph, small enough to send with every snapshot. Commits are
+/// content-addressed, so the hub joins the graphs of several machines by <see cref="GraphCommit.Sha"/>.
+/// </summary>
+public sealed record CommitGraph
+{
+    /// <summary>The ref the default branch was read from: <c>origin/main</c>, or the local branch when there is no remote one.</summary>
+    public string? TrunkRef { get; init; }
+
+    public IReadOnlyList<GraphCommit> Commits { get; init; } = [];
+
+    /// <summary>Remote-tracking tips that matter: the upstream of each local branch and the default branch's remote ref.</summary>
+    public IReadOnlyList<GraphRef> RemoteRefs { get; init; } = [];
+
+    /// <summary>True when there were more commits off the default branch than the agent sends.</summary>
+    public bool Truncated { get; init; }
+
+    /// <summary>How many commits are off the default branch in all, when <see cref="Truncated"/> and it could be counted.</summary>
+    public int? SideCommitCount { get; init; }
+}
+
+public sealed record GraphCommit
+{
+    public required string Sha { get; init; }
+
+    /// <summary>All parents, whether or not they are in <see cref="CommitGraph.Commits"/>.</summary>
+    public IReadOnlyList<string> Parents { get; init; } = [];
+    public DateTimeOffset Date { get; init; }
+    public string Author { get; init; } = "";
+    public string Subject { get; init; } = "";
+
+    /// <summary>
+    /// For a commit on the default branch's first-parent line: how many commits that line has up to and
+    /// including this one. The same on every machine, so the hub can order these commits and say how
+    /// many lie between two of them.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? TrunkPos { get; init; }
+
+    /// <summary>
+    /// True for a commit that is part of the default branch's history but not on its first-parent line:
+    /// the tip of a branch that was merged, for instance. Such a commit has no <see cref="TrunkPos"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool InTrunk { get; init; }
+
+    /// <summary>True when the commit is on a local branch and on no remote-tracking branch of any remote.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Unpushed { get; init; }
+}
+
+/// <summary>A remote-tracking ref and the commit it points at, as this machine last fetched it.</summary>
+public sealed record GraphRef
+{
+    /// <summary>Short name, e.g. <c>origin/feature-x</c>.</summary>
+    public required string Name { get; init; }
+    public required string Sha { get; init; }
 }
 
 public sealed record DescriptionInputs

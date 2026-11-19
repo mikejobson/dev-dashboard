@@ -17,6 +17,14 @@
     --info: #6cb6ff;
     --info-bg: rgba(108, 182, 255, .14);
     --neutral-bg: rgba(139, 150, 165, .16);
+    /* One colour per device in the branch map, and a quiet one for what every device has. */
+    --dev-0: #6cb6ff;
+    --dev-1: #f0a45d;
+    --dev-2: #c297ff;
+    --dev-3: #3ecfb8;
+    --dev-4: #ff8fb6;
+    --dev-5: #b4d455;
+    --dev-shared: #8f9bab;
     --radius: 8px;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -40,6 +48,13 @@
         --info: #0969da;
         --info-bg: rgba(9, 105, 218, .1);
         --neutral-bg: rgba(95, 107, 122, .12);
+        --dev-0: #0969da;
+        --dev-1: #bc4c00;
+        --dev-2: #8250df;
+        --dev-3: #0c857a;
+        --dev-4: #bf3989;
+        --dev-5: #4d7c0f;
+        --dev-shared: #7b8796;
     }
 }
 
@@ -603,4 +618,143 @@ details.chip-details > div { margin-top: 4px; max-width: 280px; white-space: nor
     .kv dt { font-size: 12.5px; margin-top: 6px; }
     .command { min-width: 0; }
     .banner .command { flex-wrap: wrap; }
+}
+
+/* ==== branch map (repo page) ==== */
+.bm { margin-top: 4px; }
+.bm .c0 { --c: var(--dev-0); } .bm .c1 { --c: var(--dev-1); } .bm .c2 { --c: var(--dev-2); }
+.bm .c3 { --c: var(--dev-3); } .bm .c4 { --c: var(--dev-4); } .bm .c5 { --c: var(--dev-5); }
+.bm .cs, .bm .cr { --c: var(--dev-shared); }
+
+/* ---- devices: the legend is also the switches ---- */
+.bm-devices { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.bm-dev {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; align-items: center; text-align: left;
+    padding: 6px 12px 6px 10px; border-radius: var(--radius); background: var(--surface); min-width: 0; max-width: 100%; opacity: .55;
+}
+.bm-dev.on { opacity: 1; border-color: color-mix(in srgb, var(--c) 55%, var(--border)); background: color-mix(in srgb, var(--c) 7%, var(--surface)); }
+.bm-dev:hover { border-color: var(--c); }
+.bm-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--c); flex: none; }
+.bm-dev.on .bm-swatch, .bm-note .bm-swatch { background: var(--c); }
+.bm-dev .bm-swatch { grid-row: span 2; }
+.bm-dev-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bm-dev-stats { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.bm-warning {
+    display: flex; gap: 8px; align-items: baseline; padding: 7px 12px; margin-bottom: 8px; border-radius: 6px; overflow-wrap: anywhere;
+    border: 1px solid var(--border); border-left: 3px solid var(--info); background: var(--surface);
+}
+.bm-warning.diverged { border-left-color: var(--danger); background: var(--danger-bg); }
+.bm-warning.diverged .bm-warning-mark { color: var(--danger); }
+.bm-warning-mark { flex: none; color: var(--info); }
+
+/* ---- the diagram ---- */
+.bm-scroll { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); overflow-x: auto; padding: 6px 0; }
+.bm-rows { min-width: max(100%, calc(var(--bm-w) + 300px)); }
+.bm-row {
+    display: grid; grid-template-columns: var(--bm-w) auto minmax(0, 1fr) auto; column-gap: 8px; align-items: start;
+    min-height: 30px; padding-right: 12px; position: relative;
+}
+.bm-row.commit:hover, .bm-row.open { background: var(--surface-2); }
+.bm-g { grid-row: 1 / span 2; align-self: stretch; position: relative; overflow: hidden; min-height: 30px; }
+.bm-g svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.bm svg .l { fill: none; stroke: var(--c); stroke-width: 2; stroke-linecap: round; }
+.bm svg .l.cr { opacity: .55; }
+.bm svg .l.dash { stroke-dasharray: 2 4; }
+.bm svg .l.stub { stroke-dasharray: 1 4; opacity: .7; }
+.bm svg .n { fill: var(--c); stroke: var(--surface); stroke-width: 1.5; }
+.bm-row.commit:hover svg .n:not(.hollow), .bm-row.open svg .n:not(.hollow) { stroke: var(--surface-2); }
+.bm-row.commit:hover svg .n.hollow, .bm-row.open svg .n.hollow { fill: var(--surface-2); }
+.bm svg .n.cr { opacity: .7; }
+.bm svg .n.hollow { fill: var(--surface); stroke: var(--c); stroke-width: 2.2; }
+.bm svg .n.ghost { fill: var(--surface); stroke: var(--c); stroke-width: 1.6; stroke-dasharray: 2.4 2.2; }
+.bm svg .n.pip { stroke: none; opacity: .8; }
+.bm svg .head { fill: color-mix(in srgb, var(--c) 16%, transparent); stroke: var(--c); stroke-width: 1.5; filter: drop-shadow(0 0 3px var(--c)); }
+.bm-row.dim svg .n, .bm-row.dim .bm-subject, .bm-row.dim .bm-m { opacity: .55; }
+
+/* Who has the commit: one dot per device. Filled is on a local branch, a ring is fetched only, a speck is absent. */
+.bm-p { display: inline-flex; gap: 4px; align-items: center; height: 30px; }
+.bm-row > .bm-p { width: var(--bm-dots); }
+.bm-p i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; flex: none; }
+.bm-p i.local { background: var(--c); }
+.bm-p i.fetched { border: 1.5px solid var(--c); opacity: .85; }
+.bm-p i.none { width: 4px; height: 4px; margin: 0 2px; background: var(--border); }
+
+.bm-c { display: flex; flex-wrap: wrap; gap: 3px 6px; align-items: center; min-width: 0; min-height: 30px; padding: 4px 0; }
+.bm-row.commit .bm-c, .bm-row.commit .bm-m { cursor: pointer; }
+.bm-c:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+.bm-subject { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bm-row.trunk:not(.open) .bm-subject { color: var(--muted); }
+.bm-row.open .bm-subject { visibility: hidden; height: 0; flex-basis: 0; }
+.bm-c.ghost .bm-subject, .bm-c.quiet { color: var(--muted); font-style: italic; }
+.bm-c.quiet { font-style: normal; }
+.bm-fold { padding: 0; font-size: 12.5px; }
+.bm-m { display: inline-flex; gap: 12px; align-items: center; height: 30px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.bm-author { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.bm-age { min-width: 52px; text-align: right; }
+.bm-sha { font-size: 11.5px; opacity: .8; }
+
+/* ---- names on commits ---- */
+.bm-ref {
+    display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; white-space: nowrap;
+    padding: 0 7px; border-radius: 5px; font-family: var(--mono); font-size: 11.5px; line-height: 19px; color: var(--text);
+    border: 1px solid color-mix(in srgb, var(--c) 50%, transparent); background: color-mix(in srgb, var(--c) 13%, transparent);
+}
+.bm-ref-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.bm-ref.default .bm-ref-name { font-weight: 700; }
+.bm-ref.head { border-color: var(--c); background: color-mix(in srgb, var(--c) 26%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 35%, transparent); }
+.bm-head-mark { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--c); box-shadow: 0 0 4px var(--c); flex: none; box-sizing: border-box; }
+.bm-ref.cs.head .bm-head-mark { display: none; }
+.bm-ref-dots { display: inline-flex; gap: 2px; flex: none; }
+.bm-ref-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+.bm-ref-dots i.head { box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3px var(--c); margin: 0 3px; }
+.bm-ref-n { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; font-size: 11px; color: var(--muted); flex: none; font-style: normal; }
+.bm-ref-n.gone { color: var(--danger); }
+.bm-ref-n.ok { color: var(--ok); }
+.bm-ref-n.split { color: var(--danger); font-weight: 600; }
+.bm-ref.remote { border-style: dashed; border-radius: 999px; background: none; }
+.bm-ref.remote.cs { border-color: var(--border); color: var(--muted); }
+.bm-cloud { width: 13px; height: 10px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round; opacity: .85; }
+.bm-ref.merged { opacity: .6; }
+.bm-ref.gone .bm-ref-name { text-decoration: line-through; text-decoration-color: var(--danger); }
+.bm-ref.local.diverged { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger-bg); }
+.bm-ref.detached { font-style: italic; }
+.bm-ref.pr { font-family: inherit; font-weight: 600; border-color: var(--border); background: var(--bg); border-radius: 999px; color: var(--text); }
+.bm-ref.pr:hover { border-color: var(--accent); text-decoration: none; }
+.bm-ref.pr .dot { margin-right: 0; width: 7px; height: 7px; }
+.bm-ref.stash { border-style: dotted; background: none; font-family: inherit; color: var(--muted); }
+.bm-ref.ghost { border-style: dashed; background: none; font-family: inherit; font-style: normal; }
+.bm-tag { font-size: 11px; line-height: 17px; padding: 0 6px; border-radius: 999px; background: var(--warn-bg); color: var(--warn); white-space: nowrap; flex: none; }
+
+/* ---- an opened commit ---- */
+.bm-detail { grid-column: 3 / -1; padding: 2px 0 12px; min-width: 0; display: grid; gap: 6px; }
+.bm-detail-subject { font-weight: 600; overflow-wrap: anywhere; }
+.bm-detail-line { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; }
+.bm-fullsha { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; overflow-wrap: anywhere; min-width: 0; }
+.bm-detail-devices { list-style: none; margin: 2px 0; padding: 0; display: grid; gap: 3px; }
+.bm-detail-devices li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.bm-detail-devices li i { width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box; flex: none; align-self: center; }
+.bm-detail-devices li.local i { background: var(--c); }
+.bm-detail-devices li.fetched i { border: 1.5px solid var(--c); }
+.bm-detail-devices li.none i { border: 1.5px dotted var(--muted); }
+.bm-detail-devices li.none { color: var(--muted); }
+.bm-detail-devices li span { color: var(--muted); }
+
+.bm-more { display: flex; gap: 10px; align-items: center; padding: 8px 12px 4px; border-top: 1px solid var(--border); margin-top: 6px; }
+.bm-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 2px 0; align-items: center; }
+.bm-key > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.bm-key svg { width: 14px; height: 14px; flex: none; overflow: visible; }
+.bm-key svg[viewBox="0 0 20 20"] { width: 20px; height: 20px; }
+.bm-key .bm-p { height: auto; gap: 5px; }
+.bm-note { margin: 8px 2px 0; }
+.bm-note .bm-ref { vertical-align: middle; margin-right: 2px; }
+
+@media (max-width: 700px) {
+    .bm-row { column-gap: 6px; padding-right: 8px; }
+    .bm-author, .bm-sha { display: none; }
+    .bm-age { min-width: 0; }
+    .bm-subject { flex-basis: 100%; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+    .bm-rows { min-width: max(100%, calc(var(--bm-w) + 250px)); }
+    .bm-dev { flex: 1 1 100%; }
+    .bm-detail { grid-column: 2 / -1; }
 }

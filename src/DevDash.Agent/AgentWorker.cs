@@ -158,7 +158,7 @@ public sealed class AgentWorker : BackgroundService
             _last = _last with
             {
                 ScannedAt = DateTimeOffset.UtcNow,
-                Entries = entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+                Entries = MachineScanner.WithOneGraphPerRepository(entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
             };
             _logger.LogInformation("Rescanned {Names} after file changes", string.Join(", ", changed.Select(c => c.Name)));
             await PushAsync(_last, ct).ConfigureAwait(false);

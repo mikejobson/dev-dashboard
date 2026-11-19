@@ -729,7 +729,9 @@ public sealed class UpdateTests : IDisposable
     public async Task The_watchdog_leaves_a_confirmed_update_alone()
     {
         var installation = await UpdatedAsync();
-        var guard = Guard(installation, "1.2.0", new TestClock(T0), new UpdateOptions { VerifyMinutes = 0.002 });
+        // 3 s of real time: long enough that a slow CI runner confirms before the deadline (0.002 min
+        // raced on ubuntu-latest), short enough that the test still waits out the watchdog quickly.
+        var guard = Guard(installation, "1.2.0", new TestClock(T0), new UpdateOptions { VerifyMinutes = 0.05 });
         guard.OnStart();
         var lifetime = new FakeLifetime();
         var restart = new RestartSignal(lifetime, new UpdateContext(installation, null, "1.2.0", _site.Trust), NullLogger<RestartSignal>.Instance);

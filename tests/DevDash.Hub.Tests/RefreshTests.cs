@@ -539,9 +539,15 @@ public class RefreshTests
         {
             try
             {
+                // Git marks object files read-only on Windows, which Directory.Delete refuses.
+                foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    File.SetAttributes(file, FileAttributes.Normal);
+                }
+
                 Directory.Delete(root, recursive: true);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // best effort
             }

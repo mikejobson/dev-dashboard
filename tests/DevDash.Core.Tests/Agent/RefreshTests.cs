@@ -339,6 +339,12 @@ public sealed class RefreshTests : IDisposable
     {
         var (worker, rescans) = CreateWorker();
         await worker.FullScanNowAsync(CancellationToken.None);
+        // Git marks object files read-only on Windows, which Directory.Delete refuses.
+        foreach (var file in Directory.EnumerateFiles(Gadget, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+
         Directory.Delete(Gadget, recursive: true);
 
         var refresh = Assert.Single(rescans.Refresh([Gadget]));

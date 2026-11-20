@@ -284,8 +284,6 @@ public static class BranchGraph
         public int Color;
         public bool Unpushed;
         public MapTree? Tree;
-        public bool Placed;
-        public bool Descended;
         public int Row = -1;
         public int Lane;
         public List<MapRef> Refs = [];
@@ -598,7 +596,7 @@ public static class BranchGraph
         }
 
         // ---- 6. rows, then lanes ----
-        var order = Order(nodes, trunk);
+        var order = Order(nodes);
         var unplacedPrs = PlacePullRequests(pullRequests, order);
         var rows = AssignLanes(order, hasTrunk: trunk.Count > 0, out var laneCount);
         var hasFolds = Fold(rows, order, new HashSet<string>()).Count != rows.Count;
@@ -1008,123 +1006,60 @@ public static class BranchGraph
     }
 
     /// <summary>
-    /// Children before parents, with each branch directly above the commit it forks from, so lanes stay
-    /// short: walk down from the newest commit, and before a commit is written, write everything that
-    /// descends from it.
+    /// Newest first, the way <c>git log --graph --date-order</c> reads: a row only goes in once every row
+    /// that descends from it is above it, and among the rows that are free to go next the newest wins.
+    /// An uncommitted-changes row or a gap sits right on top of the commit below it. "Older commits" closes the map.
     /// </summary>
-    private static List<Node> Order(List<Node> nodes, List<Node> trunk)
+    private static List<Node> Order(List<Node> nodes)
     {
-        var order = new List<Node>(nodes.Count);
-
-        static int Rank(Node n) => n.Kind switch { NodeKind.Gap => 0, NodeKind.Ghost => 2, _ => 1 };
-
-        foreach (var node in nodes)
-        {
-            // Placed first ends up highest. A gap goes right under the commits above it; a ghost right on top of its commit.
-            node.Children.Sort((x, y) => Rank(x) != Rank(y) ? Rank(x).CompareTo(Rank(y)) : y.Date != x.Date ? y.Date.CompareTo(x.Date) : string.CompareOrdinal(x.Id, y.Id));
-        }
-
-        void Place(Node start)
-        {
-            if (start.Placed)
-            {
-                return;
-            }
-
-            var stack = new Stack<(Node Node, int Next)>();
-            stack.Push((start, 0));
-            start.Placed = true;
-            while (stack.Count > 0)
-            {
-                var (node, next) = stack.Pop();
-                var descended = false;
-                for (var i = next; i < node.Children.Count; i++)
-                {
-                    var child = node.Children[i];
-                    if (!child.Placed)
-                    {
-                        child.Placed = true;
-                        stack.Push((node, i + 1));
-                        stack.Push((child, 0));
-                        descended = true;
-                        break;
-                    }
-                }
-
-                if (!descended)
-                {
-                    order.Add(node);
-                }
-            }
-        }
-
-        // Places a commit, then what it leads down to: its parents off the trunk, and theirs. The trunk
-        // itself is walked by the loop below, one commit at a time, so that a merged branch is finished
-        // right under its merge instead of dragging the rest of the trunk in between.
-        void Settle(Node root)
-        {
-            var stack = new Stack<Node>();
-            stack.Push(root);
-            while (stack.TryPop(out var node))
-            {
-                if (node.Descended)
-                {
-                    continue;
-                }
-
-                var start = order.Count;
-                Place(node);
-
-                // Everything that went in just now (the commit and what descends from it) has parents to follow.
-                // Pushed from the top row down, first parent first: the last row's other parents come out next.
-                foreach (var placed in order.GetRange(start, order.Count - start).Append(node))
-                {
-                    if (placed.Descended)
-                    {
-                        continue;
-                    }
-
-                    placed.Descended = true;
-                    foreach (var parent in placed.Parents)
-                    {
-                        if (!parent.OnTrunk && !parent.Descended)
-                        {
-                            stack.Push(parent);
-                        }
-                    }
-                }
-            }
-        }
-
-        // "Older commits" closes the map, below everything that is not connected to the default branch too.
         var older = nodes.FirstOrDefault(n => n.Older);
-        if (older is not null)
+        var inMap = nodes.Where(n => n != older).ToHashSet();
+
+        // When a row is due: a commit at its own date, a ghost or a gap with the commit it sits on.
+        DateTimeOffset Due(Node n) => n.Kind == NodeKind.Commit
+            ? n.Date
+            : n.Parents.Where(inMap.Contains).Select(p => p.Date).DefaultIfEmpty(n.Date).Max();
+        static int Rank(Node n) => n.Kind switch { NodeKind.Ghost => 0, NodeKind.Gap => 1, _ => 2 };
+
+        var waiting = new Dictionary<Node, int>();
+        foreach (var node in inMap)
         {
-            older.Placed = older.Descended = true;
+            waiting[node] = node.Children.Where(inMap.Contains).Distinct().Count();
         }
 
-        for (var node = trunk.FirstOrDefault(); node is not null; node = node.Parents.FirstOrDefault(p => p.OnTrunk))
-        {
-            Settle(node);
-        }
+        var ready = new PriorityQueue<Node, (long Due, int Rank, string Id)>(
+            Comparer<(long Due, int Rank, string Id)>.Create((x, y) =>
+                x.Due != y.Due ? y.Due.CompareTo(x.Due)
+                : x.Rank != y.Rank ? x.Rank.CompareTo(y.Rank)
+                : string.CompareOrdinal(x.Id, y.Id)));
+        void Offer(Node n) => ready.Enqueue(n, (Due(n).UtcTicks, Rank(n), n.Id));
 
-        // What is left has no line to the trunk in the map: an old agent's merged branch, a branch
-        // whose history was cut off. Each such piece is placed whole.
-        var connected = order.Count;
-        var pieces = new List<(int Start, int Count)>();
-        foreach (var node in nodes.Where(n => n.Kind == NodeKind.Commit).OrderByDescending(n => n.Date).ThenBy(n => n.Id, StringComparer.Ordinal).Concat(nodes))
+        foreach (var (node, count) in waiting)
         {
-            var start = order.Count;
-            Settle(node);
-            if (order.Count > start)
+            if (count == 0)
             {
-                pieces.Add((start, order.Count - start));
+                Offer(node);
             }
         }
 
-        if (connected > 0 && pieces.Count > 0)
+        var order = new List<Node>(nodes.Count);
+        while (ready.TryDequeue(out var node, out _))
         {
-            order = Interleave(order, connected, pieces);
+            order.Add(node);
+            foreach (var parent in node.Parents.Where(inMap.Contains).Distinct())
+            {
+                if (--waiting[parent] == 0)
+                {
+                    Offer(parent);
+                }
+            }
+        }
+
+        // A cycle cannot happen in git history; if the data is odd anyway, nothing is dropped.
+        if (order.Count < inMap.Count)
+        {
+            var placed = order.ToHashSet();
+            order.AddRange(inMap.Where(n => !placed.Contains(n)).OrderByDescending(Due).ThenBy(n => n.Id, StringComparer.Ordinal));
         }
 
         if (older is not null)
@@ -1138,68 +1073,6 @@ public static class BranchGraph
         }
 
         return order;
-    }
-
-    /// <summary>
-    /// Puts each piece that is not connected to the trunk where it belongs in time: right under the
-    /// last trunk row that is newer than it, instead of after the whole trunk. A piece never goes above
-    /// a commit that descends from it.
-    /// </summary>
-    private static List<Node> Interleave(List<Node> order, int connected, List<(int Start, int Count)> pieces)
-    {
-        var slotOf = new Dictionary<Node, int>(); // the index in the connected part a node sits at, or is placed before
-        for (var i = 0; i < connected; i++)
-        {
-            slotOf[order[i]] = i;
-        }
-
-        var before = new List<List<Node>>(connected + 1);
-        for (var i = 0; i <= connected; i++)
-        {
-            before.Add([]);
-        }
-
-        foreach (var (start, count) in pieces)
-        {
-            var piece = order.GetRange(start, count);
-            var mine = piece.ToHashSet();
-            var date = piece.Where(n => n.Kind != NodeKind.Gap).Select(n => n.Date).DefaultIfEmpty(DateTimeOffset.MinValue).Max();
-
-            var slot = 0;
-            for (var i = 0; i < connected; i++)
-            {
-                if (order[i].OnTrunk && order[i].Date > date)
-                {
-                    slot = i + 1;
-                }
-            }
-
-            foreach (var child in piece.SelectMany(n => n.Children))
-            {
-                if (!mine.Contains(child) && slotOf.TryGetValue(child, out var at))
-                {
-                    slot = Math.Max(slot, at < connected && order[at] == child ? at + 1 : at);
-                }
-            }
-
-            before[slot].AddRange(piece);
-            foreach (var node in piece)
-            {
-                slotOf[node] = slot;
-            }
-        }
-
-        var result = new List<Node>(order.Count);
-        for (var i = 0; i <= connected; i++)
-        {
-            result.AddRange(before[i]);
-            if (i < connected)
-            {
-                result.Add(order[i]);
-            }
-        }
-
-        return result;
     }
 
     private static List<MapRow> AssignLanes(List<Node> order, bool hasTrunk, out int laneCount)

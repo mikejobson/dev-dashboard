@@ -308,6 +308,17 @@ public class BranchGraphTests
     }
 
     [Fact]
+    public void Rows_run_newest_first_with_branches_interleaved_by_date()
+    {
+        // A branch f forks from t1 and is worked on while the trunk moves: dates run t4, f2, t3, f1, t2, t1.
+        var commits = new[] { C("t4", "t3", pos: 4), C("f2", "f1"), C("t3", "t2", pos: 3), C("f1", "t1"), C("t2", "t1", pos: 2), C("t1", pos: 1) };
+        var map = BranchGraph.Build([Clone("mac", "t4", commits, [Branch("main", "t4", "origin/main"), Branch("feature", "f2")], "origin/main=t4")], []);
+
+        Assert.Equal(["t4", "f2", "t3", "f1", "t2", "t1"], Names(map));
+        AssertChildrenFirst(map);
+    }
+
+    [Fact]
     public void A_merged_branch_that_forks_lower_down_does_not_pull_the_trunk_up_between_the_merged_commits()
     {
         // t3 merges a release branch r3 → r2 → r1 (forked at t2). r3 and r2 each merged a topic that forked at t1.
@@ -318,7 +329,7 @@ public class BranchGraphTests
         };
         var map = BranchGraph.Build([Clone("mac", "t3", commits, [Branch("main", "t3", "origin/main"), Branch("topic-x", "x", merged: true), Branch("topic-y", "y", merged: true)], "origin/main=t3")], []);
 
-        Assert.Equal(["t3", "r3", "x", "r2", "y", "r1", "t2", "t1"], Names(map));
+        Assert.Equal(["t3", "r3", "r2", "r1", "x", "y", "t2", "t1"], Names(map)); // newest first
         AssertChildrenFirst(map);
     }
 
@@ -349,7 +360,7 @@ public class BranchGraphTests
         // A side branch s (newest of all) merged a commit q whose own history is unknown and old: q stays below s.
         var side = new[] { C("s", "t2 q"), C("t2", "t1", pos: 2), C("t1", pos: 1), C("q", "q0") };
         var merged = BranchGraph.Build([Clone("mac", "s", side, [Branch("main", "t2", "origin/main"), Branch("work", "s")], "origin/main=t2")], []);
-        Assert.Equal(["s", "t2", "q", "t1"], Names(merged));
+        Assert.Equal(["s", "t2", "t1", "q"], Names(merged));
         AssertChildrenFirst(merged);
     }
 
@@ -360,7 +371,7 @@ public class BranchGraphTests
         var commits = new[] { C("t4", "t3 zz", pos: 4), C("t3", "t2", pos: 3), C("t2", "t1", pos: 2), C("t1", pos: 1), C("old", "o0", inTrunk: true) with { JoinsTrunkAt = Sha("t4") } };
         var map = BranchGraph.Build([Clone("mac", "t4", commits, [Branch("main", "t4", "origin/main"), Branch("done", "old", merged: true)], "origin/main=t4")], []);
 
-        Assert.Equal(["t4", "old", "t3", "t2", "t1"], Names(map));
+        Assert.Equal(["t4", "t3", "t2", "t1", "old"], Names(map)); // by date, joined to t4 by a dashed line
         var link = Assert.Single(Row(map, "t4").Out);
         Assert.Equal(MapLineStyle.Dashed, link.Style);
         Assert.Equal(Row(map, "old").Lane, link.Lane);
@@ -400,7 +411,7 @@ public class BranchGraphTests
         var map = BranchGraph.Build([Clone("mac", "t3", commits, branches, "origin/main=t3 origin/first=a origin/second=b")], [], options);
 
         // b stays because "work" forks from it, with its way up to main (m1, m2). a and c go, and so do the upstream names.
-        Assert.Equal(["t3", "m2", "m1", "w", "b", "t2", "t1"], Names(map));
+        Assert.Equal(["t3", "m2", "m1", "t2", "w", "b", "t1"], Names(map));
         AssertChildrenFirst(map);
         Assert.Empty(Row(map, "b").Refs);
         Assert.Equal("work", Row(map, "w").Refs.Single().Name);
@@ -738,7 +749,7 @@ public class BranchGraphTests
 
         Assert.Equal(60 + 120, map.Rows.Count);
         AssertChildrenFirst(map);
-        Assert.InRange(map.LaneCount, 2, 4); // each branch is drawn right above its fork, so lanes are reused
+        Assert.InRange(map.LaneCount, 2, 42); // newest first: open branches newer than the trunk run side by side, as in git log --graph
         for (var i = 0; i < map.Rows.Count; i++)
         {
             var row = map.Rows[i];

@@ -131,14 +131,12 @@ The trunk is the default branch, or `develop` when that is where the newest work
   that contains each one and the shortest run of commits up to it. It sends that run (at most 40 commits per tip, 200 per repository)
   and marks the tip `JoinsTrunkAt = <merge sha>`; the merge itself is always sent. Past the caps only `JoinsTrunkAt` goes out. Both
   fields are optional: schema version unchanged, older hubs ignore them. Still one cached result per ref state.
-- **Hub ordering (`BranchGraph.Order`).** The trunk is walked one commit at a time; after each, everything it leads to off the trunk is
-  placed (other parents first), so a merged branch is finished right under its merge. The old depth-first walk dived into the trunk
-  through a merged branch's fork point and left the remaining second parents for the very end of the map.
-- **Join links.** A merged commit with `JoinsTrunkAt` and no line of children up to the trunk is hung under that trunk commit with a
-  dashed line ("merged there, through commits not shown").
-- **Loose pieces.** Whatever still has no line to the trunk (an older agent's merged tip, a branch cut off by the 250 cap) goes where
-  its newest commit belongs by date: right under the last trunk row newer than it, never above one of its own children. It used to go
-  after the whole trunk, below commits months older.
+- **Hub ordering (`BranchGraph.Order`).** Newest first, as `git log --graph --date-order` reads: a row goes in once every row that
+  descends from it is above it, and of the rows free to go next the newest wins (an uncommitted-changes row or a gap sits right on top
+  of its commit; "older commits" closes the map). Branches worked on alongside the trunk interleave with it by date, at the cost of a
+  few more lanes. (0.6.0 first grouped each merged branch under its merge; users read dates down the page, so that was dropped.)
+- **Join links.** A merged commit with `JoinsTrunkAt` and no line of children up to the trunk sits at its date and is joined to that
+  trunk commit with a dashed line ("merged there, through commits not shown").
 - **Merged means merged into the trunk.** `BranchInfo.MergedIntoDefault` keeps its meaning for cleanup. When the trunk is not the
   default branch the agent also sends `MergedIntoTrunk` (optional), and the map's dimming and "hide merged" use it; the default branch
   and the trunk branch never count as merged. With merged branches hidden, a trunk merge no longer pulls in what it merged: merged

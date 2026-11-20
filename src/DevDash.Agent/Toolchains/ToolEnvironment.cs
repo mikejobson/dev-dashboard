@@ -46,7 +46,9 @@ public sealed record ToolEnvironment
     public string InHome(params string[] parts) => Path.Combine([Home, .. parts]);
 
     /// <summary>An absolute Unix path, under <see cref="SystemRoot"/>.</summary>
-    public string Rooted(string absolute) => SystemRoot == "/" ? absolute : Path.Combine(SystemRoot, absolute.TrimStart('/'));
+    public string Rooted(string absolute) => SystemRoot == "/"
+        ? absolute
+        : Path.Combine([SystemRoot, .. absolute.Split('/', StringSplitOptions.RemoveEmptyEntries)]);
 }
 
 /// <summary>

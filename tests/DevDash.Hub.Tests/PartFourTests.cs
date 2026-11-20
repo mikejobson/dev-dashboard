@@ -535,7 +535,12 @@ public sealed class AlertSecretsRestartTests : IDisposable
         // The key ring is on disk beside the database, not in the process or the container's home folder.
         var keys = Directory.GetFiles(Path.Combine(_data, "keys"), "key-*.xml");
         Assert.NotEmpty(keys);
-        Assert.DoesNotContain("a-topic-nobody-could-guess", await File.ReadAllTextAsync(Path.Combine(_data, "devdash.db"), System.Text.Encoding.Latin1));
+        // SQLite's pooled connection may still hold the file open, which Windows only allows with a shared read.
+        await using (var db = new FileStream(Path.Combine(_data, "devdash.db"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(db, System.Text.Encoding.Latin1))
+        {
+            Assert.DoesNotContain("a-topic-nobody-could-guess", await reader.ReadToEndAsync());
+        }
 
         using var second = Hub();
         var after = await second.Services.GetRequiredService<AlertSettings>().GetAsync();

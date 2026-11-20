@@ -25,6 +25,8 @@ public static class AlertTriggers
     public const string CiFailed = "ci-failed";
     public const string ActionFailed = "action-failed";
     public const string Digest = "digest";
+    public const string T3NeedsInput = "t3-needs-input";
+    public const string T3Done = "t3-done";
 
     /// <summary>Several new alerts sent as one.</summary>
     public const string Summary = "summary";
@@ -38,6 +40,8 @@ public static class AlertTriggers
         CiFailed => "CI failing",
         ActionFailed => "action failed",
         Digest => "daily digest",
+        T3NeedsInput => "T3 needs input",
+        T3Done => "T3 thread done",
         Summary => "summary",
         Test => "test",
         _ => trigger,
@@ -82,6 +86,9 @@ public sealed record AlertInputs
     /// <summary>Actions that failed recently.</summary>
     public IReadOnlyList<AgentActionEntity> FailedActions { get; init; } = [];
 
+    /// <summary>The T3 threads the dashboard started (with the thread id the agent reported), for the T3 triggers.</summary>
+    public IReadOnlyList<T3ThreadEntity> StartedThreads { get; init; } = [];
+
     /// <summary>When this hub process started. A machine is not called offline for the time the hub itself was down.</summary>
     public DateTimeOffset HubUpSince { get; init; } = DateTimeOffset.MinValue;
 
@@ -121,6 +128,11 @@ public static class AlertEvaluator
         if (triggers.ActionFailed.Enabled)
         {
             result.AddRange(ActionFailed(inputs));
+        }
+
+        if (triggers.T3NeedsInput.Enabled || triggers.T3Done.Enabled)
+        {
+            result.AddRange(T3(inputs, triggers));
         }
 
         // One alert per key, whatever the inputs repeat.
@@ -244,6 +256,61 @@ public static class AlertEvaluator
                 Severity = AlertSeverity.Warning,
                 IsEvent = true,
             });
+
+    /// <summary>
+    /// The threads DevDash started, as the agents now report them: one alert while a thread waits for an
+    /// answer (it clears when answered, and a new question alerts again), and one when it has opened a pull
+    /// request or settled. Threads started elsewhere are not the dashboard's business.
+    /// </summary>
+    private static IEnumerable<AlertCandidate> T3(AlertInputs inputs, AlertTriggerOptions triggers)
+    {
+        var started = inputs.StartedThreads.Where(t => t.ThreadId is not null).GroupBy(t => t.ThreadId!, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        if (started.Count == 0)
+        {
+            yield break;
+        }
+
+        var reported = inputs.Machines
+            .SelectMany(m => DevDash.Core.RepoIdentity.Flatten(m.Snapshot.Entries).SelectMany(e => (e.T3?.Threads ?? []).Select(t => (Thread: t, Repo: e.Name))))
+            .Where(x => started.ContainsKey(x.Thread.Id))
+            .GroupBy(x => x.Thread.Id, StringComparer.Ordinal)
+            .Select(g => g.First());
+        foreach (var (thread, repo) in reported)
+        {
+            var row = started[thread.Id];
+            var path = row.RepoKey.Length > 0 ? Fmt.RepoUrl(row.RepoKey) : "";
+            if (triggers.T3NeedsInput.Enabled && thread.PendingRequests > 0)
+            {
+                yield return new AlertCandidate
+                {
+                    Key = AlertCandidate.MakeKey(AlertTriggers.T3NeedsInput, thread.Id),
+                    Trigger = AlertTriggers.T3NeedsInput,
+                    Title = $"T3 thread needs input: {Short(thread.Title.Length > 0 ? thread.Title : row.Title, 90)}",
+                    Body = $"{repo} on {row.MachineName}: waiting for {Fmt.Count(thread.PendingRequests, "answer")}.",
+                    Path = path,
+                    ExternalUrl = thread.Link,
+                    Severity = AlertSeverity.Warning,
+                };
+            }
+
+            var prs = thread.PullRequests.Where(p => p.Url is not null).ToList();
+            if (triggers.T3Done.Enabled && (prs.Count > 0 || thread.Settled))
+            {
+                yield return new AlertCandidate
+                {
+                    Key = AlertCandidate.MakeKey(AlertTriggers.T3Done, thread.Id),
+                    Trigger = AlertTriggers.T3Done,
+                    Title = prs.Count > 0
+                        ? $"T3 thread opened a pull request: {Short(thread.Title.Length > 0 ? thread.Title : row.Title, 80)}"
+                        : $"T3 thread settled: {Short(thread.Title.Length > 0 ? thread.Title : row.Title, 90)}",
+                    Body = $"{repo} on {row.MachineName}" + (prs.Count > 0 ? ": " + string.Join(", ", prs.Select(p => p.Url)) : "."),
+                    Path = path,
+                    ExternalUrl = prs.FirstOrDefault()?.Url ?? thread.Link,
+                    Severity = AlertSeverity.Info,
+                };
+            }
+        }
+    }
 
     /// <summary>The daily digest: "3 repos at risk, 12 safe to remove, 4.2 GB".</summary>
     public static AlertCandidate Digest(AlertInputs inputs, AlertTriggerOptions triggers, DateTimeOffset now)

@@ -13,7 +13,16 @@ public class AgentBitsTests
         Assert.True(options.AutoFetch.Enabled);
         Assert.Equal(4, options.AutoFetch.IntervalHours);
         Assert.Equal(15, options.ScanIntervalMinutes);
-        Assert.EndsWith("Developer", Assert.Single(options.ResolveRoots()));
+        // On a machine without T3 Code (a home with no ~/.t3/projects) the only default root is ~/Developer.
+        var home = Directory.CreateTempSubdirectory("devdash-home-").FullName;
+        try
+        {
+            Assert.EndsWith("Developer", Assert.Single(options.ResolveRoots(home)));
+        }
+        finally
+        {
+            Directory.Delete(home, recursive: true);
+        }
     }
 
     [Fact]

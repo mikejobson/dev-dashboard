@@ -423,6 +423,7 @@ public sealed class ActionQueue(
         }
 
         await SettleTombstonesAsync(db, id, result.Succeeded, now, ct);
+        await T3.T3Settlement.SettleAsync(db, id, result.Succeeded, result.Thread, output, now, ct);
         logger.LogInformation("Action {Id} on {Machine} {Status} (exit {Exit})", id, owner, status, result.ExitCode);
         notifier.Notify(DashboardChange.Actions);
         return true;
@@ -474,6 +475,7 @@ public sealed class ActionQueue(
         if (failed.Count > 0)
         {
             await db.RemovedProjects.Where(r => failed.Contains(r.ActionId) && r.RemovedAt == null).ExecuteDeleteAsync(ct);
+            await T3.T3Settlement.FailAsync(db, failed, "The agent did not start the thread in time, or never said whether it had.", now, ct);
         }
 
         if (changed > 0)

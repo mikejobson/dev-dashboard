@@ -211,6 +211,7 @@ public sealed class AlertService(
             Findings = await findings.GetAsync(ct),
             PullRequests = github.Current.PullRequests,
             FailedActions = failed,
+            StartedThreads = await db.T3Threads.AsNoTracking().Where(t => t.ThreadId != null).OrderByDescending(t => t.Id).Take(200).ToListAsync(ct),
             HubUpSince = _upSince,
             OpenKeys = openKeys,
         };

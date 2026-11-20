@@ -4,7 +4,10 @@ public sealed class AgentOptions
 {
     public const string SectionName = "Agent";
 
-    /// <summary>Folders to scan. <c>~</c> expands to the user's home directory.</summary>
+    /// <summary>
+    /// Folders to scan. <c>~</c> expands to the user's home directory. Empty means the defaults:
+    /// <c>~/Developer</c>, plus T3 Code's projects folder (<c>~/.t3/projects</c>) when it exists.
+    /// </summary>
     public List<string> Roots { get; set; } = [];
 
     /// <summary>Stable id for this machine. Defaults to the lower-cased host name.</summary>
@@ -46,10 +49,31 @@ public sealed class AgentOptions
     /// <summary>Self-update: off, on request from the dashboard (the default), or automatic.</summary>
     public Updates.UpdateOptions Updates { get; set; } = new();
 
-    public IReadOnlyList<string> ResolveRoots()
+    /// <summary>T3 Code: its threads in the snapshot, and the actions that open it or start a thread.</summary>
+    public T3Code.T3Options T3 { get; set; } = new();
+
+    /// <summary>
+    /// The folders to scan. Configured roots are used as they are; with none configured, <c>~/Developer</c>
+    /// and, when T3 Code has made one, its projects folder.
+    /// </summary>
+    /// <param name="home">The user's home folder. Only tests pass it; otherwise it is the real one.</param>
+    public IReadOnlyList<string> ResolveRoots(string? home = null)
     {
-        var roots = Roots.Count > 0 ? Roots : ["~/Developer"];
-        return roots.Select(ExpandHome).Select(Path.GetFullPath).Distinct(StringComparer.Ordinal).ToList();
+        List<string> roots;
+        if (Roots.Count > 0)
+        {
+            roots = [.. Roots];
+        }
+        else
+        {
+            roots = ["~/Developer"];
+            if (T3.Enabled && T3.ScanProjects && T3.ProjectsFolder(home) is { } projects && Directory.Exists(projects))
+            {
+                roots.Add(projects);
+            }
+        }
+
+        return roots.Select(r => ExpandHome(r, home)).Select(Path.GetFullPath).Distinct(StringComparer.Ordinal).ToList();
     }
 
     public string? ResolveApiKey()
@@ -73,11 +97,14 @@ public sealed class AgentOptions
         return null;
     }
 
-    public static string ExpandHome(string path)
+    public static string ExpandHome(string path) => ExpandHome(path, null);
+
+    /// <param name="home">The home folder to expand <c>~</c> to; null for the real one.</param>
+    public static string ExpandHome(string path, string? home)
     {
         if (path == "~" || path.StartsWith("~/", StringComparison.Ordinal) || path.StartsWith("~\\", StringComparison.Ordinal))
         {
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            home ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             return path.Length == 1 ? home : Path.Combine(home, path[2..]);
         }
 

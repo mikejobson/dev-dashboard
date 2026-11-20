@@ -12,6 +12,13 @@
             <span class="nav-count" title="@Fmt.Count(_github, "review request") waiting on you">@_github</span>
         }
     </NavLink>
+    <NavLink href="issues">
+        Issues
+        @if (_issues > 0)
+        {
+            <span class="nav-count" title="@Fmt.Count(_issues, "open issue") in your repos">@_issues</span>
+        }
+    </NavLink>
     <NavLink href="cleanup">
         Cleanup
         @if (_cleanup > 0)
@@ -34,16 +41,18 @@
         }
     </NavLink>
     <NavLink href="machines">Machines</NavLink>
+    <NavLink href="claude">Claude</NavLink>
 </nav>
 
 @code {
-    private int _github, _cleanup, _safety, _alerts;
+    private int _github, _cleanup, _safety, _alerts, _issues;
 
     protected override async Task LoadAsync()
     {
         _github = Counts.GitHub();
         _safety = Counts.Safety();
         _alerts = await Counts.AlertsAsync();
+        _issues = await Counts.IssuesAsync();
         try
         {
             _cleanup = await Counts.CleanupAsync();

@@ -59,6 +59,14 @@
         {
             <span class="chip @deps.Class" title="@deps.Title">@deps.Text</span>
         }
+        @if (Clone.Entry.T3 is { Threads.Count: > 0 } t3)
+        {
+            var waiting = t3.Threads.Count(t => t.State == T3ThreadState.NeedsInput);
+            var running = t3.Threads.Count(t => t.State == T3ThreadState.Running);
+            <span class="chip @(waiting > 0 ? "warn" : running > 0 ? "info" : "muted")" title="T3 Code threads in this repo: @(t3.ThreadCount ?? t3.Threads.Count) open">
+                T3 · @(waiting > 0 ? $"{waiting} needs input" : running > 0 ? $"{running} running" : Fmt.Count(t3.ThreadCount ?? t3.Threads.Count, "thread"))
+            </span>
+        }
     </div>
 }
 else

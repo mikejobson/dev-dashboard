@@ -50,6 +50,10 @@ public sealed record PullRequestInfo
     /// <summary>MERGEABLE, CONFLICTING or UNKNOWN.</summary>
     public string? Mergeable { get; init; }
     public CiState Ci { get; init; }
+
+    /// <summary>When <see cref="Ci"/> is a failure: the first failing check's page (an Actions run, or a status's target), and its name.</summary>
+    public string? FailedCheckUrl { get; init; }
+    public string? FailedCheckName { get; init; }
     public string? HeadRef { get; init; }
 
     /// <summary>The commit the pull request's branch is at on GitHub. Null in a poll cached before this was asked for.</summary>

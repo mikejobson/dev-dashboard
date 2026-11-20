@@ -33,7 +33,7 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
           number title url isDraft createdAt updatedAt reviewDecision mergeable headRefName headRefOid isCrossRepository baseRefName
           author { login }
           repository { nameWithOwner }
-          commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+          commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 25) { nodes { __typename ... on CheckRun { name conclusion detailsUrl } ... on StatusContext { context state targetUrl } } } } } } }
         }
         """;
 
@@ -325,6 +325,7 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
         }
 
         var ci = CiState.None;
+        string? failedUrl = null, failedName = null;
         var commit = Nodes(node, "commits").FirstOrDefault();
         if (commit.ValueKind == JsonValueKind.Object
             && commit.TryGetProperty("commit", out var c) && c.ValueKind == JsonValueKind.Object
@@ -337,6 +338,23 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
                 "PENDING" or "EXPECTED" => CiState.Pending,
                 _ => CiState.None,
             };
+
+            // The first failing check, for "Fix in T3": an Actions run's page, or a commit status's target.
+            if (ci == CiState.Failure)
+            {
+                foreach (var context in Nodes(rollup, "contexts"))
+                {
+                    var failed = Str(context, "conclusion") is "FAILURE" or "TIMED_OUT" or "STARTUP_FAILURE" or "ACTION_REQUIRED"
+                        || Str(context, "state") is "FAILURE" or "ERROR";
+                    var checkUrl = Str(context, "detailsUrl") ?? Str(context, "targetUrl");
+                    if (failed && Uri.TryCreate(checkUrl, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps)
+                    {
+                        failedUrl = uri.ToString();
+                        failedName = Str(context, "name") ?? Str(context, "context");
+                        break;
+                    }
+                }
+            }
         }
 
         return new PullRequestInfo
@@ -352,6 +370,8 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
             ReviewDecision = Str(node, "reviewDecision"),
             Mergeable = Str(node, "mergeable"),
             Ci = ci,
+            FailedCheckUrl = failedUrl,
+            FailedCheckName = failedName,
             HeadRef = Str(node, "headRefName"),
             HeadSha = Str(node, "headRefOid"),
             IsCrossRepository = Bool(node, "isCrossRepository"),

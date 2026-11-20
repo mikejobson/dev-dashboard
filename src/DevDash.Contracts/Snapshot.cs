@@ -109,6 +109,18 @@ public sealed record MachineInfo
     /// an agent that predates them.
     /// </summary>
     public bool? DependencyChecks { get; init; }
+
+    /// <summary>
+    /// Whether T3 Code's CLI is on this machine (<c>Agent:T3:Enabled</c>, on by default). Null from an agent
+    /// that predates it (before 0.7.0) or has the T3 integration off.
+    /// </summary>
+    public T3Info? T3 { get; init; }
+
+    /// <summary>
+    /// True when this agent knows the OpenInT3 and StartT3Thread actions, has actions on, and found T3 Code's
+    /// CLI. False from agents before 0.7.0, which could not read the request.
+    /// </summary>
+    public bool AcceptsT3 { get; init; }
 }
 
 /// <summary>The names used for <see cref="InstalledToolchain.Tool"/> and <see cref="ToolchainPin.Tool"/>.</summary>
@@ -371,6 +383,12 @@ public sealed record DevEntry
 
     /// <summary>The last dependency check of this repository. Null until one has run, and on machines where they are off.</summary>
     public DependencyHealth? Dependencies { get; init; }
+
+    /// <summary>
+    /// The T3 Code project that is this repository's own, with its recent threads. Null when T3 Code is not on
+    /// the machine, the repository is in no project of its own, and from agents before 0.7.0.
+    /// </summary>
+    public T3Project? T3 { get; init; }
 }
 
 public sealed record GitState
@@ -511,6 +529,13 @@ public sealed record WorktreeInfo
     public bool Locked { get; init; }
     public bool Prunable { get; init; }
     public string? PrunableReason { get; init; }
+
+    /// <summary>
+    /// True when the worktree is one T3 Code made for a thread (it lives under T3 Code's own folder,
+    /// <c>~/.t3/worktrees</c>). T3 removes it when the thread is archived, so the dashboard does not offer to.
+    /// Null for any other worktree, and from agents before 0.7.0.
+    /// </summary>
+    public bool? T3Owned { get; init; }
 }
 
 public sealed record StashInfo

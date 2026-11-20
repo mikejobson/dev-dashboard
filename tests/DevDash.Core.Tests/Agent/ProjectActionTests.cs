@@ -187,7 +187,8 @@ public sealed class ProjectActionTests : IDisposable
     {
         var on = await MachineInfoProvider.GetAsync(_options, CancellationToken.None);
         Assert.True(on is { AcceptsRemoveProject: true, AcceptsClone: true, AcceptsCleanBuildDirs: true, AcceptsPull: true });
-        Assert.All(Enum.GetValues<AgentActionKind>().Where(AgentActions.IsRepoAction), kind => Assert.True(AgentActions.Accepts(on, kind)));
+        // The T3 Code kinds also need T3's CLI, which the scanner looks for (MachineScanner sets AcceptsT3); see T3Tests.
+        Assert.All(Enum.GetValues<AgentActionKind>().Where(k => AgentActions.IsRepoAction(k) && !AgentActions.IsT3Action(k)), kind => Assert.True(AgentActions.Accepts(on, kind)));
 
         var off = await MachineInfoProvider.GetAsync(new AgentOptions(), CancellationToken.None);
         Assert.True(off is { AcceptsRemoveProject: false, AcceptsClone: false, AcceptsCleanBuildDirs: false, AcceptsPull: false });

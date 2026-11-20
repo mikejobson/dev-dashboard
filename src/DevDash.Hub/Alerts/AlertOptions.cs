@@ -130,6 +130,12 @@ public sealed class AlertTriggerOptions
     public CiTriggerOptions CiFailed { get; set; } = new();
     public SimpleTriggerOptions ActionFailed { get; set; } = new();
     public DigestTriggerOptions DailyDigest { get; set; } = new();
+
+    /// <summary>A T3 thread the dashboard started is waiting for an answer or an approval. Off by default.</summary>
+    public SimpleTriggerOptions T3NeedsInput { get; set; } = new() { Enabled = false };
+
+    /// <summary>A T3 thread the dashboard started opened a pull request, or settled. Off by default.</summary>
+    public SimpleTriggerOptions T3Done { get; set; } = new() { Enabled = false };
 }
 
 public sealed class SimpleTriggerOptions

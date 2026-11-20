@@ -1,0 +1,68 @@
+@* T3 Code threads as agents report them: state, title, where, PRs, and a link into the T3 Code app. *@
+@if (Rows.Count == 0)
+{
+    @if (Empty is not null)
+    {
+        <p class="muted small">@Empty</p>
+    }
+}
+else
+{
+    <div class="table-wrap">
+        <table class="stack">
+            <tbody>
+                @foreach (var row in Rows.Take(Limit))
+                {
+                    var thread = row.Thread;
+                    <tr @key="thread.Id">
+                        <td class="cell-main">
+                            <div class="chips">
+                                <span class="chip @T3Threads.ChipClass(row.State)" title="@StatusTitle(thread)">@T3Threads.Label(row.State)</span>
+                                @if (thread.Link is { } link)
+                                {
+                                    <a class="title-link t3-thread-title" href="@link" target="_blank" rel="noopener" title="Open the thread in T3 Code">@(thread.Title.Length > 0 ? thread.Title : "Untitled thread")</a>
+                                }
+                                else
+                                {
+                                    <span class="t3-thread-title">@(thread.Title.Length > 0 ? thread.Title : "Untitled thread")</span>
+                                }
+                                @foreach (var pr in thread.PullRequests.Where(p => p.Url is not null))
+                                {
+                                    <a class="chip info" href="@pr.Url" target="_blank" rel="noopener">PR@(pr.Number is { } n ? $" #{n}" : "")@(pr.State is { } s ? $" · {s.ToLowerInvariant()}" : "")</a>
+                                }
+                                @if (row.Started is { } started)
+                                {
+                                    <span class="chip muted" title="Started from the dashboard by @started.QueuedBy">DevDash@(started.Origin == "issue" && started.IssueNumber is { } issue ? $" · #{issue}" : "")</span>
+                                }
+                            </div>
+                            <div class="sub">
+                                @if (ShowRepo) { <span>@row.Entry.Name · </span> }
+                                @row.Machine.Machine.Hostname@(thread.Branch is { } branch ? $" · {branch}" : "")
+                            </div>
+                        </td>
+                        <td data-label="Updated" class="cell-when right nowrap sub" title="@Fmt.Date(thread.UpdatedAt)">@Fmt.Ago(thread.UpdatedAt ?? thread.CreatedAt, Now)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    @if (Rows.Count > Limit)
+    {
+        <p class="muted small">@(Rows.Count - Limit) more not shown.</p>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<T3ThreadRow> Rows { get; set; } = [];
+
+    [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+
+    [Parameter] public bool ShowRepo { get; set; }
+
+    [Parameter] public string? Empty { get; set; }
+
+    [Parameter] public int Limit { get; set; } = 20;
+
+    private static string StatusTitle(T3Thread thread) =>
+        $"T3 status: {(thread.Status.Length > 0 ? thread.Status : "unknown")}" + (thread.PendingRequests > 0 ? $", {thread.PendingRequests} waiting for you" : "");
+}

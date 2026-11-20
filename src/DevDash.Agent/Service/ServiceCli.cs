@@ -21,11 +21,12 @@ public sealed class ServiceCli(ServiceEnvironment environment, IServiceManager m
         Install options:
           --hub-url <url>       Hub base URL (required the first time)
           --api-key <key>       Agent API key (required the first time; or --api-key-file <f>, or DEVDASH_API_KEY)
-          --root <path>         Folder to scan; repeat for several (default ~/Developer)
+          --root <path>         Folder to scan; repeat for several (default ~/Developer, and ~/.t3/projects when it exists)
           --machine-id <id>     Override the machine id (default: host name)
           --no-fetch            Do not run `git fetch --prune --quiet`
           --no-watch            Do not watch for file changes between scans
           --no-deps             Do not run `dotnet list package` / `npm audit` once a day per repo
+          --no-t3               Do not look for T3 Code (no threads reported, no T3 actions, ~/.t3/projects not scanned)
           --enable-actions      Allow actions requested from the hub (writes Agent:Actions:Enabled)
           --updates <mode>      off | notify | auto (writes Agent:Updates:Mode; default notify: update when
                                 asked from the dashboard, never unprompted)

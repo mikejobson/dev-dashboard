@@ -202,7 +202,7 @@ public class PaletteTests
     {
         var shown = Palette.Search("  ", Items(), ["repo:github.com/acme/gadget", "page:safety", "gone:whatever"]);
 
-        Assert.Equal(["gadget", "Safety", "Overview", "Local", "GitHub", "Cleanup", "Alerts", "Machines", "Fetch all", "Remove 3 safe projects…", "Update all agents (2)…"], shown.Select(i => i.Title));
+        Assert.Equal(["gadget", "Safety", "Overview", "Local", "GitHub", "Cleanup", "Issues", "Alerts", "Machines", "Fetch all", "Remove 3 safe projects…", "Update all agents (2)…"], shown.Select(i => i.Title));
         Assert.Single(shown, i => i.Title == "Safety");
     }
 

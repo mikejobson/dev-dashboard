@@ -73,7 +73,8 @@ Machine: hostname, OS, Tailscale name/IP (`tailscale status --json` when availab
 and the installed toolchains (§17): .NET SDKs, Node, Python, Go, Rust, Java, with the versions the version managers hold.
 Collected at start and every 6 hours, not per scan.
 
-For each top-level entry under each root (default `~/Developer`, configurable, depth configurable for `*.worktrees` folders):
+For each top-level entry under each root (default `~/Developer`, plus `~/.t3/projects` when T3 Code has made it (§18), configurable,
+depth configurable for `*.worktrees` folders):
 
 - **Kind**: git repo / worktree container / non-git folder / loose files
 - **Git**: current branch, detached flag, upstream, ahead/behind (vs last fetch), staged/unstaged/untracked/conflicted counts,
@@ -182,6 +183,7 @@ Findings can be snoozed or dismissed (stored per finding fingerprint).
   pinned toolchains per machine, dependency health
 - **GitHub**: recent org activity, my PRs (grouped: needs my review / mine / CI failing), my issues
 - **Safety**: what exists only on one machine, and what is safe to remove with the space it frees (§14)
+- **Issues**: open issues of cloned GitHub repos, T3 threads started for them, and the label trigger's settings (§18)
 - **Cleanup**: findings grouped by rule, with snooze, dismiss and copy-command buttons
 - **Alerts**: what is alerting now, channels with a test button, triggers, quiet hours, delivery log (§16)
 - **Machines**: agent versions, scan health, toolchains per machine and the pins they do not meet, issue and revoke API keys
@@ -706,3 +708,217 @@ Dependency checks cover NuGet and npm only (no yarn, pnpm, pip, cargo), one solu
 checked as a repo of its own. The heatmap's merge is a per-day maximum, as above. The palette's look was checked by measuring the open
 dialog in a browser, not by screenshot; the Windows code paths (`%ProgramFiles%` lookup, `node npm-cli.js`) are unit-tested with a
 fake machine and have not been run on Windows.
+
+## 18. T3 Code and issue threads (0.7.0, built 2026-11-20)
+
+T3 Code runs Claude in threads, each usually in its own git worktree. 0.7.0 shows a repository's threads, and lets the
+dashboard start one: from a repo, from a "Fix in T3" button, or from a GitHub issue, by hand or by a label. All of the
+agent's side is optional fields and two new action kinds, so `SnapshotSchema.Version` stays 1.
+
+### The agent (`src/DevDash.Agent/T3Code`)
+
+*Finding T3.* `T3Locator.Find`: `Agent:T3:Path` when set (and nothing else); else `<T3 home>/bin` (`t3`; on Windows `t3.exe`,
+`t3.cmd`, `t3.bat`, `t3`, in that order), else `PATH`. The T3 home is `Agent:T3:Home`, else `T3CODE_HOME`, else `~/.t3`.
+`T3Service.InfoAsync` runs `t3 --version` and keeps the answer 30 minutes (5 while it is missing). `--no-t3`
+(`Agent:T3:Enabled=false`) turns everything here off.
+
+*Roots.* With no roots configured, `AgentOptions.ResolveRoots` is `~/Developer` plus `<T3 home>/projects` when that folder
+exists (and T3 is on). Configured roots are used exactly as configured. T3's own worktrees (`<T3 home>/worktrees/<repo>/t3-…`)
+are linked worktrees of repositories that are scanned anyway, so they are reported, as before, in the main repository's
+`Worktrees`, with `WorktreeInfo.T3Owned = true` (`T3Locator.MarkOwned`, comparing both the configured and the
+symlink-resolved spelling, since git reports real paths). They are never a root and never an entry of their own.
+
+*Threads.* After a full scan, `T3Service.EnrichAsync` runs `t3 thread list --project <path> --json` for every main
+working tree (four at a time, 15 s each, about 0.2 s in practice), then `t3 thread show <id> --json --messages 0` for a
+thread only when its `updatedAt` moved since it was last shown (in-memory cache; at most 30 shows per scan, the rest
+next scan). Up to 10 non-archived threads per repo, newest first, go into `DevEntry.T3`. "No T3 Code project matches"
+is an answer (no project); any other failure is a failure, and after three with no answer at all the rest of the scan
+does not ask and `MachineInfo.T3.Problem` says "T3 Code did not answer; is the app running?". A single-entry rescan
+(file change, refresh, after an action) does the same for its entry.
+
+*Whose project.* `--project <path>` resolves to the nearest enclosing T3 project, so a project rooted at `~/Developer`
+answers for every repo in it. The rule: a project id counts only when exactly one scanned repository resolved to it in
+the last full scan. One that several resolve to is nobody's (left out for all of them); a rescan of one entry keeps the
+full scan's verdict, and a new path resolving to an owned project makes that project shared from then on.
+
+*Snapshot fields.* `MachineInfo.T3` (`T3Info { Available, Version, Problem }`, never the CLI's path),
+`MachineInfo.AcceptsT3` (actions on and the CLI found), `DevEntry.T3` (`T3Project { ProjectId, Threads[], ThreadCount }`;
+`T3Thread { Id, Title, Status, Link, Branch, WorktreePath, PendingRequests, PullRequests[], Settled, CreatedAt, UpdatedAt }`),
+`WorktreeInfo.T3Owned`. `T3Threads.StateOf` reads a thread as running / needs input (`pendingRequestCount > 0`) /
+settled / failed / idle. Links are kept only when they are https. The parser (`T3Parser`) reads every field as optional.
+
+### The two actions
+
+| Kind | Fields | What runs | The agent refuses unless |
+|---|---|---|---|
+| `OpenInT3` | repo | `t3 app <repo>` | actions on, T3 on and found, `RepoRefusalAsync` (a working tree at scanner depth in a root) |
+| `StartT3Thread` | repo, `Prompt`, `Title`, `WorktreeBase`, `NewBranch` | `t3 thread start <repo> - --title <t> --worktree <base> --branch <new> --json`, prompt on stdin | the same, plus `git check-ref-format --branch <new>` and no `refs/heads/<new>`, and `git rev-parse --verify <base>^{commit}` |
+
+Shape (`AgentActions.Validate`, both sides): prompt non-empty, at most 32 KB of UTF-8, no control characters but line
+breaks and tabs; title one line of at most 200; base `[A-Za-z0-9_][A-Za-z0-9._/-]*` with no `..`, `//`, trailing `/` or `.`
+or `.lock` (so no revision syntax and nothing option-like); new branch by the existing branch rule. Gated like the 0.6.0
+kinds: `Accepts` is `ActionsEnabled && AcceptsT3`, `WhyNotAccepted` tells "update to 0.7.0" from "T3 Code is not
+available on X: <why>" from "actions are off", the hub only queues and hands out to an agent that says it takes them.
+
+Processes go through `IToolRunner` (argument list, no shell, time limit that kills the tree); `ToolCommand.StandardInput`
+is new and is written while the output is read. On Windows a `.cmd` CLI runs through cmd.exe, which reads `" % ! ^ & | < >`
+even inside quotes, so with a `.cmd` the agent refuses a path, title or branch containing one (the prompt is on stdin and
+unaffected). `ActionResultRequest.Thread` (`T3StartedThread { ThreadId, Link }`, optional) carries what `--json` printed;
+`T3Parser.ParseStarted` takes `threadId`/`id` (top level or under `thread`), a bare JSON string, or the first UUID and
+https address in plain text. The affected path is the repo, so it is rescanned at once and the new thread shows.
+`RemoveWorktree` is refused for a T3-owned worktree ("archive the thread in T3 Code instead").
+
+### The hub (`src/DevDash.Hub/T3`)
+
+*Starting.* `T3Starts.StartAsync` → `ActionQueue.QueueAsync` (every existing check) plus: a main working tree on that
+machine, a branch that clone does not have, and for an issue no earlier start unless `Again`. It writes a `T3Threads` row
+(action, machine, repo, path, title, branch, base, origin `repo|issue|ci|deps|toolchain`, issue number, queued by), and for
+an issue an `IssueThreads` row. `T3Settlement` (called from `CompleteAsync` and the expiry path, like the tombstones)
+stores the thread id and link (id `[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}`, https link) or the failure text.
+
+*UI.* `T3StartButton` (dialog: machine picker of the clones that can take it, editable prompt, title, branch, base; the
+exact command line; disabled with the reason as tooltip, as `ActionButton`), `T3ThreadList` (state chip, title linking to
+app.t3.codes, PR chips, "DevDash" when the dashboard started it), a "T3 · 1 needs input" chip in `CloneChips` (Local and
+repo pages), an Overview card of threads running or waiting. RepoDetail: threads, **Open in T3** per clone, **Ask Claude
+in T3** (`t3/<slug>`), and **Fix in T3** for a PR of mine with failing CI (`t3/fix-ci-<n>` from `origin/<head>`; the
+prompt has the first failing check's page, now fetched as `statusCheckRollup.contexts(first: 25)` on the PR search),
+vulnerable packages (`t3/fix-vulnerable-deps`) and a missing pinned toolchain. ⌘K: "Open X in T3 on M" (queued at once,
+with who asked: it only opens a window) and "Ask Claude in T3 about X…" (a link to the repo page's dialog, `?ask=t3`).
+
+*Issues.* `IssueWorker` (hosted, on the GitHub poll interval, after the first GitHub poll): for the GitHub repos agents
+have clones of that GitHub says exist and are not archived (at most 40, most recently pushed first),
+`GET /repos/{o}/{r}/issues?state=open&sort=updated&per_page=50` with `If-None-Match` (a 304 keeps the last list and costs
+no rate limit); pull requests are dropped, bodies cut to 16 KB. `IssueStore` keeps it in the cache table. The Issues
+page (nav count: open issues) lists number, title, labels, author, age, comments and the thread state, with **Start in T3**
+/ **Start again**. `T3Prompts.RenderIssue` fills the template (editable on the page, stored in the cache table as
+`IssueSettings`): placeholders `{{repo}} {{number}} {{url}} {{title}} {{author}} {{labels}} {{body}} {{comments}}
+{{branch}}`, one pass (a placeholder inside issue text stays as typed), the BEGIN/END UNTRUSTED marker lines removed from
+issue text, control characters dropped, the latest 3 comments (2 KB each), the body halved until the whole prompt fits
+32 KB. Branch `issue/<n>-<slug>` (made free against the clone's branches), title `#<n> <issue title>`.
+
+### The label trigger and its security model
+
+Issue text in a public repository is written by anyone, and a T3 thread usually runs with full access to its machine.
+So the trigger (`IssueTrigger.Decide`, pure) is:
+
+1. **Off by default**, and when on, only for the repos ticked in the settings, and only for an open issue carrying the
+   label (`t3`, configurable).
+2. **Never a second thread**: an issue with any `IssueThreads` row that has an action (whatever became of it) is skipped.
+   Only "Start again" on the page starts another.
+3. **Who added the label** must be an allowed login: the configured list, by default only the token's own user
+   (`GitHubSnapshot.ViewerLogin`, from the GraphQL `viewer`, the same user `/user` returns). It is read from the issue's
+   events (the latest `labeled` event for that label, its `actor`), never assumed; not found means not allowed.
+4. **On a repository not known to be private**, the issue's author must be allowed too. Otherwise anyone could write the
+   instructions and only need a trusted person to add a label.
+5. **Machine**: the repo's preferred machine when set (only it: it waits rather than going elsewhere), else the most
+   recently seen online machine with a main-working-tree clone that accepts `StartT3Thread`.
+
+3 and 4 failing record "needs a manual start" with the reason; 5 failing records "pending" with the reason, tried again
+on every poll. A person starting it by hand sees the reason, and a warning when the author is not on the allowed list.
+The prompt frames the issue as untrusted in any case. The thread itself still runs with whatever permissions T3 Code
+gives threads on that machine: that, not DevDash, is the real limit on what a hostile issue could do once a person
+has chosen to start it.
+
+*Write-back*, off by default: once a thread the trigger started has started, comment "Started a Claude thread for this
+issue." (no links, no machine names) and/or add `t3:started` and remove the trigger label. A 401/403/404 is stored on the
+row ("the GitHub token may not write to this repository") and shown; it is never retried. These are the hub's first
+writes to GitHub, in `GitHubIssuesClient`, separate from the read-only `GitHubClient`.
+
+*Schema.* `T3Threads` and `IssueThreads` (repo, number, machine, action, thread id, link, status
+`Pending|NeedsManualStart|Queued|Started|Failed`, reason, started by `auto|manual`, by, write-back, created, updated),
+added to an existing database by `SchemaUpgrade`.
+
+### Alerts
+
+`t3-needs-input` (a thread the dashboard started has `pendingRequestCount > 0`; clears when answered) and `t3-done` (it
+has a pull request or is settled), both off by default (`Triggers:T3NeedsInput`, `Triggers:T3Done`), keyed on the thread
+id, with the thread or the PR as the alert's link. Threads started elsewhere never alert.
+
+**Tests.** Agent (`T3Tests`): default roots with a temporary home, the locator, `MarkOwned`, list/show parsing with the
+real field names, start-output shapes, the project rule (shared, owned, rescans, a new path), the show cache, T3 missing
+or not answering, the snapshot fields, action shape and gating, execution against `FakeTools` (arguments, stdin, result,
+failure, every refusal) and, on macOS and Linux, against a shell-script stand-in through the real process runner. Hub
+(`T3HubTests`): prompts (framing, injection of markers and placeholders, size), names, every trigger rule, the issue poll
+with ETags, the trigger end to end (start, dedupe, manual start over a decision, Start again), pending until a machine
+can, write-back refused by the token, queue gating and results, the pages and palette, the alerts, and the schema upgrade.
+
+**Limits and not verified.** `t3 thread start --json`'s output was never seen (no real thread was started while building
+this); the parser is deliberately loose and a start that prints no id still counts as started, without a link. The CLI
+was not run from a launchd/systemd/scheduled-task context: the macOS wrapper is a shell script that runs the desktop
+app's bundled Node, which should work from a LaunchAgent but has not been tried. The Windows location and file type of
+the CLI are guesses (`%USERPROFILE%\.t3\bin\t3.exe|t3.cmd`), and the `.cmd` restrictions are untested on Windows. The
+project rule is by count only, so a lone repo inside a project rooted above it still looks like its own (T3's
+`project list` would allow an exact root match). Threads are shown per repo, so a thread in a T3 project that is not a
+scanned repo is not shown anywhere.
+
+## 19. MCP server (0.7.0)
+
+Claude (Claude Code, or Claude inside T3 Code) reads the dashboard, and with the right token queues a few safe actions, through an MCP
+server in the hub. All of it is in `src/DevDash.Hub/Mcp`, plus the **Claude** page (`Components/Pages/Claude.razor`) and three lines in
+`Program.cs` (`AddDevDashMcp`, `UseRateLimiter`, `MapDevDashMcp`).
+
+**Transport.** The official C# SDK, `ModelContextProtocol.AspNetCore` 2.4.0: Streamable HTTP at `/mcp`, stateless
+(`HttpServerTransportOptions.Stateless = true`), so a hub restart loses no session and needs no affinity; no GET/SSE stream and no
+server-to-client requests, which no tool needs. `Hub:Mcp:Enabled=false` leaves `/mcp` unmapped. The not-found page re-execution skips
+`/mcp` as it does `/api`, so clients get plain status codes.
+
+**Auth.** Tokens are `ddm_` + 32 random bytes, stored as SHA-256 in `McpTokens` (name, prefix, scope, created by, created, last used,
+revoked), the same scheme as agent keys but a separate table, so an agent key is not an MCP token and an MCP token claims no actions as an
+agent. `McpTokenAuthenticationHandler` (scheme `McpToken`) is the only scheme the endpoint's policy names, so the browser's Tailscale
+identity never satisfies it: no token, a wrong one or a revoked one is `401` with `WWW-Authenticate: Bearer`. The network boundary is
+unchanged (tailnet only, no Funnel). "Last used" is written at most once a minute per token. Tokens are shown once on the Claude page,
+which also prints `claude mcp add --transport http devdash <Hub:PublicUrl or the page's origin>/mcp --header "Authorization: Bearer
+<token>"` and an `.mcp.json` that reads the token from `${DEVDASH_MCP_TOKEN}`. Tokens and Authorization headers are never logged; each
+tool call logs `MCP token <name> called <tool>` at Information.
+
+**Scopes.** `read` (default) or `read+actions`, as a claim. Action tools carry `[Authorize(Policy = McpSetup.ActionsPolicy)]`; with the
+SDK's `AddAuthorizationFilters()` a `read` token does not see them in `tools/list` and is refused if it calls one anyway.
+
+**Tools.** Registered in one place, `McpSetup.ToolTypes`; a new class of tools is one entry there. Every tool reuses the service the
+matching page uses rather than deriving anything again, takes filters, and returns compact JSON (nulls left out, a `now` to reason about
+ages, `total`/`shown` where it lists).
+
+| Tool | Scope | From |
+|---|---|---|
+| `list_machines` | read | `SnapshotStore`, `AgentUpdates`, `AgentActions.Accepts` (capabilities) |
+| `list_projects` (machine, text, only_at_risk, only_dirty, sort) | read | `RepoCatalog` clones + `SafetyService.ByClone` |
+| `get_project` (name, owner/name, key or clone path; machine) | read | `RepoCatalog`, `SafetyService`, `SyncOffers`, `FindingsService`, `ToolchainCheck`, `DependencyView` |
+| `at_risk_work` / `safe_to_remove` | read | `SafetyView.AtRisk` / `SafetyView.Removable` over `SafetyService` |
+| `findings` (min_severity, rule, machine, project, include_inactive) | read | `FindingsService` |
+| `pull_requests` (all, mine, review, assigned, attention) | read | `GitHubStore` + `PrTriage` |
+| `compare_clones` | read | `RepoCatalog` branches by name across machines + `SyncOffers` |
+| `recent_activity` (days, project, mine) | read | `ActivityView.Total` / `ForRepo`, last commits |
+| `action_status` (id) | read | the `AgentActions` row |
+| `t3_threads` (repo, machine, state) | read | `T3View.All`: reported threads joined with the dashboard's starts |
+| `list_issues` (repo, label, include_body) | read | `T3View.Issues`; bodies only on request, labelled untrusted |
+| `refresh_project` | read+actions | `RefreshTargets` → Refresh |
+| `fetch` | read+actions | `AgentAction.Fetch` on the main working tree |
+| `push_branch` / `pull_fast_forward` | read+actions | only an offer `SyncOffers.For` makes (same-name upstream, strictly ahead / behind; a pull into a dirty tree is refused with its `Blocked` text) |
+| `clean_build_dirs` (dirs optional) | read+actions | the clone's reported `ReclaimableDirs` only |
+
+Every action goes through `ActionQueue.QueueAsync`, the call the buttons make, so the hub switch, the machine's opt-in and version,
+online, "still reported" and `AgentActions.Validate` all apply, and the agent re-validates as in §11. `QueuedBy` is `mcp:<token name>`.
+A tool returns the action id, its command line and "check with `action_status`". Refusals are tool errors carrying the queue's own
+sentence.
+
+**Not exposed, on purpose.** `RemoveProject`, `Clone`, `DropStash`, `DeleteBranches`, `RemoveWorktree`, `PruneWorktrees` and
+`UpdateAgent` have no MCP tool. They either delete something that is not regenerable or change what runs on a machine, and they stay
+behind the dashboard's confirmation dialogs. `safe_to_remove` says so in its description. `StartT3Thread` and `OpenInT3` have no tool either: a thread usually runs with full access, so starting one from a
+model (possibly one reading an issue body) would let text reach a full-access agent without a person in between.
+
+**Limits on size and rate.** Lists default to 20–100 rows and accept at most 200; one result is cut at 60,000 characters with a note to
+narrow it. A fixed-window limiter allows `Hub:Mcp:RequestsPerMinute` (120) requests per token per minute, then `429`. The request body
+size is Kestrel's default.
+
+**Schema.** One table, `McpTokens` (unique index on the hash), added to an existing database by `SchemaUpgrade`.
+
+**Tests.** `McpTests`, against the real hub with the SDK's own `McpClient` over the test server: no token, a wrong token, an agent key
+and a revoked token are 401 (and an MCP token is 401 at the agent endpoints); the per-token 429; a read token lists exactly the read
+tools, and each read tool answers from the seeded snapshot; a read token cannot call an action tool and nothing is queued; an actions
+token sees exactly read + action tools (nothing destructive), queues a fetch and a push that land in `AgentActions` with `mcp:<name>`,
+and follows one with `action_status`; refusals carry the queue's and `SyncOffers`' reasons; the Claude page prints the command for
+`Hub:PublicUrl`; an old database gains `McpTokens`.
+
+**Limits.** A token is all-or-nothing within its scope: no per-machine or per-repo tokens. Stateless means no server-initiated
+notifications (e.g. "your action finished"); the client polls `action_status`. The data is as fresh as each agent's last scan; the tools
+say so and `refresh_project` asks for a new one. Tested with the SDK's client, not yet with Claude Code itself against a deployed hub.

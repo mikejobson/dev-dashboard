@@ -11,6 +11,7 @@
 @inject SafetyService SafetyRows
 @inject ActionQueue Actions
 @inject AgentUpdates Updates
+@inject ActionBoard Board
 @inject NavigationManager Nav
 @inject IJSRuntime JS
 
@@ -32,7 +33,7 @@
                 {
                     var label = index < _recentShown ? "Recent" : Label(item);
                     var id = $"cmdk-item-{index++}";
-                    @if (item.Command == PaletteCommand.Refresh)
+                    @if (item.Command is PaletteCommand.Refresh or PaletteCommand.OpenInT3)
                     {
                         <button type="button" id="@id" class="cmdk-item" role="option" tabindex="-1" data-cmdk-item @onclick="() => RunAsync(item)">
                             <span class="cmdk-kind">@label</span>
@@ -145,7 +146,8 @@
             var repos = await Catalog.GetAsync();
             var safe = SafetyView.Removable(SafetyRows.Get())
                 .Count(r => r.Safety.Verdict == SafetyVerdict.Safe && Actions.Availability(r.Machine, AgentActionKind.RemoveProject).Available);
-            _items = Palette.Items(repos, GitHub.Current.PullRequests, Snapshots.Machines, m => Refreshes.For(m).Available, safe, Updates.Updatable().Count);
+            _items = Palette.Items(repos, GitHub.Current.PullRequests, Snapshots.Machines, m => Refreshes.For(m).Available, safe, Updates.Updatable().Count,
+                (m, kind) => Actions.Availability(m, kind).Available);
         }
 
         Search();
@@ -187,6 +189,17 @@
     /// <summary>A refresh: read-only apart from a fetch, so it is asked for at once, exactly as the pages' own Refresh buttons do.</summary>
     private async Task RunAsync(PaletteItem item)
     {
+        if (item.Command == PaletteCommand.OpenInT3)
+        {
+            // Opens a window on that machine and nothing else; queued with who asked, like the page's button after its confirmation.
+            var problem = item.T3Machine is { } machine && item.T3Path is { } path
+                ? await Board.QueueAsync(machine.MachineId, AgentAction.OpenInT3(path))
+                : "Nothing to open.";
+            _message = problem is null ? $"Asked {item.T3Machine!.Machine.Hostname} to open it in T3 Code." : "Could not ask: " + problem;
+            await RememberAsync(item.Id);
+            return;
+        }
+
         var able = item.Targets.Where(t => Refreshes.For(t.Machine).Available).ToList();
         await Refreshes.QueueAsync(able);
         if (Refreshes.Error is { } error)

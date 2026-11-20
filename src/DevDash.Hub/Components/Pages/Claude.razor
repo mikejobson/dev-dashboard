@@ -1,0 +1,157 @@
+@page "/claude"
+@using DevDash.Hub.Mcp
+@inherits LivePage
+@inject McpTokenService Tokens
+@inject IOptionsMonitor<HubOptions> Hub
+@inject NavigationManager Navigation
+@inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider Auth
+
+<PageTitle>Claude · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Claude / MCP</h1>
+        <p>Let Claude (Claude Code, or Claude in T3 Code) read this dashboard, and optionally run a few safe actions, through the MCP server at <code>@Endpoint</code>.</p>
+    </div>
+</div>
+
+@if (!Hub.CurrentValue.Mcp.Enabled)
+{
+    <div class="banner">The MCP server is switched off (<code>Hub:Mcp:Enabled</code>). Tokens can be made, but nothing answers at <code>/mcp</code>.</div>
+}
+
+@if (_issued is not null)
+{
+    <div class="banner info">
+        <strong>New token “@_issued.Entity.Name” (@ScopeLabel(_issued.Entity.Scope)).</strong> Copy it now; only its hash is stored and it cannot be shown again.
+        <div class="command" style="margin-top:8px">
+            <code>@_issued.Plaintext</code>
+            <button type="button" class="copy" data-copy="@_issued.Plaintext">Copy</button>
+        </div>
+
+        <p style="margin:12px 0 4px">Add it to Claude Code (for you, in every project):</p>
+        <div class="command">
+            <code>@AddCommand(_issued.Plaintext)</code>
+            <button type="button" class="copy" data-copy="@AddCommand(_issued.Plaintext)">Copy</button>
+        </div>
+
+        <p style="margin:12px 0 4px">Or share it with a project through <code>.mcp.json</code>, keeping the token itself in the environment (<code>export DEVDASH_MCP_TOKEN=…</code>), never in the file:</p>
+        <div class="command">
+            <code>@McpJson</code>
+            <button type="button" class="copy" data-copy="@McpJson">Copy</button>
+        </div>
+        <div style="margin-top:8px"><button type="button" @onclick="() => _issued = null">Done</button></div>
+    </div>
+}
+
+<h2>Tokens</h2>
+<div class="toolbar">
+    <input type="text" placeholder="Name, e.g. laptop Claude Code" aria-label="Name for the new token" maxlength="100" @bind="_name" @bind:event="oninput" />
+    <select aria-label="What the token may do" @bind="_scope">
+        <option value="@McpScopes.Read">Read only</option>
+        <option value="@McpScopes.ReadActions">Read and run safe actions</option>
+    </select>
+    <button type="button" class="primary" @onclick="IssueAsync">Create token</button>
+</div>
+<p class="muted small">
+    <strong>Read only</strong> sees machines, projects, safety, findings, pull requests and activity.
+    <strong>Read and run safe actions</strong> can also queue refresh, fetch, push (never forced), fast-forward pull and build-output cleanup,
+    through the same queue and checks as the buttons here; each still needs the machine's agent to have actions enabled.
+    Removing projects, dropping stashes, deleting branches or worktrees and updating agents stay on this dashboard.
+</p>
+
+<div class="table-wrap">
+    <table class="stack keys-table">
+        <thead>
+            <tr><th>Token</th><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+        </thead>
+        <tbody>
+            @foreach (var token in _tokens)
+            {
+                <tr @key="token.Id" class="@(token.RevokedAt is null ? "" : "revoked")">
+                    <td class="mono nowrap cell-main">@token.Prefix…</td>
+                    <td data-label="Name">@token.Name</td>
+                    <td data-label="Scope"><span class="chip @(token.AllowsActions ? "warn" : "muted")">@ScopeLabel(token.Scope)</span></td>
+                    <td data-label="Created" class="sub nowrap" title="@Fmt.Date(token.CreatedAt) by @token.CreatedBy">@Fmt.Ago(token.CreatedAt, Now)</td>
+                    <td data-label="Last used" class="sub nowrap" title="@Fmt.Date(token.LastUsedAt)">@Fmt.Ago(token.LastUsedAt, Now)</td>
+                    <td class="right cell-buttons">
+                        @if (token.RevokedAt is null)
+                        {
+                            <button type="button" class="danger" @onclick="() => RevokeAsync(token.Id)">Revoke</button>
+                        }
+                        else
+                        {
+                            <span class="chip muted" title="@Fmt.Date(token.RevokedAt)">revoked</span>
+                        }
+                    </td>
+                </tr>
+            }
+            @if (_tokens.Count == 0)
+            {
+                <tr><td class="empty" colspan="6">No tokens yet.</td></tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+<h2>Setting up Claude Code</h2>
+<p>With a token from above:</p>
+<div class="command">
+    <code>@AddCommand("<token>")</code>
+</div>
+<p class="muted small">
+    Then <code>/mcp</code> in Claude Code should list <code>devdash</code>. Ask things like “what have I not pushed?”, “which clones are safe to delete?”
+    or “compare my clones of this repo”. The address is <code>Hub:PublicUrl</code> when it is set, otherwise the address this page was opened at.
+    Requests are limited to @Hub.CurrentValue.Mcp.RequestsPerMinute a minute per token.
+</p>
+
+@code {
+    private IReadOnlyList<McpTokenEntity> _tokens = [];
+    private IssuedMcpToken? _issued;
+    private string _name = "";
+    private string _scope = McpScopes.Read;
+
+    protected override async Task LoadAsync() => _tokens = await Tokens.ListAsync();
+
+    /// <summary>Where clients reach the server: the configured public address, else this page's own origin.</summary>
+    private string Endpoint
+    {
+        get
+        {
+            var configured = Hub.CurrentValue.PublicUrl.Trim().TrimEnd('/');
+            var origin = configured.Length > 0 ? configured : new Uri(Navigation.BaseUri).GetLeftPart(UriPartial.Authority);
+            return origin + "/mcp";
+        }
+    }
+
+    private string AddCommand(string token) => $"claude mcp add --transport http devdash {Endpoint} --header \"Authorization: Bearer {token}\"";
+
+    private string McpJson => $$"""
+        {
+          "mcpServers": {
+            "devdash": {
+              "type": "http",
+              "url": "{{Endpoint}}",
+              "headers": { "Authorization": "Bearer ${DEVDASH_MCP_TOKEN}" }
+            }
+          }
+        }
+        """;
+
+    private static string ScopeLabel(string scope) => scope == McpScopes.ReadActions ? "read + actions" : "read";
+
+    private async Task IssueAsync()
+    {
+        var user = (await Auth.GetAuthenticationStateAsync()).User;
+        var login = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+        _issued = await Tokens.IssueAsync(_name, McpScopes.IsValid(_scope) ? _scope : McpScopes.Read, login);
+        _name = "";
+        await LoadAsync();
+    }
+
+    private async Task RevokeAsync(int id)
+    {
+        await Tokens.RevokeAsync(id);
+        await LoadAsync();
+    }
+}

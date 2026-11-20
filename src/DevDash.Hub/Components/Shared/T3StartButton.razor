@@ -1,0 +1,219 @@
+@* "Ask Claude in T3": a button and a dialog that starts a T3 Code thread in a new worktree on a new branch,
+   on the machine picked. Every field is editable; the agent checks them all again. Disabled, with the reason
+   as its tooltip, when no machine with a clone can take it. *@
+@inject T3Starts Starts
+@inject ActionBoard Board
+@inject IOptionsMonitor<HubOptions> Options
+<span class="act">
+    <button type="button" class="@Class @(Blocked ? "is-disabled" : "")" aria-disabled="@(Blocked ? "true" : "false")" title="@Tooltip" @onclick="OpenAsync">@Label</button>
+    @if (_queued is { } queued)
+    {
+        <span class="chip info" title="Queued by @queued.QueuedBy">thread on its way to @queued.MachineName</span>
+    }
+    @if (_open)
+    {
+        <div class="modal-backdrop" @onclick="Close">
+            <div class="modal" role="dialog" aria-modal="true" aria-label="@Heading" @onclick:stopPropagation="true">
+                <h3>@Heading</h3>
+                <div class="t3-form">
+                    @if (Targets.Count > 1)
+                    {
+                        <label>
+                            Machine
+                            <select value="@_target" @onchange="PickAsync">
+                                @foreach (var (target, index) in Targets.Select((t, i) => (t, i)))
+                                {
+                                    <option value="@index" disabled="@(!target.Availability.Available)">@target.Label@(target.Availability.Available ? "" : " — " + target.Availability.WhyNot)</option>
+                                }
+                            </select>
+                        </label>
+                    }
+                    else if (Current is { } only)
+                    {
+                        <dl class="kv"><dt>Machine</dt><dd>@only.Label</dd></dl>
+                    }
+                    <label>
+                        Prompt <span class="muted small">(sent to T3 Code as the thread's first message)</span>
+                        <textarea @bind="_prompt" @bind:event="oninput" rows="12" spellcheck="true"></textarea>
+                    </label>
+                    <label>Title <input type="text" @bind="_title" maxlength="@AgentActions.MaxTitleChars" /></label>
+                    <div class="t3-row">
+                        <label>New branch <input type="text" class="mono" @bind="_branch" spellcheck="false" /></label>
+                        <label>Start from <input type="text" class="mono" @bind="_base" spellcheck="false" /></label>
+                    </div>
+                </div>
+                @if (Current is { } chosen)
+                {
+                    <div class="command"><code>@AgentActions.CommandLine(Action(chosen))</code></div>
+                }
+                <p>@AgentActions.Safeguard(AgentAction.StartT3Thread("/", "x", "x", "main", "x"))</p>
+                @if (Warning is not null)
+                {
+                    <div class="banner warn">@Warning</div>
+                }
+                <p>It is recorded as started by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and nothing starts.</p>
+                @if (_error is not null)
+                {
+                    <div class="banner danger">@_error</div>
+                }
+                <div class="modal-actions">
+                    <button type="button" @onclick="Close">Cancel</button>
+                    <button type="button" class="primary" disabled="@(_busy || Current is not { Availability.Available: true })" @onclick="StartAsync">Start thread</button>
+                </div>
+            </div>
+        </div>
+    }
+</span>
+
+@code {
+    /// <summary>The clones it could start in (<see cref="T3Starts.Targets"/>).</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<T3Target> Targets { get; set; } = [];
+
+    [Parameter, EditorRequired] public string RepoKey { get; set; } = "";
+
+    [Parameter] public string Label { get; set; } = "Ask Claude in T3";
+
+    [Parameter] public string? Ask { get; set; }
+
+    /// <summary>The prompt to start from. Empty for a blank one.</summary>
+    [Parameter] public string Prompt { get; set; } = "";
+
+    [Parameter] public string? Title { get; set; }
+
+    /// <summary>The new branch's name before a free one is picked; <c>t3/&lt;slug of the title&gt;</c> when not given.</summary>
+    [Parameter] public string? Branch { get; set; }
+
+    /// <summary>What the worktree starts from; the repo's default branch on origin when not given.</summary>
+    [Parameter] public string? Base { get; set; }
+
+    [Parameter] public string Origin { get; set; } = "repo";
+
+    [Parameter] public IssueRef? Issue { get; set; }
+
+    [Parameter] public bool Again { get; set; }
+
+    /// <summary>
+    /// Builds the fields for a clone when the dialog opens or the machine changes, when they depend on more
+    /// than the parameters (an issue's prompt has its comments read from GitHub).
+    /// </summary>
+    [Parameter] public Func<T3Target, Task<T3StartRequest?>>? Prepare { get; set; }
+
+    /// <summary>A caution shown in the dialog, e.g. an issue that the label trigger would not start by itself.</summary>
+    [Parameter] public string? Warning { get; set; }
+
+    [Parameter] public string Class { get; set; } = "run";
+
+    /// <summary>Told after a thread is queued.</summary>
+    [Parameter] public EventCallback<T3ThreadEntity> OnStarted { get; set; }
+
+    private bool _open, _busy;
+    private int _target;
+    private string _prompt = "", _title = "", _branch = "", _base = "", _login = "";
+    private string? _error;
+    private T3ThreadEntity? _queued;
+
+    private T3Target? Current => _target >= 0 && _target < Targets.Count ? Targets[_target] : null;
+
+    private bool Blocked => !Targets.Any(t => t.Availability.Available);
+
+    private string Heading => Ask ?? Label;
+
+    private string Tooltip => Targets.Count == 0
+        ? "No machine reports a clone of this repo."
+        : Blocked
+            ? string.Join(" ", Targets.Select(t => t.Availability.WhyNot).Where(w => w is not null).Distinct())
+            : "Start a T3 Code thread in a new worktree on a new branch. You edit the prompt and confirm first.";
+
+    private AgentAction Action(T3Target target) => AgentAction.StartT3Thread(target.Target.Entry.Path, _prompt, _title, _base, _branch);
+
+    /// <summary>Opens the dialog, as a click would (the command palette's "Ask Claude in T3" does this through the page).</summary>
+    public async Task OpenAsync()
+    {
+        if (Blocked)
+        {
+            return;
+        }
+
+        _login = await Board.LoginAsync();
+        _error = null;
+        _target = Math.Max(0, Targets.ToList().FindIndex(t => t.Availability.Available));
+        await FillAsync();
+        _open = true;
+    }
+
+    private async Task PickAsync(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var index))
+        {
+            _target = index;
+            await FillAsync();
+        }
+    }
+
+    private async Task FillAsync()
+    {
+        if (Current is not { } target)
+        {
+            return;
+        }
+
+        if (Prepare is not null && await Prepare(target) is { } prepared)
+        {
+            (_prompt, _title, _branch, _base) = (prepared.Prompt, prepared.Title, prepared.NewBranch, prepared.WorktreeBase);
+            return;
+        }
+
+        var git = target.Target.Git;
+        _prompt = Prompt;
+        _title = T3Prompts.Title(Title ?? Prompt.Split('\n').FirstOrDefault(l => l.Trim().Length > 0) ?? "");
+        _branch = T3Prompts.FreeBranch(Branch ?? "t3/" + T3Prompts.Slug(_title, 40), git?.Branches.Select(b => b.Name) ?? []);
+        _base = Base ?? T3Prompts.DefaultBase(git);
+    }
+
+    private void Close()
+    {
+        _open = false;
+        _error = null;
+    }
+
+    private async Task StartAsync()
+    {
+        if (_busy || Current is not { } target)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var outcome = await Starts.StartAsync(new T3StartRequest
+            {
+                MachineId = target.Machine.MachineId,
+                RepoPath = target.Target.Entry.Path,
+                RepoKey = RepoKey,
+                Prompt = _prompt.Trim(),
+                Title = _title.Trim(),
+                WorktreeBase = _base.Trim(),
+                NewBranch = _branch.Trim(),
+                Origin = Origin,
+                Issue = Issue,
+                Again = Again,
+            }, _login);
+            if (outcome.Thread is { } thread)
+            {
+                _queued = thread;
+                _open = false;
+                await Board.LoadAsync();
+                await OnStarted.InvokeAsync(thread);
+            }
+            else
+            {
+                _error = outcome.Error;
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

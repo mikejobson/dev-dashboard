@@ -292,6 +292,14 @@ public class RepoSafetyTests
         Assert.Equal("1 linked worktree uses this repository", blocker.Text);
         Assert.Equal(["/dev/widget.worktrees/a"], blocker.Names);
 
+        // A T3 Code thread's worktree blocks removal just the same, and says whose it is.
+        var withT3 = Assess(Clean(g => g with
+        {
+            Worktrees = [new WorktreeInfo { Path = "/dev/widget", Branch = "main" }, new WorktreeInfo { Path = "/home/me/.t3/worktrees/widget/t3-1a2b", Branch = "t3/fix", T3Owned = true }],
+        }));
+        Assert.Equal(SafetyVerdict.Unclear, withT3.Verdict);
+        Assert.Equal("1 linked worktree uses this repository (made by T3 Code)", Assert.Single(withT3.Reasons).Text);
+
         var onlyPrunable = Assess(Clean(g => g with
         {
             Worktrees = [new WorktreeInfo { Path = "/dev/widget", Branch = "main" }, new WorktreeInfo { Path = "/dev/gone", Branch = "b", Prunable = true }],

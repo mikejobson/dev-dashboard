@@ -51,6 +51,8 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             AgentActionKind.RemoveProject => RemoveProjectRefusal(action),
             AgentActionKind.CleanBuildDirs => await CleanBuildDirsRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.PullFastForward => await PullRefusalAsync(action, ct).ConfigureAwait(false),
+            AgentActionKind.OpenInT3 => null,
+            AgentActionKind.StartT3Thread => await StartT3RefusalAsync(action, ct).ConfigureAwait(false),
             _ => "Unknown action kind.",
         };
     }
@@ -185,8 +187,38 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return "The worktree's folder is already gone; prune it instead.";
         }
 
+        // T3 Code made it for a thread and removes it when the thread is archived; removing it here would pull it from under the thread.
+        if (T3Code.T3Locator.MarkOwned([worktrees[0], worktree], options.CurrentValue.T3.WorktreesFolder())[1].T3Owned == true)
+        {
+            return "T3 Code made this worktree for a thread. Archive the thread in T3 Code instead; it removes the worktree itself.";
+        }
+
         // Commits made on a detached HEAD belong to no branch, so removing the worktree could strand them.
         return worktree.Branch is null ? "The worktree has a detached HEAD; remove it by hand after checking its commits." : null;
+    }
+
+    /// <summary>
+    /// A new thread gets a new branch in a new worktree. The branch name must be one git accepts for a branch
+    /// and must not exist yet (so no existing work is checked out or moved); the base must name a commit here.
+    /// </summary>
+    private async Task<string?> StartT3RefusalAsync(AgentAction action, CancellationToken ct)
+    {
+        var repo = action.RepoPath!;
+        var branch = action.NewBranch!;
+        var format = await git.ExecuteAsync(repo, ["check-ref-format", "--branch", branch], Timeout, ct).ConfigureAwait(false);
+        if (!format.Ok)
+        {
+            return $"'{branch}' is not a valid branch name.";
+        }
+
+        var exists = await git.RunAsync(repo, ["rev-parse", "--verify", "--quiet", $"refs/heads/{branch}"], Timeout, ct).ConfigureAwait(false);
+        if (exists.Ok)
+        {
+            return $"A branch named {branch} already exists. Choose another name; the agent only starts a thread on a new branch.";
+        }
+
+        var start = await git.RunAsync(repo, ["rev-parse", "--verify", "--quiet", action.WorktreeBase + "^{commit}"], Timeout, ct).ConfigureAwait(false);
+        return start.Ok ? null : $"{action.WorktreeBase} does not name a commit in {repo}. Fetch first, or choose another base.";
     }
 
     private async Task<string?> PushRefusalAsync(AgentAction action, CancellationToken ct)

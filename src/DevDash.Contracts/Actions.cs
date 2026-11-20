@@ -79,6 +79,20 @@ public enum AgentActionKind
     /// uncommitted changes), or <c>git fetch remote branch:branch</c> where it is not.
     /// </summary>
     PullFastForward,
+
+    /// <summary>
+    /// Open a repository in the T3 Code desktop app on that machine (<c>t3 app &lt;path&gt;</c>). Changes nothing
+    /// in the repository. Needs actions on and T3 Code's CLI on the machine.
+    /// </summary>
+    OpenInT3,
+
+    /// <summary>
+    /// Start a T3 Code thread in a repository, in a new worktree on a new branch:
+    /// <c>t3 thread start &lt;path&gt; - --title … --worktree &lt;base&gt; --branch &lt;new&gt; --json</c>, with the
+    /// prompt on standard input. The repository's own working tree is not touched; the new branch must not exist.
+    /// The thread runs with whatever permissions T3 Code gives it, which is why it needs actions on.
+    /// </summary>
+    StartT3Thread,
 }
 
 /// <summary>One allowlisted action. Fields that a kind does not use must be null.</summary>
@@ -142,6 +156,18 @@ public sealed record AgentAction
     /// <summary><see cref="AgentActionKind.CleanBuildDirs"/>: absolute paths of the build folders to delete, each inside <see cref="RepoPath"/>.</summary>
     public IReadOnlyList<string>? BuildDirs { get; init; }
 
+    /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the first message to the thread. Sent to T3 on standard input, never as an argument.</summary>
+    public string? Prompt { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the thread's title.</summary>
+    public string? Title { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the branch, tag or commit the new worktree starts from, e.g. <c>origin/main</c>.</summary>
+    public string? WorktreeBase { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the branch to create for the new worktree. It must not exist yet.</summary>
+    public string? NewBranch { get; init; }
+
     public static AgentAction DeleteBranches(string repoPath, IEnumerable<string> branches) =>
         new() { Kind = AgentActionKind.DeleteBranches, RepoPath = repoPath, Branches = branches.ToList() };
 
@@ -184,6 +210,12 @@ public sealed record AgentAction
 
     public static AgentAction PullFastForward(string repoPath, string remote, string branch) =>
         new() { Kind = AgentActionKind.PullFastForward, RepoPath = repoPath, Remote = remote, Branch = branch };
+
+    public static AgentAction OpenInT3(string repoPath) =>
+        new() { Kind = AgentActionKind.OpenInT3, RepoPath = repoPath };
+
+    public static AgentAction StartT3Thread(string repoPath, string prompt, string title, string worktreeBase, string newBranch) =>
+        new() { Kind = AgentActionKind.StartT3Thread, RepoPath = repoPath, Prompt = prompt, Title = title, WorktreeBase = worktreeBase, NewBranch = newBranch };
 }
 
 /// <summary>
@@ -208,6 +240,15 @@ public static partial class AgentActions
 
     /// <summary>The first agent release that knows the removal, clone, build-output and fast-forward actions.</summary>
     public const string RemovalMinAgentVersion = "0.6.0";
+
+    /// <summary>The first agent release that knows the T3 Code actions.</summary>
+    public const string T3MinAgentVersion = "0.7.0";
+
+    /// <summary>Longest prompt a <see cref="AgentActionKind.StartT3Thread"/> may carry, in UTF-8 bytes.</summary>
+    public const int MaxPromptBytes = 32 * 1024;
+
+    /// <summary>Longest thread title, in characters.</summary>
+    public const int MaxTitleChars = 200;
 
     /// <summary>Most build folders one <see cref="AgentActionKind.CleanBuildDirs"/> may name: as many as a scan reports.</summary>
     public const int MaxBuildDirs = 25;
@@ -240,8 +281,12 @@ public static partial class AgentActions
         AgentActionKind.Clone => machine.ActionsEnabled && machine.AcceptsClone,
         AgentActionKind.CleanBuildDirs => machine.ActionsEnabled && machine.AcceptsCleanBuildDirs,
         AgentActionKind.PullFastForward => machine.ActionsEnabled && machine.AcceptsPull,
+        AgentActionKind.OpenInT3 or AgentActionKind.StartT3Thread => machine.ActionsEnabled && machine.AcceptsT3,
         _ => machine.ActionsEnabled,
     };
+
+    /// <summary>True for the kinds that run T3 Code's CLI rather than git.</summary>
+    public static bool IsT3Action(AgentActionKind kind) => kind is AgentActionKind.OpenInT3 or AgentActionKind.StartT3Thread;
 
     /// <summary>
     /// Why the agent on a machine cannot take a kind of action, in words for a tooltip, or null when it can.
@@ -265,6 +310,20 @@ public static partial class AgentActions
         }
 
         var on = string.IsNullOrWhiteSpace(machine.AgentVersion) ? "" : $" (it is on {machine.AgentVersion})";
+        if (IsT3Action(kind))
+        {
+            // A 0.7.0 agent that does not accept these has looked for T3 Code and not found it (or has it switched off).
+            var minimum = SemVer.ParseOrNull(T3MinAgentVersion)!;
+            if (SemVer.ParseOrNull(machine.AgentVersion) is { } version && version.CompareTo(minimum) >= 0)
+            {
+                return machine.T3 is { Available: false } t3
+                    ? $"T3 Code is not available on {machine.Hostname}: {t3.Problem ?? "its CLI was not found"}."
+                    : $"The agent on {machine.Hostname} has its T3 Code integration switched off.";
+            }
+
+            return $"Update the agent on {machine.Hostname} to {T3MinAgentVersion} or newer to use T3 Code from here{on}.";
+        }
+
         return $"Update the agent on {machine.Hostname} to {RemovalMinAgentVersion} or newer to do this from here{on}.";
     }
 
@@ -326,7 +385,11 @@ public static partial class AgentActions
             || (action.ExpectedFingerprint is not null) != (kind == AgentActionKind.RemoveProject)
             || (action.AcknowledgedCaveats is not null && kind != AgentActionKind.RemoveProject)
             || (action.Url is not null) != (kind == AgentActionKind.Clone)
-            || (action.BuildDirs is not null) != (kind == AgentActionKind.CleanBuildDirs))
+            || (action.BuildDirs is not null) != (kind == AgentActionKind.CleanBuildDirs)
+            || (action.Prompt is not null) != (kind == AgentActionKind.StartT3Thread)
+            || (action.Title is not null) != (kind == AgentActionKind.StartT3Thread)
+            || (action.WorktreeBase is not null) != (kind == AgentActionKind.StartT3Thread)
+            || (action.NewBranch is not null) != (kind == AgentActionKind.StartT3Thread))
         {
             return $"The fields do not match a {kind} action.";
         }
@@ -404,6 +467,12 @@ public static partial class AgentActions
 
                 return action.BuildDirs.Select(d => PathProblem(d, "Build folder path")).FirstOrDefault(p => p is not null);
 
+            case AgentActionKind.StartT3Thread:
+                return PromptProblem(action.Prompt!)
+                    ?? TitleProblem(action.Title!)
+                    ?? RefProblem(action.WorktreeBase!)
+                    ?? BranchProblem(action.NewBranch!);
+
             default:
                 return null;
         }
@@ -446,6 +515,15 @@ public static partial class AgentActions
                 return "rm -rf " + string.Join(' ', (action.BuildDirs ?? []).Select(ShellQuote));
             case AgentActionKind.PullFastForward:
                 return $"git -C {ShellQuote(action.RepoPath ?? "")} pull --ff-only {ShellQuote(action.Remote ?? "")} {ShellQuote(action.Branch ?? "")}";
+            case AgentActionKind.OpenInT3:
+                return $"t3 app {ShellQuote(action.RepoPath ?? "")}";
+            case AgentActionKind.StartT3Thread:
+                // The prompt goes on standard input, so the line says how long it is rather than repeating it.
+                return string.Join(' ',
+                    "t3", "thread", "start", ShellQuote(action.RepoPath ?? ""), "-",
+                    "--title", ShellQuote(action.Title ?? ""), "--worktree", ShellQuote(action.WorktreeBase ?? ""),
+                    "--branch", ShellQuote(action.NewBranch ?? ""), "--json",
+                    $"< prompt ({(action.Prompt ?? "").Length} characters)");
         }
 
         var (verb, values) = Parts(action);
@@ -467,6 +545,8 @@ public static partial class AgentActions
         AgentActionKind.Clone => "Only into the folder the project was removed from, only if that folder does not exist, and only from a URL the agent itself knows as a remote of this project.",
         AgentActionKind.CleanBuildDirs => "Deleted for good, not moved to the trash: a build or install recreates it. The agent refuses a folder that is not known build output, that git tracks files in, or that is reached through a link.",
         AgentActionKind.PullFastForward => "Fast-forward only: no merge commit, no rebase, no reset. The agent fetches first. A checked-out branch only moves when its working tree has no uncommitted changes; any other branch is moved with git fetch, which refuses anything but a fast-forward.",
+        AgentActionKind.OpenInT3 => "Only opens the project in the T3 Code app on that machine. Nothing in the repository changes.",
+        AgentActionKind.StartT3Thread => "T3 Code makes a new worktree on a new branch, so the checked-out working tree is not touched. The agent refuses a branch that already exists. The thread then runs with the permissions T3 Code gives its threads on that machine, which is often full access: read the prompt before you start it.",
         _ => "",
     };
 
@@ -485,6 +565,8 @@ public static partial class AgentActions
         AgentActionKind.Clone => $"Clone {action.Url} into {action.RepoPath}",
         AgentActionKind.CleanBuildDirs => action.BuildDirs is { Count: 1 } ? $"Delete build output {action.BuildDirs[0]}" : $"Delete {action.BuildDirs?.Count} build folders",
         AgentActionKind.PullFastForward => $"Fast-forward {action.Branch} from {action.Remote}",
+        AgentActionKind.OpenInT3 => $"Open {action.RepoPath} in T3 Code",
+        AgentActionKind.StartT3Thread => $"Start a T3 thread \"{action.Title}\" on {action.NewBranch}",
         _ => action.Kind.ToString(),
     };
 
@@ -553,6 +635,41 @@ public static partial class AgentActions
     [GeneratedRegex(@"^[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^:]+$")]
     private static partial Regex ScpLike();
 
+    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$")]
+    private static partial Regex RefName();
+
+    /// <summary>A prompt is text: anything but NUL and the control characters that are not line breaks or tabs.</summary>
+    private static string? PromptProblem(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return "The prompt is empty.";
+        }
+
+        if (System.Text.Encoding.UTF8.GetByteCount(prompt) > MaxPromptBytes)
+        {
+            return $"The prompt is longer than {MaxPromptBytes / 1024} KB.";
+        }
+
+        return prompt.Any(c => char.IsControl(c) && c is not ('\n' or '\r' or '\t')) ? "The prompt contains control characters." : null;
+    }
+
+    private static string? TitleProblem(string title) =>
+        string.IsNullOrWhiteSpace(title) || title.Length > MaxTitleChars || title.Any(char.IsControl)
+            ? $"The thread title must be one line of 1 to {MaxTitleChars} characters."
+            : null;
+
+    /// <summary>
+    /// A base for a worktree: a branch, a remote-tracking branch, a tag or a commit, written plainly
+    /// (<c>origin/main</c>, <c>v1.2.0</c>, a sha). No revision syntax, nothing that could be read as an option.
+    /// The agent also asks git that it names a commit.
+    /// </summary>
+    private static string? RefProblem(string reference) =>
+        RefName().IsMatch(reference) && !reference.Contains("..", StringComparison.Ordinal) && !reference.EndsWith(".lock", StringComparison.Ordinal)
+            && !reference.EndsWith('/') && !reference.EndsWith('.') && !reference.Contains("//", StringComparison.Ordinal)
+            ? null
+            : $"'{reference}' is not a branch, tag or commit the agent will start a worktree from.";
+
     /// <summary>A conservative subset of <c>git check-ref-format</c>; the agent also asks git itself.</summary>
     private static string? BranchProblem(string name)
     {
@@ -596,4 +713,7 @@ public sealed record ActionResultRequest
     /// <summary>Git's output or the reason for refusing, truncated to <see cref="AgentActions.MaxOutputChars"/>.</summary>
     public string Output { get; init; } = "";
     public long DurationMs { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the thread T3 Code started, when it said. Older hubs ignore it.</summary>
+    public T3StartedThread? Thread { get; init; }
 }

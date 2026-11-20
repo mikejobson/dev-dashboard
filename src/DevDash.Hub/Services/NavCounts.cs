@@ -16,8 +16,11 @@ namespace DevDash.Hub.Services;
 /// </list>
 /// A count of zero is not shown.
 /// </summary>
-public sealed class NavCounts(GitHubStore github, FindingsService findings, SafetyService safety, Alerts.AlertService alerts, TimeProvider time)
+public sealed class NavCounts(GitHubStore github, FindingsService findings, SafetyService safety, Alerts.AlertService alerts, TimeProvider time, IssueStore? issues = null)
 {
+    /// <summary>Issues: the open issues of the repos the hub tracks (the Issues page's list).</summary>
+    public async Task<int> IssuesAsync(CancellationToken ct = default) => issues is null ? 0 : (await issues.GetAsync(ct)).All.Count();
+
     public async Task<int> AlertsAsync(CancellationToken ct = default) => (await alerts.OpenAsync(ct)).Count;
 
     public int Safety() => safety.Get().Count(r => r.Safety.Level == RiskLevel.High);

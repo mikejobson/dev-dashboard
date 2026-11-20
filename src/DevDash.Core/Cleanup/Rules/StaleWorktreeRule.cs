@@ -58,6 +58,11 @@ public sealed class StaleWorktreeRule : ICleanupRule
                 var branch = state.Branch;
                 var dirty = state.Dirty;
 
+                // T3 Code made it for a thread and removes it when the thread is archived: the agent will not
+                // remove it from under the thread, so no Run button, and the explanation says where to go instead.
+                var t3 = wt.T3Owned == true;
+                var t3Note = t3 ? " T3 Code made this worktree for a thread: archive the thread in T3 Code and it goes with it." : "";
+
                 // Look inside the worktree first. Removal is offered to the agent only for a worktree on a
                 // branch (the commits stay on the branch) that the scan did not see as dirty; git checks again.
                 FindingCommand[] remove =
@@ -65,7 +70,7 @@ public sealed class StaleWorktreeRule : ICleanupRule
                     Inspect("Uncommitted work in the worktree", GitCmd(wt.Path, "status --short --branch")),
                     Inspect("Its recent commits", GitCmd(wt.Path, "log --oneline -5")),
                     Fix("Remove the worktree", GitCmd(mainPath, $"worktree remove {Quote(wt.Path)}"),
-                        wt.Branch is not null && !dirty ? AgentAction.RemoveWorktree(mainPath, wt.Path) : null),
+                        wt.Branch is not null && !dirty && !t3 ? AgentAction.RemoveWorktree(mainPath, wt.Path) : null),
                 ];
 
                 if (state.Kind == WorktreeStaleKind.Merged)
@@ -75,14 +80,14 @@ public sealed class StaleWorktreeRule : ICleanupRule
                     yield return this.ForClone(repo, dirty ? FindingSeverity.Low : FindingSeverity.Medium,
                         $"Worktree for merged branch {branch!.Name}",
                         $"{wt.Path} has {branch.Name} checked out, which has nothing that is not already in {git.DefaultBranch}."
-                        + (dirty ? " It has uncommitted changes, so look before removing it." : ""),
+                        + (dirty ? " It has uncommitted changes, so look before removing it." : "") + t3Note,
                         remove, "merged", wt.Path).ActiveAt(Latest(branch.LastCommitDate, entry?.LastModified));
                 }
                 else if (state.Kind == WorktreeStaleKind.UpstreamGone)
                 {
                     yield return this.ForClone(repo, FindingSeverity.Medium,
                         $"Worktree for deleted branch {branch!.Name}",
-                        $"{wt.Path} has {branch.Name} checked out, and its upstream branch has been deleted on the remote.",
+                        $"{wt.Path} has {branch.Name} checked out, and its upstream branch has been deleted on the remote.{t3Note}",
                         remove, "gone", wt.Path).ActiveAt(Latest(branch.LastCommitDate, entry?.LastModified));
                 }
                 else if (state.LastActivity is { } last)
@@ -91,7 +96,7 @@ public sealed class StaleWorktreeRule : ICleanupRule
                         $"Idle worktree: {wt.Path}",
                         $"No activity for {DaysSince(now, last)} days"
                         + (wt.Branch is null ? " (detached HEAD)." : $" on {wt.Branch}.")
-                        + " Remove it if the work is finished; git refuses if it has uncommitted changes.",
+                        + " Remove it if the work is finished; git refuses if it has uncommitted changes." + t3Note,
                         remove, "idle", wt.Path).ActiveAt(last);
                 }
             }

@@ -5,6 +5,8 @@
 @inject RefreshBoard Refreshes
 @inject SafetyService SafetyRows
 @inject ActionBoard Actions
+@inject T3Starts Starts
+@inject NavigationManager Nav
 
 <PageTitle>@(_row?.Name ?? "Repo") · DevDash</PageTitle>
 
@@ -86,6 +88,22 @@ else
         </div>
     }
 
+    @if (ShowT3)
+    {
+        <h2 id="t3">T3 Code <span class="muted small">@(_t3Rows.Count == 0 ? "" : Fmt.Count(_t3Rows.Count, "thread"))</span></h2>
+        <div class="t3-bar">
+            <T3StartButton @ref="_ask" Targets="_t3Targets" RepoKey="@_row.Key" Class="run primary" Ask="@($"Ask Claude in T3 about {_row.Name}")" />
+            @foreach (var target in _t3Open)
+            {
+                <ActionButton Machine="target.Machine" Action="AgentAction.OpenInT3(target.Target.Entry.Path)"
+                              Label="@(_t3Open.Count == 1 ? "Open in T3" : $"Open in T3 · {target.Machine.Machine.Hostname}{(_t3Open.Count(t => t.Machine.MachineId == target.Machine.MachineId) > 1 ? " · " + target.Target.DisplayName : "")}")"
+                              Ask="@($"Open {target.Target.DisplayName} in T3 Code on {target.Machine.Machine.Hostname}?")" Confirm="Open" Class="run"
+                              What="@($"Open {target.Target.Entry.Path} in the T3 Code app on {target.Machine.Machine.Hostname}")" />
+            }
+        </div>
+        <T3ThreadList Rows="_t3Rows" Now="Now" Limit="10" Empty="No threads reported for this repo. A repo shows its threads when it is a T3 Code project of its own." />
+    }
+
     @if (_row.Kind == EntryKind.GitRepo)
     {
         <BranchMapView Clones="_row.Clones" PullRequests="_row.PullRequests" Now="Now" GitHubUrl="@_row.GitHub?.Url" Name="@_row.Clones.FirstOrDefault()?.Entry.Name" />
@@ -107,6 +125,15 @@ else
             }
         </h2>
         <PrList Items="_row.PullRequests" Now="Now" Clones="_clonesByKey" ShowRepo="false" Empty="No open pull request here is yours, assigned to you or waiting on your review." />
+        @foreach (var pr in _row.PullRequests.Where(p => p.Authored && p.Ci == CiState.Failure && !p.IsCrossRepository && p.HeadRef is not null))
+        {
+            <div class="t3-bar">
+                <span class="muted small">CI failing on #@pr.Number@(pr.FailedCheckName is { } check ? $" ({check})" : "")</span>
+                <T3StartButton Targets="_t3Targets" RepoKey="@_row.Key" Label="Fix in T3" Class="run"
+                               Ask="@($"Fix the failing CI on #{pr.Number} in T3")" Prompt="@T3Prompts.FixFailingCi(pr)"
+                               Title="@($"Fix CI on #{pr.Number}: {pr.Title}")" Branch="@($"t3/fix-ci-{pr.Number}")" Base="@($"origin/{pr.HeadRef}")" Origin="ci" />
+            </div>
+        }
     }
 
     @if (_row.Issues.Count > 0)
@@ -194,6 +221,15 @@ else
     @if (Pinned.Count > 0)
     {
         <h2 id="toolchains">Toolchains <span class="muted small">what this repo pins, and whether each machine has it</span></h2>
+        @foreach (var (clone, missing) in MissingPins)
+        {
+            <div class="t3-bar">
+                <span class="muted small">@clone.Machine.Machine.Hostname lacks @string.Join(", ", missing.Select(m => $"{ToolNames.Display(m.Pin.Tool)} {m.Pin.Version}"))</span>
+                <T3StartButton Targets="_t3Targets" RepoKey="@_row.Key" Label="Fix in T3" Class="run"
+                               Ask="Check the pinned toolchain in T3" Prompt="@T3Prompts.FixToolchain(_row.Name, clone.Machine.Machine.Hostname, missing)"
+                               Title="@($"Check the pinned toolchain of {_row.Name}")" Branch="t3/toolchain-pin" Origin="toolchain" />
+            </div>
+        }
         <div class="table-wrap">
             <table class="stack">
                 <thead><tr><th>Machine</th><th>Pinned</th><th>On that machine</th></tr></thead>
@@ -236,6 +272,15 @@ else
     @if (Checked.Count > 0)
     {
         <h2 id="dependencies">Dependencies <span class="muted small">from <code>dotnet list package</code> and <code>npm audit</code>, about once a day</span></h2>
+        @if (Checked.Select(c => c.Entry.Dependencies!).Where(h => h.VulnerableTotal > 0).OrderByDescending(h => h.Critical).ThenByDescending(h => h.High).FirstOrDefault() is { } vulnerable)
+        {
+            <div class="t3-bar">
+                <span class="muted small">@Fmt.Count(vulnerable.VulnerableTotal, "vulnerable package")</span>
+                <T3StartButton Targets="_t3Targets" RepoKey="@_row.Key" Label="Fix in T3" Class="run"
+                               Ask="Update the vulnerable packages in T3" Prompt="@T3Prompts.FixVulnerableDependencies(_row.Name, vulnerable)"
+                               Title="@($"Update vulnerable packages in {_row.Name}")" Branch="t3/fix-vulnerable-deps" Origin="deps" />
+            </div>
+        }
         <div class="table-wrap">
             <table class="stack">
                 <thead><tr><th>Machine</th><th>Packages</th><th>Known vulnerabilities</th><th>Outdated</th><th class="right">Checked</th></tr></thead>
@@ -420,6 +465,7 @@ else
                                 <td data-label="State">
                                     <div class="chips">
                                         @if (index == 0) { <span class="chip">main working tree</span> }
+                                        @if (wt.T3Owned == true) { <span class="chip info" title="T3 Code made this worktree for a thread, and removes it when the thread is archived">T3 Code</span> }
                                         @if (wt.Prunable) { <span class="chip danger" title="@wt.PrunableReason">prunable</span> }
                                         @if (wt.Locked) { <span class="chip muted">locked</span> }
                                     </div>
@@ -454,6 +500,36 @@ else
 
 @code {
     [SupplyParameterFromQuery] public string? Key { get; set; }
+
+    /// <summary><c>?ask=t3</c>, from the command palette: open the "Ask Claude in T3" dialog. It still has to be confirmed.</summary>
+    [SupplyParameterFromQuery] public string? Ask { get; set; }
+
+    private T3StartButton? _ask;
+    private IReadOnlyList<T3ThreadRow> _t3Rows = [];
+    private IReadOnlyList<T3Target> _t3Targets = [];
+    private IReadOnlyList<T3Target> _t3Open = [];
+
+    /// <summary>When any machine with a clone knows about T3 Code, or threads are reported.</summary>
+    private bool ShowT3 => _row is { Kind: EntryKind.GitRepo } && (_t3Rows.Count > 0 || _row.Clones.Any(c => c.Machine.Machine.T3 is not null));
+
+    /// <summary>Clones whose machine lacks a pinned toolchain, with what is missing.</summary>
+    private List<(CloneView Clone, IReadOnlyList<(ToolchainPin Pin, string Detail)> Missing)> MissingPins =>
+        Pinned.Select(c => (c, (IReadOnlyList<(ToolchainPin, string)>)ToolchainCheck.For(c.Entry, c.Machine.Machine).Where(x => x.Status == PinStatus.Missing).Select(x => (x.Pin, x.Detail)).ToList()))
+            .Where(x => x.Item2.Count > 0)
+            .ToList();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!Loaded || Ask != Palette.AskT3 || _ask is null)
+        {
+            return;
+        }
+
+        Ask = null;
+        await _ask.OpenAsync();
+        StateHasChanged();
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("ask", (string?)null), replace: true);
+    }
 
     private RepoRow? _row;
     private List<FindingView> _findings = [];
@@ -539,6 +615,9 @@ else
         await Refreshes.LoadAsync();
         await Actions.LoadAsync();
         _sync = SyncOffers.For(_row?.Clones ?? []);
+        _t3Rows = _row is null ? [] : T3View.ForRepo(_row, await Starts.RecentAsync());
+        _t3Targets = _row is null ? [] : Starts.Targets(_row);
+        _t3Open = _row is null ? [] : Starts.OpenTargets(_row);
         TickWhile(() => Refreshes.Ticking);
         if (_row is null)
         {

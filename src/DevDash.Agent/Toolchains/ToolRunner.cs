@@ -26,6 +26,9 @@ public sealed record ToolCommand(string FileName, IReadOnlyList<string> Argument
 
     /// <summary>Stop reading output after this many characters; the rest is dropped.</summary>
     public int MaxOutputChars { get; init; } = 4 * 1024 * 1024;
+
+    /// <summary>Text written to the program's standard input, which is then closed. Null: standard input is closed at once.</summary>
+    public string? StandardInput { get; init; }
 }
 
 /// <summary>
@@ -37,7 +40,7 @@ public interface IToolRunner
     Task<ToolResult> RunAsync(ToolCommand command, TimeSpan timeout, CancellationToken ct);
 }
 
-/// <summary>Starts the program directly with an argument list (no shell), no stdin, and a timeout that kills the whole process tree.</summary>
+/// <summary>Starts the program directly with an argument list (no shell), no stdin unless given, and a timeout that kills the whole process tree.</summary>
 public sealed class ProcessToolRunner : IToolRunner
 {
     public async Task<ToolResult> RunAsync(ToolCommand command, TimeSpan timeout, CancellationToken ct)
@@ -96,15 +99,16 @@ public sealed class ProcessToolRunner : IToolRunner
             }
         }
 
-        process.StandardInput.Close();
         var stdout = ReadAsync(process.StandardOutput, command.MaxOutputChars);
         var stderr = ReadAsync(process.StandardError, 64 * 1024);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
+        var stdin = WriteInputAsync(process.StandardInput, command.StandardInput, cts.Token);
         try
         {
             await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            await stdin.ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -122,6 +126,33 @@ public sealed class ProcessToolRunner : IToolRunner
         }
 
         return new ToolResult(process.ExitCode, await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false), false);
+    }
+
+    /// <summary>Writes the input (UTF-8, no byte order mark) while the output is being read, so neither side can block the other, then closes it.</summary>
+    private static async Task WriteInputAsync(StreamWriter writer, string? text, CancellationToken ct)
+    {
+        try
+        {
+            if (text is not null)
+            {
+                await writer.BaseStream.WriteAsync(new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text), ct).ConfigureAwait(false);
+                await writer.BaseStream.FlushAsync(ct).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            // The program exited without reading it all, or was stopped: its exit code says how that went.
+        }
+        finally
+        {
+            try
+            {
+                writer.Close();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+            }
+        }
     }
 
     /// <summary>Reads to the end so the child never blocks on a full pipe, keeping only the first <paramref name="max"/> characters.</summary>

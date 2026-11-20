@@ -1,0 +1,281 @@
+@page "/issues"
+@inherits LivePage
+@inject IssueStore IssueData
+@inject IssueSettingsStore SettingsStore
+@inject IssueWorker Worker
+@inject T3Starts Starts
+@inject RepoCatalog Catalog
+@inject GitHubStore GitHub
+@inject SnapshotStore Snapshots
+
+<PageTitle>Issues · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Issues</h1>
+        <p>Open GitHub issues of the repos you have cloned, and the T3 Code threads started for them.</p>
+    </div>
+    <div class="chips">
+        @if (_snapshot.PolledAt is { } polled)
+        {
+            <span class="chip muted" title="@Fmt.Date(polled)">checked @Fmt.Ago(polled, Now)</span>
+        }
+        <a class="btn" href="issues#settings">Settings</a>
+    </div>
+</div>
+
+@if (!GitHub.Status.Enabled)
+{
+    <div class="banner info">GitHub polling is switched off, so no issues are listed.</div>
+}
+else if (_snapshot.PolledAt is null)
+{
+    <div class="banner info">@(GitHub.HasData ? "Waiting for the first issue poll…" : "Waiting for the first GitHub poll, which says which repos to look at…")</div>
+}
+@if (_snapshot.Error is { } pollError)
+{
+    <div class="banner danger">The last issue poll failed: @pollError</div>
+}
+@foreach (var repo in _snapshot.Repos.Values.Where(r => r.Error is not null))
+{
+    <div class="banner warn">@repo.Repo: @repo.Error</div>
+}
+
+<div class="toolbar">
+    <input type="search" placeholder="Filter by title, label or author" aria-label="Filter issues" @bind="_query" @bind:event="oninput" />
+    <select @bind="_repoFilter" aria-label="Repository">
+        <option value="">All repos (@_snapshot.Repos.Count)</option>
+        @foreach (var repo in _snapshot.Repos.Values.OrderBy(r => r.Repo, StringComparer.OrdinalIgnoreCase))
+        {
+            <option value="@repo.RepoKey">@repo.Repo (@repo.Issues.Count)</option>
+        }
+    </select>
+    <label class="check"><input type="checkbox" @bind="_withThreads" /> with a thread</label>
+</div>
+
+@{ var shown = Shown.ToList(); }
+@if (shown.Count == 0)
+{
+    <p class="muted">@(_rows.Count == 0 ? "No open issues." : "Nothing matches.")</p>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="stack">
+            <thead>
+                <tr><th>Issue</th><th>Opened</th><th class="right">Comments</th><th>T3 thread</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var row in shown.Take(MaxRows))
+                {
+                    var issue = row.Issue;
+                    var (statusText, statusClass, statusTitle) = T3View.Status(row);
+                    <tr @key="(issue.RepoKey, issue.Number)">
+                        <td class="cell-main">
+                            <a class="title-link" href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span>
+                            <div class="chips issue-labels">
+                                <a class="chip muted" href="@Fmt.RepoUrl(issue.RepoKey)">@issue.Repo</a>
+                                @foreach (var label in issue.Labels)
+                                {
+                                    <span class="chip @(string.Equals(label, _settings.Label, StringComparison.OrdinalIgnoreCase) ? "info" : "muted")">@label</span>
+                                }
+                            </div>
+                        </td>
+                        <td data-label="Opened" class="nowrap sub" title="@Fmt.Date(issue.CreatedAt)">@(issue.Author ?? "unknown") · @Fmt.Ago(issue.CreatedAt, Now)</td>
+                        <td data-label="Comments" class="right nowrap sub">@issue.Comments</td>
+                        <td data-label="T3 thread">
+                            <div class="chips">
+                                @if (statusText.Length > 0)
+                                {
+                                    var link = row.Live?.Link ?? row.Latest?.Link;
+                                    @if (link is not null)
+                                    {
+                                        <a class="chip @statusClass" href="@link" target="_blank" rel="noopener" title="@statusTitle">@statusText</a>
+                                    }
+                                    else
+                                    {
+                                        <span class="chip @statusClass" title="@statusTitle">@statusText</span>
+                                    }
+                                    @foreach (var pr in (row.Live?.PullRequests ?? []).Where(p => p.Url is not null))
+                                    {
+                                        <a class="chip info" href="@pr.Url" target="_blank" rel="noopener">PR@(pr.Number is { } n ? $" #{n}" : "")</a>
+                                    }
+                                }
+                            </div>
+                            @if (row.Latest is { } latest && (latest.Reason is not null || latest.WriteBack is not null) && latest.Status != IssueThreadStatus.Started)
+                            {
+                                <div class="sub">@latest.Reason</div>
+                            }
+                            @if (row.Latest?.WriteBack is { } writeBack)
+                            {
+                                <div class="sub">GitHub: @writeBack</div>
+                            }
+                        </td>
+                        <td class="right cell-buttons">
+                            <T3StartButton Targets="TargetsFor(issue.RepoKey)" RepoKey="@issue.RepoKey" Issue="new IssueRef(issue.RepoKey, issue.Number)" Again="row.Started"
+                                           Label="@(row.Started ? "Start again" : "Start in T3")" Ask="@($"Start a T3 thread for {issue.Repo}#{issue.Number}")"
+                                           Origin="issue" Prepare="t => PrepareAsync(issue, t, row.Started)" Warning="@WarningFor(row)" OnStarted="_ => ReloadAsync()" />
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    @if (shown.Count > MaxRows)
+    {
+        <p class="muted small">Showing the @MaxRows most recently updated of @shown.Count. Filter to see the rest.</p>
+    }
+}
+
+<h2 id="settings">Settings</h2>
+<div class="card issue-settings">
+    <div>
+        <h3>Prompt template</h3>
+        <p class="muted small">
+            What a thread for an issue is told. Placeholders: @string.Join(", ", T3Prompts.Placeholders.Select(p => "{{" + p + "}}")).
+            The issue's title, body, labels and comments are filled in as they are on GitHub: keep them inside the UNTRUSTED markers so the thread knows not to take orders from them.
+        </p>
+        <textarea class="t3-template" @bind="_template" aria-label="Prompt template" spellcheck="false"></textarea>
+        <div class="t3-bar"><button type="button" @onclick="ResetTemplate">Back to the default</button></div>
+    </div>
+
+    <div>
+        <h3>Start a thread when an issue is labelled</h3>
+        <p class="muted small">
+            Off unless switched on, and then only for the repos ticked below. A thread usually runs with full access to its machine, so the label is not enough on its own:
+            it must have been added by an allowed GitHub login, and on a public repo the issue must also have been written by one. Otherwise the issue waits here for a manual start, with the reason.
+            Never more than one automatic thread per issue.
+        </p>
+        <label class="check"><input type="checkbox" @bind="_edit.AutoStart" /> On</label>
+        <div class="t3-form">
+            <div class="t3-row">
+                <label>Label <input type="text" @bind="_edit.Label" /></label>
+                <label>
+                    Allowed GitHub logins <span class="muted small">(comma-separated; empty: @(GitHub.Current.ViewerLogin ?? "the token's own user"))</span>
+                    <input type="text" @bind="_edit.AllowedLogins" placeholder="@(GitHub.Current.ViewerLogin ?? "")" />
+                </label>
+            </div>
+        </div>
+        @if (_tracked.Count == 0)
+        {
+            <p class="muted small">No tracked repos yet: they are the GitHub repos agents report clones of.</p>
+        }
+        @foreach (var (key, _) in _tracked)
+        {
+            var repo = Repo(key);
+            var machines = Worker.MachinesFor(key);
+            <div class="repo-opt">
+                <label class="check"><input type="checkbox" checked="@repo.AutoStart" @onchange="e => repo.AutoStart = e.Value is true" /> @(_snapshot.Repos.GetValueOrDefault(key)?.Repo ?? key)</label>
+                <select aria-label="Preferred machine" value="@(repo.PreferredMachine ?? "")" @onchange="e => repo.PreferredMachine = e.Value?.ToString() is { Length: > 0 } m ? m : null">
+                    <option value="">most recently seen machine</option>
+                    @foreach (var machine in machines.DistinctBy(m => m.MachineId))
+                    {
+                        <option value="@machine.MachineId">@machine.Hostname</option>
+                    }
+                </select>
+            </div>
+        }
+    </div>
+
+    <div>
+        <h3>Tell GitHub</h3>
+        <p class="muted small">Off by default. Only for threads the label started, once they have started. The comment names no machine and has no link.</p>
+        <label class="check"><input type="checkbox" @bind="_edit.CommentOnStart" /> Comment "@IssueSettings.StartedComment"</label>
+        <div class="t3-bar">
+            <label class="check"><input type="checkbox" @bind="_edit.SwapLabel" /> Replace the label with</label>
+            <input type="text" @bind="_edit.StartedLabel" aria-label="Label once started" />
+        </div>
+    </div>
+
+    @if (_saved is not null)
+    {
+        <div class="banner info">@_saved</div>
+    }
+    <div class="t3-bar"><button type="button" class="primary" @onclick="SaveAsync">Save settings</button></div>
+</div>
+
+@code {
+    private const int MaxRows = 200;
+
+    private IssueSnapshot _snapshot = IssueSnapshot.Empty;
+    private IReadOnlyList<IssueRow> _rows = [];
+    private IssueSettings _settings = new();
+    private IssueSettings _edit = new();
+    private string _template = T3Prompts.DefaultIssueTemplate;
+    private IReadOnlyList<(string Key, bool? IsPrivate)> _tracked = [];
+    private Dictionary<string, RepoRow> _repos = new(StringComparer.OrdinalIgnoreCase);
+    private string _query = "", _repoFilter = "";
+    private bool _withThreads, _editing;
+    private string? _saved;
+
+    private IEnumerable<IssueRow> Shown => _rows
+        .Where(r => _repoFilter.Length == 0 || string.Equals(r.Issue.RepoKey, _repoFilter, StringComparison.OrdinalIgnoreCase))
+        .Where(r => !_withThreads || r.Threads.Count > 0)
+        .Where(r => _query.Trim().Length == 0 || _query.Split(' ', StringSplitOptions.RemoveEmptyEntries).All(w =>
+            r.Issue.Title.Contains(w, StringComparison.OrdinalIgnoreCase)
+            || r.Issue.Repo.Contains(w, StringComparison.OrdinalIgnoreCase)
+            || (r.Issue.Author ?? "").Contains(w, StringComparison.OrdinalIgnoreCase)
+            || r.Issue.Labels.Any(l => l.Contains(w, StringComparison.OrdinalIgnoreCase))
+            || $"#{r.Issue.Number}" == w));
+
+    protected override async Task LoadAsync()
+    {
+        _snapshot = await IssueData.GetAsync();
+        _rows = T3View.Issues(_snapshot, await Starts.IssueThreadsAsync(), Snapshots.Machines);
+        _settings = await SettingsStore.GetAsync();
+        _repos = (await Catalog.GetAsync()).GroupBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        _tracked = Worker.TrackedRepos();
+
+        // A live reload must not throw away settings being edited.
+        if (!_editing)
+        {
+            _edit = _settings.Copy();
+            _template = _settings.Template ?? T3Prompts.DefaultIssueTemplate;
+            _editing = true;
+        }
+    }
+
+    private IReadOnlyList<T3Target> TargetsFor(string repoKey) =>
+        _repos.TryGetValue(repoKey, out var row) ? Starts.Targets(row) : [];
+
+    private IssueRepoSetting Repo(string key)
+    {
+        if (_edit.For(key) is { } existing)
+        {
+            return existing;
+        }
+
+        var added = new IssueRepoSetting { RepoKey = key };
+        _edit.Repos.Add(added);
+        return added;
+    }
+
+    private Task<T3StartRequest?> PrepareAsync(TrackedIssue issue, T3Target target, bool again) =>
+        Worker.BuildRequestAsync(issue, _settings.Template, target.Machine.MachineId, target.Target.Entry.Path, automatic: false, CancellationToken.None, again);
+
+    /// <summary>What to tell the person starting it by hand: why the trigger did not, and who wrote the text.</summary>
+    private string? WarningFor(IssueRow row)
+    {
+        var allowed = _settings.AllowedSet(GitHub.Current.ViewerLogin);
+        var reason = row.Latest is { Status: IssueThreadStatus.NeedsManualStart } decision ? $"Not started automatically: {decision.Reason}. " : "";
+        var stranger = row.Repo.IsPrivate != true && (row.Issue.Author is null || !allowed.Contains(row.Issue.Author))
+            ? $"This issue was written by {row.Issue.Author ?? "an unknown user"}{(row.Repo.IsPrivate is null ? "" : " on a public repo")}: read the prompt before starting, as the thread will be able to act on this machine."
+            : "";
+        var text = (reason + stranger).Trim();
+        return text.Length == 0 ? null : text;
+    }
+
+    private void ResetTemplate() => _template = T3Prompts.DefaultIssueTemplate;
+
+    private async Task SaveAsync()
+    {
+        _edit.Template = _template;
+        await SettingsStore.SaveAsync(_edit);
+        _settings = await SettingsStore.GetAsync();
+        _edit = _settings.Copy();
+        _saved = _settings.AutoStart
+            ? $"Saved. The label trigger is on for {Fmt.Count(_settings.Repos.Count(r => r.AutoStart), "repo")}; it runs after each issue poll."
+            : "Saved. The label trigger is off.";
+        Worker.RequestPoll();
+    }
+}

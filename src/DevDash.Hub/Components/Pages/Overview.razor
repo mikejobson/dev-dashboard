@@ -6,6 +6,7 @@
 @inject FindingsService Findings
 @inject AgentUpdates Updates
 @inject NavCounts Counts
+@inject T3Starts Starts
 
 <PageTitle>Overview · DevDash</PageTitle>
 
@@ -203,6 +204,14 @@
             }
         </div>
 
+        @if (_t3Shown)
+        {
+            <h2>T3 threads <span class="muted small">@(_t3.Count == 0 ? "" : "running or waiting for you")</span></h2>
+            <div class="card">
+                <T3ThreadList Rows="_t3" Now="Now" ShowRepo="true" Limit="8" Empty="No T3 thread is running or waiting for you." />
+            </div>
+        }
+
         <h2>GitHub</h2>
         <div class="card">
             @if (!GitHub.HasData)
@@ -288,6 +297,8 @@
     private int _onlyCopy;
     private int _notCloned;
     private int _behind;
+    private IReadOnlyList<T3ThreadRow> _t3 = [];
+    private bool _t3Shown;
 
     protected override async Task LoadAsync()
     {
@@ -295,6 +306,8 @@
         _online = _machines.Count(Snapshots.IsOnline);
         _behind = Updates.BehindCount();
         _repos = await Catalog.GetAsync();
+        _t3Shown = _machines.Any(m => m.Machine.T3 is { Available: true });
+        _t3 = _t3Shown ? T3View.All(_machines, await Starts.RecentAsync()).Where(r => r.State is T3ThreadState.NeedsInput or T3ThreadState.Running).ToList() : [];
         _dirty = _repos.Count(r => r.AnyDirty);
         LoadActivity();
         _onlyCopy = Counts.Safety();

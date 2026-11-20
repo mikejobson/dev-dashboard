@@ -113,6 +113,22 @@ public class StaleWorktreeRuleTests
     }
 
     [Fact]
+    public void A_worktree_T3_Code_made_is_reported_but_left_to_T3_to_remove()
+    {
+        var git = WithWorktrees(
+            new WorktreeInfo { Path = "/home/me/.t3/worktrees/widget/t3-1a2b", Branch = "done", T3Owned = true },
+            new WorktreeInfo { Path = "/wt/done", Branch = "done" });
+
+        var findings = _rule.Evaluate(Context(Machine("mac", Repo("widget", git)))).ToList();
+
+        var t3 = Assert.Single(findings, f => f.Title.Contains("merged", StringComparison.Ordinal) && f.Commands.Any(c => c.Command.Contains(".t3", StringComparison.Ordinal)));
+        Assert.Null(Fix(t3).Action); // no Run button: the agent refuses it too
+        Assert.Contains("archive the thread in T3 Code", t3.Explanation);
+        var mine = Assert.Single(findings, f => f.Commands.Any(c => c.Command.Contains("/wt/done", StringComparison.Ordinal)));
+        Assert.NotNull(Fix(mine).Action);
+    }
+
+    [Fact]
     public void A_single_working_tree_has_nothing_to_report() =>
         Assert.Empty(_rule.Evaluate(Context(Machine("mac", Repo("widget")))));
 

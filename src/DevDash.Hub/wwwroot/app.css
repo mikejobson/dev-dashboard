@@ -929,3 +929,22 @@ label.field { grid-template-columns: minmax(0, 1fr); }
 .pin-row + .pin-row { margin-top: 4px; }
 .dep-names { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
 .dep-names a { margin-left: 5px; }
+
+/* ---- T3 Code threads and issues (0.7.0) ---- */
+.t3-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
+.t3-form { display: grid; gap: 10px; margin: 12px 0; }
+.t3-form label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
+.t3-form input[type=text], .t3-form select { min-width: 0; width: 100%; }
+.t3-form textarea, textarea.t3-template {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font: 12.5px/1.45 var(--mono, ui-monospace, monospace); width: 100%; min-height: 220px; resize: vertical;
+}
+.t3-form .t3-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.t3-thread-title { overflow-wrap: anywhere; }
+.issue-labels .chip { font-size: 11.5px; }
+.issue-settings { display: grid; gap: 12px; }
+.issue-settings .repo-opt { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.issue-settings .repo-opt select { min-width: 160px; }
+@media (max-width: 640px) {
+    .t3-form .t3-row { grid-template-columns: minmax(0, 1fr); }
+}

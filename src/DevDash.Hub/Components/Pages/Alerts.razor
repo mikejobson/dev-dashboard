@@ -159,6 +159,12 @@
             <label class="check"><input type="checkbox" @bind="_edit.Triggers.ActionFailed.Enabled" /> An agent action fails</label>
         </div>
         <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.T3NeedsInput.Enabled" /> A T3 thread DevDash started needs input</label>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.T3Done.Enabled" /> A T3 thread DevDash started opens a pull request or settles</label>
+        </div>
+        <div class="alert-trigger">
             <label class="check"><input type="checkbox" @bind="_edit.Triggers.DailyDigest.Enabled" /> A daily digest</label>
             <span class="alert-with">at <input type="text" class="time" @bind="_edit.Triggers.DailyDigest.Time" placeholder="08:00" aria-label="Time of day" /></span>
         </div>
@@ -375,7 +381,7 @@
     private static string KindClass(string trigger) => trigger switch
     {
         AlertTriggers.AtRisk or AlertTriggers.Diverged or AlertTriggers.CiFailed => "danger",
-        AlertTriggers.MachineOffline or AlertTriggers.ActionFailed => "warn",
+        AlertTriggers.MachineOffline or AlertTriggers.ActionFailed or AlertTriggers.T3NeedsInput => "warn",
         _ => "muted",
     };
 

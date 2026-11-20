@@ -134,6 +134,9 @@ public sealed class RepoScanner
         branches = checkedBranches;
 
         var worktrees = WorktreeListParser.Parse((await Run("worktree", "list", "--porcelain").ConfigureAwait(false)).StdOut);
+
+        // T3 Code's own worktrees (~/.t3/worktrees/…) are reported here, on the repository they belong to, and marked as T3's.
+        worktrees = T3Code.T3Locator.MarkOwned(worktrees, _options.CurrentValue.T3.WorktreesFolder());
         var stashes = StashListParser.Parse((await Run("stash", "list", "--format=" + StashListParser.Format).ConfigureAwait(false)).StdOut);
 
         // The commit each stash was made on, so the branch map can pin it to a commit.

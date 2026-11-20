@@ -14,6 +14,9 @@ public sealed class DevDashDbContext(DbContextOptions<DevDashDbContext> options)
     public DbSet<AlertSettingEntity> AlertSettings => Set<AlertSettingEntity>();
     public DbSet<AlertStateEntity> AlertStates => Set<AlertStateEntity>();
     public DbSet<AlertDeliveryEntity> AlertDeliveries => Set<AlertDeliveryEntity>();
+    public DbSet<T3ThreadEntity> T3Threads => Set<T3ThreadEntity>();
+    public DbSet<IssueThreadEntity> IssueThreads => Set<IssueThreadEntity>();
+    public DbSet<Mcp.McpTokenEntity> McpTokens => Set<Mcp.McpTokenEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -79,6 +82,10 @@ public sealed class DevDashDbContext(DbContextOptions<DevDashDbContext> options)
             e.Property(d => d.Channel).HasMaxLength(32);
             e.Property(d => d.Trigger).HasMaxLength(32);
         });
+
+        T3ThreadEntity.Configure(modelBuilder);
+        IssueThreadEntity.Configure(modelBuilder);
+        modelBuilder.Entity<Mcp.McpTokenEntity>(Mcp.McpTokenEntity.Configure);
     }
 }
 

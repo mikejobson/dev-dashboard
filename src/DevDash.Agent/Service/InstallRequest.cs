@@ -60,6 +60,9 @@ public sealed record InstallRequest
                 case "--no-deps":
                     settings["Dependencies:Enabled"] = "false";
                     break;
+                case "--no-t3":
+                    settings["T3:Enabled"] = "false";
+                    break;
                 case "--enable-actions":
                     settings["Actions:Enabled"] = "true";
                     break;

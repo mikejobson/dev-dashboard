@@ -38,11 +38,14 @@ public sealed class MachineScanner
     private readonly Toolchains.ToolchainService? _toolchains;
     private readonly Dependencies.DependencyCache? _dependencies;
     private readonly Dependencies.DependencyTargets? _dependencyTargets;
+    private readonly T3Code.T3Service? _t3;
 
     public MachineScanner(
         RepoScanner repos, SizeCache sizes, IOptionsMonitor<AgentOptions> options, ILogger<MachineScanner> logger, TimeProvider? time = null,
-        Toolchains.ToolchainService? toolchains = null, Dependencies.DependencyCache? dependencies = null, Dependencies.DependencyTargets? dependencyTargets = null)
+        Toolchains.ToolchainService? toolchains = null, Dependencies.DependencyCache? dependencies = null, Dependencies.DependencyTargets? dependencyTargets = null,
+        T3Code.T3Service? t3 = null)
     {
+        _t3 = t3;
         _toolchains = toolchains;
         _dependencies = dependencies;
         _dependencyTargets = dependencyTargets;
@@ -92,13 +95,21 @@ public sealed class MachineScanner
         // The background dependency checks work through whatever the latest full scan found.
         _dependencyTargets?.Offer(DevDash.Core.RepoIdentity.Flatten(entries).Where(e => e.Kind == EntryKind.GitRepo).Select(e => e.Path));
 
+        // T3 Code: each repository's own project and threads. Read-only calls; a T3 that is missing or not running only leaves them out.
+        IReadOnlyList<DevEntry> scanned = entries;
+        if (_t3 is not null && await _t3.InfoAsync(ct).ConfigureAwait(false) is { } t3Info)
+        {
+            scanned = await _t3.EnrichAsync(scanned, fullScan: true, ct).ConfigureAwait(false);
+            machine = machine with { T3 = _t3.Current ?? t3Info, AcceptsT3 = options.Actions.Enabled && t3Info.Available };
+        }
+
         return new MachineSnapshot
         {
             Machine = machine,
             ScannedAt = _time.GetUtcNow(),
             ScanDurationMs = stopwatch.ElapsedMilliseconds,
             Roots = roots,
-            Entries = WithOneGraphPerRepository(entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
+            Entries = WithOneGraphPerRepository(scanned.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
         };
     }
 
@@ -164,6 +175,11 @@ public sealed class MachineScanner
         if (request.Sizes != SizeMode.CachedOnly)
         {
             _sizes.Save();
+        }
+
+        if (_t3 is not null)
+        {
+            entry = (await _t3.EnrichAsync([entry], fullScan: false, ct).ConfigureAwait(false))[0];
         }
 
         return entry;

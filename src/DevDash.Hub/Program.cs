@@ -7,7 +7,9 @@ using DevDash.Hub.Auth;
 using DevDash.Hub.Components;
 using DevDash.Hub.Data;
 using DevDash.Hub.GitHub;
+using DevDash.Hub.Mcp;
 using DevDash.Hub.Services;
+using DevDash.Hub.T3;
 using DevDash.Hub.Updates;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
@@ -94,6 +96,9 @@ builder.Services.AddSingleton<GitHubStore>();
 builder.Services.AddSingleton<GitHubPoller>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<GitHubPoller>());
 
+// ---- T3 Code threads and GitHub issues (0.7.0) ---------------------------------------------------
+builder.Services.AddT3Integration();
+
 // ---- alerts --------------------------------------------------------------------------------------
 // No request logging for this client: the addresses it posts to are secrets (a webhook id, an ntfy topic).
 builder.Services.AddHttpClient<AlertSender>(c => c.Timeout = TimeSpan.FromSeconds(30)).RemoveAllLoggers();
@@ -107,6 +112,9 @@ builder.Services.AddSingleton<ReleaseStore>();
 builder.Services.AddSingleton<ReleasePoller>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReleasePoller>());
 builder.Services.AddSingleton<AgentUpdates>();
+
+// ---- MCP server for Claude (§19) ------------------------------------------------------------------
+builder.Services.AddDevDashMcp();
 
 builder.Services.ConfigureHttpJsonOptions(o =>
 {
@@ -144,14 +152,16 @@ if (!app.Environment.IsDevelopment())
 
 // Friendly not-found page for browsers. API and agent calls keep their plain status codes.
 app.UseWhen(
-    context => !context.Request.Path.StartsWithSegments("/api"),
+    context => !context.Request.Path.StartsWithSegments("/api") && !context.Request.Path.StartsWithSegments("/mcp"),
     branch => branch.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true));
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 app.UseAntiforgery();
 
 app.MapStaticAssets().AllowAnonymous();
 app.MapDevDashApi();
+app.MapDevDashMcp();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 

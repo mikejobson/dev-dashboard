@@ -337,8 +337,10 @@ public static class RepoSafety
         var linked = git.IsLinkedWorktree ? 0 : git.Worktrees.Skip(1).Count(w => !w.Prunable);
         if (linked > 0)
         {
+            var t3 = git.Worktrees.Skip(1).Count(w => !w.Prunable && w.T3Owned == true);
             reasons.Add(Reason(SafetyReasonKind.LinkedWorktrees, SafetyEffect.Blocker,
-                Plural(linked, "linked worktree") + (linked == 1 ? " uses" : " use") + " this repository",
+                Plural(linked, "linked worktree") + (linked == 1 ? " uses" : " use") + " this repository"
+                    + (t3 == 0 ? "" : t3 == linked ? " (made by T3 Code)" : $" ({t3} made by T3 Code)"),
                 count: linked, names: git.Worktrees.Skip(1).Where(w => !w.Prunable).Select(w => w.Path).Take(SafetyFacts.MaxNames).ToList()));
         }
     }

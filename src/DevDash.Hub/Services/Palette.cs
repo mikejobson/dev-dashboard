@@ -1,3 +1,4 @@
+using DevDash.Contracts;
 using DevDash.Core.GitHub;
 
 namespace DevDash.Hub.Services;
@@ -19,6 +20,12 @@ public enum PaletteCommand
 
     /// <summary>Ask the agents in <see cref="PaletteItem.Targets"/> to rescan now. Read-only apart from a fetch, so it is not confirmed, as on the pages.</summary>
     Refresh,
+
+    /// <summary>
+    /// Open <see cref="PaletteItem.T3Path"/> in the T3 Code app on <see cref="PaletteItem.T3Machine"/>. It only
+    /// opens a window, so it is queued (and recorded, with who asked) without a confirmation, like a refresh.
+    /// </summary>
+    OpenInT3,
 }
 
 /// <summary>One row of the command palette.</summary>
@@ -36,6 +43,10 @@ public sealed record PaletteItem
     public IReadOnlyList<string?> Keywords { get; init; } = [];
     public PaletteCommand Command { get; init; }
     public IReadOnlyList<RefreshTarget> Targets { get; init; } = [];
+
+    /// <summary><see cref="PaletteCommand.OpenInT3"/>: the machine and the working tree.</summary>
+    public MachineView? T3Machine { get; init; }
+    public string? T3Path { get; init; }
 }
 
 /// <summary>
@@ -56,6 +67,7 @@ public static class Palette
 
     public const string AskRemoveSafe = "remove-safe";
     public const string AskUpdateAll = "update-all";
+    public const string AskT3 = "t3";
 
     public static IReadOnlyList<PaletteItem> Pages { get; } =
     [
@@ -64,6 +76,7 @@ public static class Palette
         Page("github", "GitHub", "github", "Pull requests, issues and recent org activity", "prs", "pull requests", "issues", "reviews"),
         Page("cleanup", "Cleanup", "cleanup", "Findings worth tidying up", "findings", "tidy"),
         Page("safety", "Safety", "safety", "What exists on one machine only, and what is safe to remove", "at risk", "remove", "only copy"),
+        Page("issues", "Issues", "issues", "Open GitHub issues of your repos, and the T3 threads started for them", "bugs", "t3", "label", "trigger"),
         Page("alerts", "Alerts", "alerts", "Channels, triggers and the delivery log", "notifications", "ntfy", "webhook"),
         Page("machines", "Machines", "machines", "Agents, toolchains, actions and API keys", "agents", "keys", "toolchains", "sdks"),
     ];
@@ -112,7 +125,8 @@ public static class Palette
         IReadOnlyList<MachineView> machines,
         Func<MachineView, bool> canRefresh,
         int safeToRemove,
-        int updatable)
+        int updatable,
+        Func<MachineView, AgentActionKind, bool>? canDo = null)
     {
         var items = new List<PaletteItem>(Pages);
 
@@ -149,6 +163,38 @@ public static class Palette
                     Command = PaletteCommand.Refresh,
                     Targets = targets,
                 });
+
+                // T3 Code: open the clone in the app (queued at once), or open the repo page's "Ask Claude" dialog.
+                if (canDo is not null && group.FirstOrDefault(c => c.Entry.Kind == EntryKind.GitRepo && c.Git is { IsLinkedWorktree: false }) is { } t3Clone)
+                {
+                    if (canDo(machine, AgentActionKind.OpenInT3))
+                    {
+                        items.Add(new PaletteItem
+                        {
+                            Id = $"t3-open:{row.Key.ToLowerInvariant()}@{machine.MachineId.ToLowerInvariant()}",
+                            Kind = PaletteKind.Action,
+                            Title = $"Open {row.Name} in T3 on {machine.Machine.Hostname}",
+                            Detail = "Opens the project in the T3 Code app on that machine",
+                            Keywords = [row.Owner, "t3", "t3 code", "claude", "app"],
+                            Command = PaletteCommand.OpenInT3,
+                            T3Machine = machine,
+                            T3Path = t3Clone.Entry.Path,
+                        });
+                    }
+
+                    if (canDo(machine, AgentActionKind.StartT3Thread) && !items.Any(i => i.Id == "t3-ask:" + row.Key.ToLowerInvariant()))
+                    {
+                        items.Add(new PaletteItem
+                        {
+                            Id = "t3-ask:" + row.Key.ToLowerInvariant(),
+                            Kind = PaletteKind.Action,
+                            Title = $"Ask Claude in T3 about {row.Name}…",
+                            Detail = "Opens the repo page's dialog; nothing starts until you confirm there",
+                            Url = hit.Url + "&ask=" + AskT3,
+                            Keywords = [row.Owner, "t3", "claude", "thread", "start"],
+                        });
+                    }
+                }
 
                 // "Fetch all" is for what has somewhere to fetch from.
                 if (group.Any(c => c.Git is { Remotes.Count: > 0 }))

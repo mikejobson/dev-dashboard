@@ -26,7 +26,7 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
           devdash-agent install|uninstall   Run as a background service; see `devdash-agent install --help`
 
         Options:
-          --root <path>       Folder to scan; repeat for several (default ~/Developer)
+          --root <path>       Folder to scan; repeat for several (default ~/Developer, and ~/.t3/projects when it exists)
           --hub-url <url>     Hub base URL (default http://localhost:5210)
           --api-key <key>     Agent API key
           --api-key-file <f>  File containing the API key
@@ -35,6 +35,7 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
           --sizes             Measure folder sizes now instead of when they are due
           --no-watch          Do not watch for file changes between scans
           --no-deps           Do not run `dotnet list package` / `npm audit` in the background (on by default, once a day per repo)
+          --no-t3             Do not look for T3 Code: no threads in the snapshot, no T3 actions, ~/.t3/projects not scanned
           --enable-actions    Let the dashboard queue allowlisted git fixes for this machine (off by default)
           --updates <mode>    Self-update: off, notify (default: when asked from the dashboard) or auto
 
@@ -83,6 +84,9 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
                     break;
                 case "--no-deps":
                     overrides["Agent:Dependencies:Enabled"] = "false";
+                    break;
+                case "--no-t3":
+                    overrides["Agent:T3:Enabled"] = "false";
                     break;
                 case "--enable-actions":
                     overrides["Agent:Actions:Enabled"] = "true";

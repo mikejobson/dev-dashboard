@@ -25,6 +25,8 @@ public sealed class HubOptions
     public string PublicUrl { get; set; } = "";
 
     public Alerts.AlertOptions Alerts { get; set; } = new();
+
+    public Mcp.McpOptions Mcp { get; set; } = new();
 }
 
 /// <summary>Agent updates: knowing the latest release, and asking agents to move to it.</summary>

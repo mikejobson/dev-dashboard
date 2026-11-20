@@ -6,6 +6,7 @@ using DevDash.Agent.Git;
 using DevDash.Agent.Logging;
 using DevDash.Agent.Scanning;
 using DevDash.Agent.Service;
+using DevDash.Agent.T3Code;
 using DevDash.Agent.Updates;
 using DevDash.Contracts;
 using Microsoft.Extensions.Configuration;
@@ -85,6 +86,7 @@ builder.Services.AddSingleton<FetchService>();
 builder.Services.AddSingleton<RepoScanner>();
 builder.Services.AddSingleton<SizeCache>(_ => new SizeCache());
 builder.Services.AddToolchains(); // what is installed, what each repo pins, and the last dependency results
+builder.Services.AddT3Code(); // T3 Code's threads per repo, and the actions that open it or start a thread (Agent:T3:Enabled)
 builder.Services.AddSingleton<MachineScanner>();
 builder.Services.AddHttpClient<HubClient>(c => c.Timeout = TimeSpan.FromSeconds(60));
 
@@ -181,6 +183,7 @@ switch (cli.Command)
         Console.Out.WriteLine($"toolchains {(options.Toolchains.Enabled ? $"reported, checked every {options.Toolchains.IntervalHours} h" : "off")}");
         Console.Out.WriteLine($"deps       {(options.Dependencies.Enabled ? $"dotnet list package and npm audit, each repo every {options.Dependencies.IntervalHours} h (never restores or installs)" : "off")}");
         Console.Out.WriteLine($"actions    {(options.Actions.Enabled ? "on (allowlisted fixes queued from the dashboard)" : "off (report only)")}");
+        Console.Out.WriteLine($"t3         {(options.T3.Enabled ? $"on (threads reported; T3 home {options.T3.ResolveHome()})" : "off")}");
         Console.Out.WriteLine($"updates    {UpdateCli.DescribeMode(options.Updates, updateContext)}");
         Console.Out.WriteLine($"release key {updateContext.Trust.Describe()}");
         if (UpdateCli.DescribeState(updateContext) is { } updateState)

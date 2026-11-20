@@ -42,7 +42,7 @@ Useful agent commands (`dotnet run --project src/DevDash.Agent -- <command>`):
 | `--version` | Prints the agent version. |
 
 Options: `--root <path>` (repeatable), `--hub-url <url>`, `--api-key <key>`, `--api-key-file <file>`,
-`--no-fetch`, `--sizes`, `--no-watch`, `--no-deps`, `--enable-actions`, `--updates off|notify|auto`. The same settings can live in `~/.config/devdash/agent.json`
+`--no-fetch`, `--sizes`, `--no-watch`, `--no-deps`, `--no-t3`, `--enable-actions`, `--updates off|notify|auto`. The same settings can live in `~/.config/devdash/agent.json`
 under an `Agent` section, or in `DEVDASH_Agent__*` environment variables.
 
 ### What the agent does to your repos
@@ -372,6 +372,8 @@ is alerting now, the channels, the triggers, and a log of every delivery with wh
 | CI turns red | checks fail on a pull request of yours | `CiFailed`: `Enabled`, `IncludeDrafts` (`false`) |
 | An agent action fails | a fix, removal, clone or update queued from the dashboard fails (a failed Refresh does not alert) | `ActionFailed`: `Enabled` |
 | Daily digest | once a day: "3 repos at risk, 12 safe to remove, 4.2 GB" | `DailyDigest`: `Enabled` (`false`), `Time` (`08:00`) |
+| A T3 thread needs input | a [T3 Code](#t3-code-and-github-issues) thread the dashboard started is waiting for an answer or an approval | `T3NeedsInput`: `Enabled` (`false`) |
+| A T3 thread is done | a thread the dashboard started opened a pull request, or settled | `T3Done`: `Enabled` (`false`) |
 
 **Once, not every five minutes.** An alert goes out when its condition first becomes true and not
 again while it lasts. When the condition clears (you push, the machine reports, CI goes green) the
@@ -521,6 +523,41 @@ This uses what the poll already fetches (pull requests you opened, are assigned,
 review, with the `statusCheckRollup` of the head commit) plus the head commit's id, so it costs no
 extra requests. Pull requests you are not involved in are not shown.
 
+### T3 Code and GitHub issues
+
+When a machine has [T3 Code](https://t3.codes), its agent (0.7.0 or newer) finds T3's command-line tool
+(`~/.t3/bin/t3`; on Windows `t3.exe` or `t3.cmd` there, else on `PATH`; or `Agent:T3:Path`), scans
+`~/.t3/projects` as well as `~/Developer` when no roots are configured, and reports each repository's
+T3 threads: what they are called, whether they are running, waiting for you or settled, their branch and
+any pull request they opened. Only a repository's **own** T3 project counts: a project that several
+scanned repositories fall inside (one rooted at `~/Developer`, say) is shown for none of them. Worktrees
+T3 makes for its threads (`~/.t3/worktrees/…`) are listed on the repository they belong to, marked
+"T3 Code", and never offered for removal: archive the thread in T3 instead. `--no-t3` turns all of it off.
+If T3 Code is not installed or not running, nothing is reported and the scan carries on.
+
+With actions on (`--enable-actions`), the repo page also has **Open in T3** (opens the project in the
+T3 Code app on that machine) and **Ask Claude in T3**: a prompt, a machine, and a new branch
+(`t3/<slug>`) to start a T3 thread on, in a new worktree based on the repo's default branch, so your
+checked-out work is not touched. **Fix in T3** buttons start one with the prompt filled in, for a pull
+request of yours with failing CI (with the failing run's address), vulnerable packages, and a pinned
+toolchain a machine lacks. ⌘K offers "Open … in T3" and "Ask Claude in T3 about …".
+
+The **Issues** page lists the open issues of the GitHub repositories you have cloned (conditional
+requests, so an unchanged list costs nothing), each with **Start in T3**: the issue, its labels and
+its latest comments go into a prompt from a template you can edit, framed as untrusted text written by
+the issue's author, asking for a fix on `issue/<n>-<slug>`, the tests run, and a pull request that says
+"Fixes #<n>". An issue gets one thread; **Start again** starts another.
+
+**Starting threads from a label** is off until you turn it on in the Issues page's settings, and then
+only for the repos you tick. When an open issue gets the label (`t3` by default), a thread starts on the
+repo's preferred machine, or the most recently seen one that can. Because a thread usually runs with
+full access to its machine, the label is only trusted when it was added by an allowed GitHub login (by
+default the user the hub's token belongs to, checked against the issue's events), and on a public
+repository only when the issue was written by one too. Anything else waits on the page as "needs a
+manual start", with the reason. Optionally, and off by default, the hub comments "Started a Claude
+thread for this issue" (no links, no machine names) and/or swaps the label for `t3:started`; a token
+that may not do that is reported on the page.
+
 ### Cleanup
 
 The Cleanup page lists findings from the rules in `src/DevDash.Core/Cleanup/Rules`. Each finding has
@@ -574,6 +611,46 @@ What keeps this safe:
 
 A hub database created before this feature gains the new `AgentActions` table on start, and one from
 before 0.6.0 gains `RemovedProjects` the same way; nothing needs resetting.
+
+### Claude (MCP)
+
+The hub is also an MCP server, so Claude Code (or Claude inside T3 Code) can ask it things: "what
+haven't I pushed?", "which clones are safe to delete?", "compare my clones of this repo", "what have
+I been working on this week?". Open the **Claude** page, create a token, and run the command it shows:
+
+```sh
+claude mcp add --transport http devdash https://devdash.<your-tailnet>.ts.net/mcp --header "Authorization: Bearer ddm_…"
+```
+
+The address is `Hub:PublicUrl` when set, otherwise whatever address you opened the page at. To share
+it with a project instead, put this in its `.mcp.json` and keep the token in your environment
+(`export DEVDASH_MCP_TOKEN=ddm_…`), never in the file:
+
+```json
+{
+  "mcpServers": {
+    "devdash": {
+      "type": "http",
+      "url": "https://devdash.<your-tailnet>.ts.net/mcp",
+      "headers": { "Authorization": "Bearer ${DEVDASH_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+A token is shown once and stored only as a hash; the page lists when each was last used and revokes
+them. Every request to `/mcp` needs one, even from a browser the dashboard already trusts.
+
+| Scope | Tools |
+|---|---|
+| **read** (default) | `list_machines`, `list_projects`, `get_project`, `at_risk_work`, `safe_to_remove`, `findings`, `pull_requests`, `compare_clones`, `recent_activity`, `action_status`, `t3_threads`, `list_issues` |
+| **read + actions** | also `refresh_project`, `fetch`, `push_branch` (never forced), `pull_fast_forward`, `clean_build_dirs` |
+
+Actions go through the same queue and checks as the dashboard's buttons (the machine must have
+[actions enabled](#running-a-fix-from-the-dashboard-agent-actions)), are recorded as queued by
+`mcp:<token name>`, and are re-validated by the agent. Removing a project, dropping a stash, deleting
+branches or worktrees and updating agents are not available over MCP at all. Each token gets 120
+requests a minute (`Hub:Mcp:RequestsPerMinute`); `Hub:Mcp:Enabled=false` turns the server off.
 
 ## Run the hub in Docker on your tailnet
 

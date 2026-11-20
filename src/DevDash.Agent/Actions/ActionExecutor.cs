@@ -16,7 +16,10 @@ public sealed record ActionOutcome(bool Succeeded, int? ExitCode, string Output,
     /// <summary>True when the agent declined before running anything that changes the repository.</summary>
     public bool Refused => ExitCode is null;
 
-    public ActionResultRequest ToResult() => new() { Succeeded = Succeeded, ExitCode = ExitCode, Output = Output, DurationMs = DurationMs };
+    /// <summary>The thread a StartT3Thread action started, when T3 Code said which.</summary>
+    public T3StartedThread? Thread { get; init; }
+
+    public ActionResultRequest ToResult() => new() { Succeeded = Succeeded, ExitCode = ExitCode, Output = Output, DurationMs = DurationMs, Thread = Thread };
 }
 
 /// <summary>
@@ -40,7 +43,8 @@ public sealed class ActionExecutor(
     AgentGate? gate = null,
     AgentUpdater? updater = null,
     RescanRequests? rescans = null,
-    ProjectActions? projects = null)
+    ProjectActions? projects = null,
+    T3Code.T3Actions? t3 = null)
 {
     /// <summary>No background maintenance and no fsmonitor daemon as a side effect of an action.</summary>
     private static readonly string[] Prefix = ["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
@@ -169,6 +173,23 @@ public sealed class ActionExecutor(
             {
                 logger.LogWarning("Refused push of {Branch} in {Repo}: {Reason}", action.Branch, repo, behind);
                 return Refuse(behind);
+            }
+
+            // T3 Code's CLI, not git: open the app, or start a thread in a new worktree.
+            if (AgentActions.IsT3Action(action.Kind))
+            {
+                if (t3 is null)
+                {
+                    return Refuse("this agent has no T3 Code integration.");
+                }
+
+                var outcome = await t3.RunAsync(action, stopwatch, ct).ConfigureAwait(false);
+                if (outcome.Refused)
+                {
+                    logger.LogWarning("Refused action {Kind} in {Repo}: {Reason}", action.Kind, repo, outcome.Output);
+                }
+
+                return outcome;
             }
 
             // The kinds that are more than one fixed git command: remove, clone, build output, fast-forward.

@@ -342,7 +342,7 @@ public static class AlertEvaluator
                     Title = $"T3 thread needs input: {Short(thread.Title.Length > 0 ? thread.Title : row.Title, 90)}",
                     Body = $"{repo} on {row.MachineName}: waiting for {Fmt.Count(thread.PendingRequests, "answer")}.",
                     Path = path,
-                    ExternalUrl = thread.Link,
+                    ExternalUrl = Fmt.SafeLink(thread.Link),
                     Severity = AlertSeverity.Warning,
                     RepoKey = row.RepoKey.Length > 0 ? row.RepoKey : null,
                 };
@@ -360,7 +360,7 @@ public static class AlertEvaluator
                         : $"T3 thread settled: {Short(thread.Title.Length > 0 ? thread.Title : row.Title, 90)}",
                     Body = $"{repo} on {row.MachineName}" + (prs.Count > 0 ? ": " + string.Join(", ", prs.Select(p => p.Url)) : "."),
                     Path = path,
-                    ExternalUrl = prs.FirstOrDefault()?.Url ?? thread.Link,
+                    ExternalUrl = Fmt.SafeLink(prs.FirstOrDefault()?.Url) ?? Fmt.SafeLink(thread.Link),
                     Severity = AlertSeverity.Info,
                     RepoKey = row.RepoKey.Length > 0 ? row.RepoKey : null,
                 };

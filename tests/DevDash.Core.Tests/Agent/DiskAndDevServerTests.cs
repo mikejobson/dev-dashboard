@@ -838,8 +838,21 @@ public sealed class DevServerStopTests : IDisposable
     public async Task A_different_command_a_gone_process_and_one_working_outside_the_repo_are_refused()
     {
         Assert.Contains("different command", (await Stop(Shown(command: "node other.js"))).Output);
-        Assert.Contains("no process 77", (await Stop(Shown(pid: 77))).Output);
+        Assert.Contains("not listening on a port any more", (await Stop(Shown(pid: 77))).Output);
         Assert.Contains("not inside", (await Stop(Shown(pid: 5000, command: "node elsewhere.js"))).Output);
+        Assert.Empty(_processes.Signalled);
+    }
+
+    [Fact]
+    public async Task A_process_in_the_repo_that_is_not_listening_is_refused()
+    {
+        // The same start time and command, working in the repository, but no listening socket: not a dev server the list shows.
+        _processes.Processes.Add(new ListeningProcess(6000, "node", ["node", "worker.js"], null, _repo, Started, []));
+
+        var outcome = await Stop(Shown(pid: 6000, command: "node worker.js"));
+
+        Assert.True(outcome.Refused, outcome.Output);
+        Assert.Contains("not listening on a port", outcome.Output);
         Assert.Empty(_processes.Signalled);
     }
 

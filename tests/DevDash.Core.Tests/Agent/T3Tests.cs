@@ -43,7 +43,7 @@ public sealed class T3Tests : IDisposable
         MachineId = "test-machine",
         AutoFetch = new AutoFetchOptions { Enabled = false },
         Actions = new ActionsOptions { Enabled = actions },
-        T3 = new T3Options { Home = Path.Combine(_home, ".t3") },
+        T3 = new T3Options { Home = Path.Combine(_home, ".t3"), AllowStartFromHub = true },
     };
 
     private T3Service Service(FakeTools tools, AgentOptions options) =>
@@ -324,8 +324,46 @@ public sealed class T3Tests : IDisposable
             Assert.Equal((true, "0.1.9"), (snapshot.Machine.T3!.Available, snapshot.Machine.T3.Version));
             Assert.Equal(actions, snapshot.Machine.AcceptsT3);
             Assert.Equal(actions, AgentActions.Accepts(snapshot.Machine, AgentActionKind.StartT3Thread));
+            Assert.True(snapshot.Machine.AcceptsStartT3Thread);
             Assert.Equal("t-1", snapshot.Entries.Single().T3!.Threads.Single().Id);
         }
+
+        // Without Agent:T3:AllowStartFromHub the agent still opens repos in T3, and says it does not start threads.
+        var closed = Options();
+        closed.T3.AllowStartFromHub = false;
+        var closedOptions = new StaticOptions(closed);
+        var closedGit = new GitRunner();
+        var closedScanner = new MachineScanner(new RepoScanner(closedGit, new FetchService(closedGit, closedOptions, NullLogger<FetchService>.Instance), closedOptions),
+            new SizeCache(Path.Combine(_root, "sizes-closed.json")), closedOptions, NullLogger<MachineScanner>.Instance, t3: Service(tools, closed));
+        var machine = (await closedScanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Machine;
+        Assert.Equal((true, false), (machine.AcceptsT3, machine.AcceptsStartT3Thread));
+        Assert.True(AgentActions.Accepts(machine, AgentActionKind.OpenInT3));
+        Assert.False(AgentActions.Accepts(machine, AgentActionKind.StartT3Thread));
+        Assert.Contains("Set Agent:T3:AllowStartFromHub to true", AgentActions.WhyNotAccepted(machine, AgentActionKind.StartT3Thread));
+        Assert.Null(AgentActions.WhyNotAccepted(machine, AgentActionKind.OpenInT3));
+
+        // An older agent says nothing, and took starts whenever it took T3 actions.
+        Assert.True(AgentActions.Accepts(machine with { AcceptsStartT3Thread = null }, AgentActionKind.StartT3Thread));
+    }
+
+    [Fact]
+    public void Starting_from_the_hub_is_off_by_default() => Assert.False(new T3Options().AllowStartFromHub);
+
+    [Fact]
+    public async Task A_start_is_refused_without_AllowStartFromHub_and_t3_never_runs()
+    {
+        var repo = Widget();
+        var tools = Tools().On("t3", "thread start", "{}").On("t3", "app", "");
+        var (executor, _) = Executor(tools, configure: o => o.T3.AllowStartFromHub = false);
+
+        var refused = await executor.ExecuteAsync(Start(repo), CancellationToken.None);
+
+        Assert.True(refused.Refused, refused.Output);
+        Assert.Contains("does not accept thread starts from the hub. Set Agent:T3:AllowStartFromHub to true", refused.Output);
+        Assert.DoesNotContain(tools.Calls, c => c.Arguments is ["thread", "start", ..]);
+
+        // Opening the repo in T3 is still allowed.
+        Assert.True((await executor.ExecuteAsync(AgentAction.OpenInT3(repo), CancellationToken.None)).Succeeded);
     }
 
     // ---- the actions: shape ---------------------------------------------------------------------
@@ -349,6 +387,9 @@ public sealed class T3Tests : IDisposable
         Assert.Null(AgentActions.Validate(Start(repo, prompt: new string('x', AgentActions.MaxPromptBytes))));
         Assert.Contains("control characters", AgentActions.Validate(Start(repo, prompt: "hi\0there")));
         Assert.Contains("one line", AgentActions.Validate(Start(repo, title: "two\nlines")));
+        Assert.Contains("must not start with", AgentActions.Validate(Start(repo, title: "--help")));
+        Assert.Contains("must not start with", AgentActions.Validate(Start(repo, title: " -x")));
+        Assert.Null(AgentActions.Validate(Start(repo, title: "Fix a-b - c")));
         Assert.Contains("one line", AgentActions.Validate(Start(repo, title: new string('t', AgentActions.MaxTitleChars + 1))));
         foreach (var bad in (string[])["-x", "--upload-pack=evil", "main~1", "HEAD^", "a..b", "main@{1}", "origin/", "a b", "main.lock", "x:y"])
         {

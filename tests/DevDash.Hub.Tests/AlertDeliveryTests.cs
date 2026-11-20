@@ -863,4 +863,130 @@ public class AlertDeliveryTests
             Assert.True(condition(), "the worker did not get there in five seconds");
         }
     }
+
+    // ---- where secrets may go ---------------------------------------------------------------------
+
+    [Fact]
+    public async Task Changing_a_channels_address_forgets_its_secrets_unless_new_ones_are_typed_with_it()
+    {
+        var (factory, _) = Hub();
+        using var __ = factory;
+        var settings = factory.Services.GetRequiredService<AlertSettings>();
+
+        // Set up every channel; an address and its secret in one save keep the secret.
+        var edit = await settings.GetAsync();
+        edit.Channels.HomeAssistant.Url = "http://ha.example.test:8123";
+        Assert.Empty(await settings.SaveAsync(edit, new Dictionary<string, string?>
+        {
+            [AlertSettings.NtfyToken] = NtfyToken,
+            [AlertSettings.WebhookUrl] = HookUrl,
+            [AlertSettings.WebhookToken] = HookToken,
+            [AlertSettings.HomeAssistantWebhookId] = HookId,
+        }, "me"));
+        var saved = await settings.GetAsync();
+        Assert.Equal((Topic, NtfyToken, HookToken, HookId), (saved.Channels.Ntfy.Topic, saved.Channels.Ntfy.Token, saved.Channels.Webhook.Token, saved.Channels.HomeAssistant.WebhookId));
+
+        // The same address spelt differently is not a change.
+        saved.Channels.Ntfy.Server = "HTTPS://ntfy.example.test/";
+        Assert.Empty(await settings.SaveAsync(saved, new Dictionary<string, string?>(), "me"));
+        Assert.Equal(NtfyToken, (await settings.GetAsync()).Channels.Ntfy.Token);
+
+        // A new ntfy server: the token saved here and the topic from configuration both stay behind.
+        edit = await settings.GetAsync();
+        edit.Channels.Ntfy.Server = "https://ntfy.evil.example.test";
+        Assert.Equal([AlertSettings.NtfyTopic, AlertSettings.NtfyToken], await settings.SaveAsync(edit, new Dictionary<string, string?>(), "me"));
+        saved = await settings.GetAsync();
+        Assert.Equal(("https://ntfy.evil.example.test", "", ""), (saved.Channels.Ntfy.Server, saved.Channels.Ntfy.Topic, saved.Channels.Ntfy.Token));
+        Assert.Equal("No topic is set.", AlertChannels.WhyNotReady(AlertChannels.Ntfy, saved)); // so Send test cannot go
+        var states = await settings.SecretsAsync();
+        Assert.Equal((false, true, "enter it again: the address changed"), (states[AlertSettings.NtfyTopic].Set, states[AlertSettings.NtfyTopic].Withheld, states[AlertSettings.NtfyTopic].Text));
+        Assert.Equal("not set", states[AlertSettings.NtfyToken].Text);
+        var html = WebUtility.HtmlDecode(await factory.CreateClient().GetStringAsync("/alerts"));
+        Assert.Contains("enter it again: the address changed", html);
+        Assert.DoesNotContain(Topic, html);
+
+        // Typed again for the new server, it is kept; back on configuration's server, configuration's topic applies again.
+        Assert.Empty(await settings.SaveAsync(await settings.GetAsync(), new Dictionary<string, string?> { [AlertSettings.NtfyTopic] = "new-topic" }, "me"));
+        Assert.Equal("new-topic", (await settings.GetAsync()).Channels.Ntfy.Topic);
+        edit = await settings.GetAsync();
+        edit.Channels.Ntfy.Server = "https://ntfy.example.test";
+        Assert.Equal([AlertSettings.NtfyTopic], await settings.SaveAsync(edit, new Dictionary<string, string?>(), "me"));
+        Assert.Equal((Topic, ""), ((await settings.GetAsync()).Channels.Ntfy.Topic, (await settings.GetAsync()).Channels.Ntfy.Token));
+
+        // Home Assistant: a new address with a new id keeps the new id; a new address alone loses it.
+        edit = await settings.GetAsync();
+        edit.Channels.HomeAssistant.Url = "http://ha2.example.test:8123";
+        Assert.Empty(await settings.SaveAsync(edit, new Dictionary<string, string?> { [AlertSettings.HomeAssistantWebhookId] = "second-id" }, "me"));
+        Assert.Equal("second-id", (await settings.GetAsync()).Channels.HomeAssistant.WebhookId);
+        edit = await settings.GetAsync();
+        edit.Channels.HomeAssistant.Url = "http://attacker.example.test:8123";
+        Assert.Equal([AlertSettings.HomeAssistantWebhookId], await settings.SaveAsync(edit, new Dictionary<string, string?>(), "me"));
+        Assert.Equal("", (await settings.GetAsync()).Channels.HomeAssistant.WebhookId);
+
+        // Webhook: a new URL without a new token loses the bearer token.
+        Assert.Equal([AlertSettings.WebhookToken], await settings.SaveAsync(await settings.GetAsync(), new Dictionary<string, string?> { [AlertSettings.WebhookUrl] = "https://attacker.example.test/in" }, "me"));
+        Assert.Equal(("https://attacker.example.test/in", ""), ((await settings.GetAsync()).Channels.Webhook.Url, (await settings.GetAsync()).Channels.Webhook.Token));
+    }
+
+    [Fact]
+    public async Task A_secret_from_configuration_is_only_sent_to_configurations_own_address()
+    {
+        var (factory, _) = Hub(("Hub:Alerts:Channels:Ntfy:Token", NtfyToken));
+        using var __ = factory;
+        var settings = factory.Services.GetRequiredService<AlertSettings>();
+
+        var edit = await settings.GetAsync();
+        edit.Channels.Ntfy.Server = "https://ntfy.evil.example.test";
+        await settings.SaveAsync(edit, new Dictionary<string, string?> { [AlertSettings.NtfyTopic] = "mine" }, "me");
+
+        var test = await Service(factory).SendTestAsync(AlertChannels.Ntfy);
+        Assert.True(test.Ok, test.Error);
+        var sent = Assert.Single(factory.AlertRequests);
+        Assert.StartsWith("https://ntfy.evil.example.test", sent.Url);
+        Assert.Null(sent.Auth); // configuration's token stayed home
+        Assert.True((await settings.SecretsAsync())[AlertSettings.NtfyToken].Withheld);
+    }
+
+    [Theory]
+    [InlineData("169.254.169.254", true)]
+    [InlineData("169.254.0.1", true)]
+    [InlineData("169.254.170.2", true)]
+    [InlineData("fe80::1", true)]
+    [InlineData("febf::1", true)]
+    [InlineData("::ffff:169.254.169.254", true)]
+    [InlineData("100.100.100.200", true)]
+    [InlineData("fd00:ec2::254", true)]
+    [InlineData("127.0.0.1", false)]
+    [InlineData("::1", false)]
+    [InlineData("192.168.1.10", false)]
+    [InlineData("10.0.0.5", false)]
+    [InlineData("172.16.0.1", false)]
+    [InlineData("100.101.102.103", false)] // a tailnet address
+    [InlineData("fd7a:115c:a1e0::1", false)]
+    [InlineData("169.253.1.1", false)]
+    [InlineData("8.8.8.8", false)]
+    public void Link_local_and_metadata_addresses_are_refused_and_the_LAN_is_not(string address, bool blocked) =>
+        Assert.Equal(blocked, AlertAddressGuard.IsBlocked(IPAddress.Parse(address)));
+
+    [Fact]
+    public async Task Alerts_are_never_sent_to_a_metadata_address_whether_typed_or_resolved()
+    {
+        // Typed as an address: refused before anything is sent.
+        var recorder = new Recorder();
+        var options = AllChannels();
+        options.Channels.HomeAssistant.Url = "http://169.254.169.254";
+        options.Channels.Webhook.Url = "http://[fe80::1]:8080/hook";
+        var sender = new AlertSender(new HttpClient(recorder));
+        Assert.Equal((false, AlertAddressGuard.Refusal), (await sender.SendAsync(AlertChannels.HomeAssistant, Message(), options)) is var ha ? (ha.Ok, ha.Error) : default);
+        Assert.Equal((false, AlertAddressGuard.Refusal), (await sender.SendAsync(AlertChannels.Webhook, Message(), options)) is var hook ? (hook.Ok, hook.Error) : default);
+        Assert.Empty(recorder.Requests);
+
+        // At connect time, through the handler the hub really uses: the check is on the address connected to, so it
+        // holds for a name that resolves there too (not tried here: that would need DNS). Refused without connecting.
+        using var http = new HttpClient(AlertAddressGuard.CreateHandler());
+        var direct = await Assert.ThrowsAsync<HttpRequestException>(() => http.GetAsync("http://169.254.169.254/latest/meta-data/"));
+        Assert.Contains(AlertAddressGuard.Refusal, direct.ToString());
+        var v6 = await Assert.ThrowsAsync<HttpRequestException>(() => http.GetAsync("http://[fe80::1]/"));
+        Assert.Contains(AlertAddressGuard.Refusal, v6.ToString());
+    }
 }

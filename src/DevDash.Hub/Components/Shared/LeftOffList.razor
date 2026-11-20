@@ -40,7 +40,7 @@ else
                         @if (item.PullRequest is { } pr) { <PrChip PullRequest="pr" ShowTitle="!Compact" /> }
                         @foreach (var thread in item.Threads.Take(Compact ? 1 : 3))
                         {
-                            <a class="chip @T3Threads.ChipClass(thread.State)" href="@thread.Link" target="_blank" rel="noopener" title="T3 thread: @thread.Title">T3 · @T3Threads.Label(thread.State)@(Compact ? "" : $" · {Short(thread.Title)}")</a>
+                            <a class="chip @T3Threads.ChipClass(thread.State)" href="@Fmt.SafeLink(thread.Link)" target="_blank" rel="noopener" title="T3 thread: @thread.Title">T3 · @T3Threads.Label(thread.State)@(Compact ? "" : $" · {Short(thread.Title)}")</a>
                         }
                     </div>
                     @if (item.RecentFiles.Count > 0)
@@ -68,7 +68,7 @@ else
                         <button type="button" class="chip-btn" data-copy="@cd" title="Copy: @cd">cd</button>
                         @if (gh is not null)
                         {
-                            <a class="chip-btn" href="@gh" target="_blank" rel="noopener" title="Open on GitHub">GitHub</a>
+                            <a class="chip-btn" href="@Fmt.SafeLink(gh)" target="_blank" rel="noopener" title="Open on GitHub">GitHub</a>
                         }
                         <a class="chip-btn" href="@Fmt.RepoUrl(item.Row.Key)">Details</a>
                     </div>

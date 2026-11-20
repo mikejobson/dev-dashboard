@@ -94,6 +94,26 @@ public class IngestTests
     }
 
     [Fact]
+    public async Task A_new_key_cannot_take_over_a_machine_another_live_key_owns()
+    {
+        using var factory = new HubFactory();
+        var keys = factory.Services.GetRequiredService<ApiKeyService>();
+        var owner = await keys.IssueAsync("owner");
+        Assert.Equal(HttpStatusCode.OK, (await factory.CreateAgentClient(owner.Plaintext).PostAsync(Endpoint, Body(HubFactory.Snapshot("mac")))).StatusCode);
+
+        // A fresh key (or the first-run key from the container log) naming the same machine, in any case.
+        var intruder = await keys.IssueAsync("intruder");
+        var taken = await factory.CreateAgentClient(intruder.Plaintext).PostAsync(Endpoint, Body(HubFactory.Snapshot("MAC")));
+        Assert.Equal(HttpStatusCode.Forbidden, taken.StatusCode);
+        Assert.Contains("Revoke that key", await taken.Content.ReadAsStringAsync());
+        Assert.Null((await keys.ListAsync()).Single(k => k.Label == "intruder").MachineId);
+
+        // Once the old key is revoked, a new key can take the machine over: that is how a key is replaced.
+        await keys.RevokeAsync(owner.Entity.Id);
+        Assert.Equal(HttpStatusCode.OK, (await factory.CreateAgentClient(intruder.Plaintext).PostAsync(Endpoint, Body(HubFactory.Snapshot("mac")))).StatusCode);
+    }
+
+    [Fact]
     public async Task A_revoked_key_stops_working()
     {
         using var factory = new HubFactory();

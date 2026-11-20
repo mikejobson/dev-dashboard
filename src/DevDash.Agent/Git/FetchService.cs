@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using DevDash.Core.Git;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -67,8 +68,10 @@ public sealed class FetchService
             var fetched = await _git.FetchAsync(repoPath, TimeSpan.FromSeconds(options.TimeoutSeconds), ct).ConfigureAwait(false);
             if (!fetched.Ok)
             {
-                _logger.LogWarning("git fetch failed in {Path}: {Error}", repoPath, fetched.StdErr.Trim());
-                forced.Failures.Enqueue($"{repoPath}: {(fetched.StdErr.Trim() is { Length: > 0 } error ? error : $"git fetch exited with {fetched.ExitCode}")}");
+                // git repeats the remote's URL, token and all, in its errors; this text goes to the hub.
+                var error = RemoteUrlNormalizer.RedactCredentials(fetched.StdErr.Trim());
+                _logger.LogWarning("git fetch failed in {Path}: {Error}", repoPath, error);
+                forced.Failures.Enqueue($"{repoPath}: {(error.Length > 0 ? error : $"git fetch exited with {fetched.ExitCode}")}");
                 return false;
             }
 
@@ -96,7 +99,7 @@ public sealed class FetchService
         var result = await _git.FetchAsync(repoPath, TimeSpan.FromSeconds(options.TimeoutSeconds), ct).ConfigureAwait(false);
         if (!result.Ok)
         {
-            _logger.LogWarning("git fetch failed in {Path}: {Error}", repoPath, result.StdErr.Trim());
+            _logger.LogWarning("git fetch failed in {Path}: {Error}", repoPath, RemoteUrlNormalizer.RedactCredentials(result.StdErr.Trim()));
             return false;
         }
 

@@ -51,8 +51,32 @@ public class RemoteUrlNormalizerTests
     [InlineData("https://github.com/owner/repo.git", "https://github.com/owner/repo.git")]
     [InlineData("ssh://git@github.com/owner/repo.git", "ssh://git@github.com/owner/repo.git")]
     [InlineData("git@github.com:owner/repo.git", "git@github.com:owner/repo.git")]
+    [InlineData("https://tok@git.example.com", "https://git.example.com")] // no path
+    [InlineData("https://user:p@ss@w0rd@github.com/owner/repo.git", "https://github.com/owner/repo.git")] // '@' in the password
+    [InlineData("https://github.com/owner/repo.git?private_token=abc#frag", "https://github.com/owner/repo.git")]
+    [InlineData("https://tok@git.example.com?token=abc", "https://git.example.com")]
+    [InlineData("ssh://user:secret@git.example.com/owner/repo.git", "ssh://git.example.com/owner/repo.git")]
     public void Strips_credentials_from_urls(string url, string expected) =>
         Assert.Equal(expected, RemoteUrlNormalizer.StripCredentials(url));
+
+    [Fact]
+    public void A_password_with_an_at_sign_does_not_end_up_in_the_identity() =>
+        Assert.Equal("github.com/owner/repo", RemoteUrlNormalizer.Normalize("https://user:p@ss@github.com/owner/repo.git")!.Key);
+
+    [Fact]
+    public void Redacts_credentials_inside_error_text()
+    {
+        const string error = "fatal: unable to access 'https://user:p@ss@git.example.com/owner/repo.git/': Could not resolve host\n"
+            + "fatal: could not read from https://tok@git.example.com?token=abc and ssh://git@github.com/o/r.git";
+
+        var redacted = RemoteUrlNormalizer.RedactCredentials(error);
+
+        Assert.DoesNotContain("p@ss", redacted);
+        Assert.DoesNotContain("tok", redacted);
+        Assert.DoesNotContain("token=abc", redacted);
+        Assert.Contains("'https://git.example.com/owner/repo.git/'", redacted);
+        Assert.Contains("ssh://git@github.com/o/r.git", redacted);
+    }
 
     [Fact]
     public void Remote_list_keeps_fetch_urls_without_credentials()

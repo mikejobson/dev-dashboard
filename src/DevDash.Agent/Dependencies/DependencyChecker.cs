@@ -5,7 +5,7 @@ namespace DevDash.Agent.Dependencies;
 
 public sealed class DependencyOptions
 {
-    /// <summary>Run the package tools' own vulnerability and outdated checks in each repository. On by default; this is the off switch.</summary>
+    /// <summary>Check each repository's packages for known vulnerabilities and newer versions. On by default; this is the off switch.</summary>
     public bool Enabled { get; set; } = true;
 
     /// <summary>How often each repository is checked.</summary>
@@ -14,7 +14,7 @@ public sealed class DependencyOptions
     /// <summary>How soon a repository is tried again after a check that failed for a passing reason (offline, timed out).</summary>
     public double RetryHours { get; set; } = 2;
 
-    /// <summary>Longest any one tool run may take before it is stopped.</summary>
+    /// <summary>Longest any one tool run (npm) or nuget.org request may take before it is stopped.</summary>
     public int TimeoutSeconds { get; set; } = 120;
 
     /// <summary>How long after the agent starts before the first check, so the first scan is not competing with it.</summary>
@@ -25,30 +25,28 @@ public sealed class DependencyOptions
 }
 
 /// <summary>
-/// Asks the package tools about one repository and keeps only counts and a few names:
+/// Checks one repository's dependencies and keeps only counts and a few names:
 /// <list type="bullet">
-/// <item><c>dotnet list &lt;sln or project&gt; package --vulnerable --include-transitive --format json</c> and
-/// <c>--outdated --format json</c>, with <c>--no-restore</c> on SDKs that would otherwise restore first. A
-/// project that has not been restored is reported as that and left alone.</item>
+/// <item>NuGet: reads what restore already wrote (<c>obj/project.assets.json</c>) and compares it with
+/// nuget.org's published vulnerability data and version lists (<see cref="NuGetOrg"/>). It never runs
+/// <c>dotnet</c> in the repository: that would let the repository's <c>global.json</c> pick the SDK (its
+/// <c>sdk.paths</c> can point at one inside the repo, which is code execution just by being cloned),
+/// have MSBuild evaluate its <c>Directory.Build.props</c>/<c>.targets</c>, and send requests (and the
+/// user's feed credentials) to whatever feeds its <c>nuget.config</c> names. A project that has not
+/// been restored is reported as that and left alone.</item>
 /// <item><c>npm audit --json</c> and <c>npm outdated --json</c>, only where a lockfile and
-/// <c>node_modules</c> are both present.</item>
+/// <c>node_modules</c> are both present, with npm and node found outside the repository.</item>
 /// </list>
 /// It never restores, installs or fixes anything, starts each tool directly with fixed arguments, and
 /// treats "offline" as a reason to try again later, not as a result.
 /// </summary>
-public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, TimeProvider? time = null)
+public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, TimeProvider? time = null, NuGetOrg? nuget = null)
 {
     private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private readonly NuGetOrg _nuget = nuget ?? new NuGetOrg(time: time);
 
-    private static readonly Dictionary<string, string> DotnetEnvironment = new()
-    {
-        ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
-        ["DOTNET_NOLOGO"] = "1",
-        ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
-        ["DOTNET_CLI_UI_LANGUAGE"] = "en",
-        ["MSBUILDDISABLENODEREUSE"] = "1", // no build server left running behind the check
-        ["MSBUILDTERMINALLOGGER"] = "off",
-    };
+    /// <summary>Most top-level packages whose versions are looked up on nuget.org in one check.</summary>
+    private const int MaxOutdatedLookups = 200;
 
     private static readonly Dictionary<string, string> NpmEnvironment = new()
     {
@@ -67,7 +65,7 @@ public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, T
 
         if (FindDotnetTarget(repo) is { } target)
         {
-            var (report, again) = await CheckDotnetAsync(repo, target, timeout, ct).ConfigureAwait(false);
+            var (report, again) = await CheckNuGetAsync(repo, target, timeout, ct).ConfigureAwait(false);
             reports.Add(report);
             transient |= again;
         }
@@ -134,47 +132,64 @@ public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, T
         }
     }
 
-    private async Task<(DependencyReport Report, bool Transient)> CheckDotnetAsync(string repo, string target, TimeSpan timeout, CancellationToken ct)
+    private async Task<(DependencyReport Report, bool Transient)> CheckNuGetAsync(string repo, string target, TimeSpan timeout, CancellationToken ct)
     {
         DependencyReport Skip(string why) => new() { Ecosystem = DependencyReport.NuGet, Target = target, Skipped = why };
 
-        if (locator.Find("dotnet") is not { } dotnet)
+        var found = NuGetAssets.Find(repo);
+        var resolved = new HashSet<PackageVersion>();
+        var topLevel = new HashSet<PackageVersion>();
+        var read = 0;
+        foreach (var file in found.AssetsFiles)
         {
-            return (Skip("dotnet was not found on this machine"), false);
+            if (Scanning.RepoFile.ReadAll(repo, file, NuGetAssets.MaxBytes) is { } bytes && NuGetAssets.Parse(bytes) is { } packages)
+            {
+                read++;
+                resolved.UnionWith(packages.Resolved);
+                topLevel.UnionWith(packages.TopLevel);
+            }
         }
 
-        ToolCommand Command(params string[] args) => new(dotnet, args) { WorkingDirectory = repo, Environment = DotnetEnvironment, LowPriority = true };
-
-        // Asked in the repository, so its global.json decides which SDK answers. That SDK's own help says
-        // what it understands: JSON output (7.0.200 and later), and whether it would restore unless told not to.
-        var help = await runner.RunAsync(Command("list", "package", "--help"), timeout, ct).ConfigureAwait(false);
-        if (!help.Ok)
+        if (read == 0)
         {
-            return help.TimedOut
-                ? (Skip("timed out"), true)
-                : (Skip(help.Started ? "the .NET SDK this repo asks for is not installed" : "dotnet could not be started"), false);
+            return (Skip(DependencyParsers.NotRestored), false);
         }
 
-        if (!help.StdOut.Contains("--format", StringComparison.Ordinal))
+        // Some projects answered: their numbers stand, with a note about the rest.
+        var missing = Math.Max(0, found.Projects.Count - read);
+        var note = missing > 0 ? $"{missing} of {Math.Max(found.Projects.Count, read)} projects not restored" : null;
+
+        VulnerableResult vulnerable;
+        try
         {
-            return (Skip("this .NET SDK is too old to report as JSON"), false);
+            var advisories = await _nuget.AdvisoriesAsync(timeout, ct).ConfigureAwait(false);
+            vulnerable = DependencyParsers.NuGetVulnerable(resolved, advisories, note);
+        }
+        catch (NuGetUnavailableException ex)
+        {
+            // Offline: the second question would get the same answer.
+            return (Report(DependencyReport.NuGet, target, new VulnerableResult(null, [], ex.Message, true), new OutdatedResult(null, [], ex.Message, true)), true);
         }
 
-        string[] noRestore = help.StdOut.Contains("--no-restore", StringComparison.Ordinal) ? ["--no-restore"] : [];
-
-        var vulnerableRun = await runner.RunAsync(Command(["list", target, "package", "--vulnerable", "--include-transitive", "--format", "json", .. noRestore]), timeout, ct).ConfigureAwait(false);
-        var vulnerable = vulnerableRun.TimedOut ? new VulnerableResult(null, [], "timed out", true)
-            : !vulnerableRun.Started ? new VulnerableResult(null, [], "dotnet could not be started")
-            : DependencyParsers.DotnetVulnerable(vulnerableRun.StdOut);
-
-        // Not restored, or offline: the second question would get the same answer.
-        var outdated = new OutdatedResult(null, [], vulnerable.Skipped, vulnerable.Transient);
-        if (vulnerable.Counts is not null)
+        // Only nuget.org is asked, so a package from a private feed has no version list there and is not
+        // counted as outdated (nor, having no advisories there, as vulnerable).
+        OutdatedResult outdated;
+        try
         {
-            var outdatedRun = await runner.RunAsync(Command(["list", target, "package", "--outdated", "--format", "json", .. noRestore]), timeout, ct).ConfigureAwait(false);
-            outdated = outdatedRun.TimedOut ? new OutdatedResult(null, [], "timed out", true)
-                : !outdatedRun.Started ? new OutdatedResult(null, [], "dotnet could not be started")
-                : DependencyParsers.DotnetOutdated(outdatedRun.StdOut);
+            var available = new List<(PackageVersion, IReadOnlyList<string>)>();
+            foreach (var package in topLevel.DistinctBy(p => p.Id, StringComparer.OrdinalIgnoreCase).OrderBy(p => p.Id, StringComparer.OrdinalIgnoreCase).Take(MaxOutdatedLookups))
+            {
+                if (await _nuget.VersionsAsync(package.Id, timeout, ct).ConfigureAwait(false) is { } versions)
+                {
+                    available.Add((package, versions));
+                }
+            }
+
+            outdated = DependencyParsers.NuGetOutdated(available, note);
+        }
+        catch (NuGetUnavailableException ex)
+        {
+            outdated = new OutdatedResult(null, [], ex.Message, true);
         }
 
         return (Report(DependencyReport.NuGet, target, vulnerable, outdated), vulnerable.Transient || outdated.Transient);
@@ -182,7 +197,7 @@ public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, T
 
     private async Task<(DependencyReport Report, bool Transient)> CheckNpmAsync(string repo, string lockfile, TimeSpan timeout, CancellationToken ct)
     {
-        if (NpmCommand() is not { } npm)
+        if (NpmCommand(repo) is not { } npm)
         {
             return (new DependencyReport { Ecosystem = DependencyReport.Npm, Target = lockfile, Skipped = "npm was not found on this machine" }, false);
         }
@@ -190,7 +205,7 @@ public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, T
         ToolCommand Command(params string[] args) => new(npm.File, [.. npm.Prefix, .. args])
         {
             WorkingDirectory = repo,
-            Environment = NpmEnvironment,
+            Environment = new Dictionary<string, string>(NpmEnvironment) { ["PATH"] = SafePath(repo) },
             PathPrefix = npm.Path,
             LowPriority = true,
         };
@@ -215,12 +230,14 @@ public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, T
     /// How to start npm with no shell. On macOS and Linux <c>npm</c> is a script that asks <c>env</c> for
     /// <c>node</c>, so node's folder goes on the child's PATH. On Windows <c>npm</c> is a <c>.cmd</c> file,
     /// which only a shell can run: there, <c>node.exe</c> is started with npm's own <c>npm-cli.js</c>.
+    /// Neither is ever taken from inside the repository (its <c>node_modules/.bin</c>, say): that would be
+    /// running the repository's own code.
     /// </summary>
-    private (string File, string[] Prefix, string[] Path)? NpmCommand()
+    private (string File, string[] Prefix, string[] Path)? NpmCommand(string repo)
     {
         if (locator.Environment.IsWindows)
         {
-            foreach (var node in locator.FindAll("node"))
+            foreach (var node in locator.FindAll("node").Where(n => Outside(repo, n)))
             {
                 var cli = Path.Combine(Path.GetDirectoryName(node)!, "node_modules", "npm", "bin", "npm-cli.js");
                 if (File.Exists(cli))
@@ -232,15 +249,36 @@ public sealed class DependencyChecker(IToolRunner runner, ToolLocator locator, T
             return null;
         }
 
-        if (locator.Find("npm") is not { } npm)
+        if (locator.FindAll("npm").FirstOrDefault(n => Outside(repo, n)) is not { } npm)
         {
             return null;
         }
 
-        string[] path = locator.Find("node") is { } found
+        string[] path = locator.FindAll("node").FirstOrDefault(n => Outside(repo, n)) is { } found
             ? [Path.GetDirectoryName(npm)!, Path.GetDirectoryName(found)!]
             : [Path.GetDirectoryName(npm)!];
         return (npm, [], path.Distinct(StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>The agent's PATH without relative entries or folders inside the repository, so nothing npm looks up comes from the repo.</summary>
+    private string SafePath(string repo) =>
+        string.Join(Path.PathSeparator, locator.Environment.PathEntries.Where(p => Path.IsPathRooted(p) && Outside(repo, p)));
+
+    /// <summary>True when <paramref name="path"/>, and what it links to, are outside <paramref name="repo"/>.</summary>
+    internal static bool Outside(string repo, string path)
+    {
+        try
+        {
+            var comparison = OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+            var top = Path.TrimEndingDirectorySeparator(Path.GetFullPath(repo)) + Path.DirectorySeparatorChar;
+            bool Inside(string p) => (Path.TrimEndingDirectorySeparator(Path.GetFullPath(p)) + Path.DirectorySeparatorChar).StartsWith(top, comparison);
+            var target = File.Exists(path) ? File.ResolveLinkTarget(path, returnFinalTarget: true)?.FullName : null;
+            return !Inside(path) && (target is null || !Inside(target));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static DependencyReport Report(string ecosystem, string target, VulnerableResult vulnerable, OutdatedResult outdated) => new()

@@ -23,6 +23,12 @@ public sealed class T3Actions(T3Service t3, IOptionsMonitor<AgentOptions> option
             return Refuse("the T3 Code integration is switched off on this machine (Agent:T3:Enabled).");
         }
 
+        if (action.Kind == AgentActionKind.StartT3Thread && !settings.AllowStartFromHub)
+        {
+            logger.LogWarning("Refused to start a T3 Code thread in {Repo}: Agent:T3:AllowStartFromHub is off", action.RepoPath);
+            return Refuse(AgentActions.StartFromHubOff(Environment.MachineName));
+        }
+
         if (await t3.CliAsync(ct).ConfigureAwait(false) is not { } cli)
         {
             return Refuse($"T3 Code is not available here: {t3.Current?.Problem ?? "its CLI was not found"}.");

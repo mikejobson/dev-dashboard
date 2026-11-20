@@ -5,7 +5,9 @@
 #   docker compose up -d --build    # or build the hub from this checkout instead
 #   open https://${TS_HOSTNAME}.<your-tailnet>.ts.net
 #
-# The hub shares the tailscale container's network namespace and listens on 127.0.0.1:8080 only.
+# The hub shares the tailscale container's network namespace and listens on 127.0.0.2:8080 only. Not
+# 127.0.0.1: in userspace mode tailscaled forwards tailnet connections to the node's own IP to 127.0.0.1,
+# which would let a device on the tailnet reach the hub around serve and write its own identity headers.
 # `tailscale serve` terminates HTTPS on :443 with a tailnet certificate and proxies to it, adding the
 # Tailscale-User-* identity headers the hub uses to sign you in. No ports are published on the host.
 

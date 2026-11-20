@@ -12,8 +12,8 @@ namespace DevDash.Agent.DevServers;
 /// <summary>
 /// Runs <see cref="AgentActionKind.StopDevServer"/>, after <see cref="ActionExecutor"/> has checked that actions are on.
 /// The pid alone is never trusted: the process is looked at again, and must have the start time and command line the
-/// user was shown (so a pid the system has since given to another process is refused) and run inside the named
-/// repository, which must be one this agent scans. Then it is sent SIGTERM, never SIGKILL.
+/// user was shown (so a pid the system has since given to another process is refused), be listening on a port now
+/// (as the dev server list finds them), and run inside the named repository, which must be one this agent scans. Then it is sent SIGTERM, never SIGKILL.
 /// </summary>
 public sealed class DevServerStopper(
     IProcessProbe probe,
@@ -54,6 +54,22 @@ public sealed class DevServerStopper(
         if (pid == Environment.ProcessId)
         {
             return Refuse("that is the agent itself.");
+        }
+
+        // Only a process listening right now, as the dev server list saw it: never any process that merely works in the repository.
+        ListenResult listening;
+        try
+        {
+            listening = await probe.ListAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return Refuse($"could not list listening processes: {ex.Message}. Nothing was stopped.");
+        }
+
+        if (!listening.Processes.Any(p => p.Pid == pid))
+        {
+            return Refuse($"process {pid} is not listening on a port any more, so it is not a dev server this agent lists. Nothing was stopped.");
         }
 
         if (await probe.InspectAsync(pid, ct).ConfigureAwait(false) is not { } process)

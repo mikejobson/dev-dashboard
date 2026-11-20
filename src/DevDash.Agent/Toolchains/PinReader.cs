@@ -18,14 +18,11 @@ public static class PinReader
         {
             try
             {
-                var file = new FileInfo(Path.Combine(path, name));
-                // A link could point anywhere; these are small files that live in the repo.
-                if (!file.Exists || file.Length > PinFiles.MaxBytes || file.LinkTarget is not null)
+                // A link or a FIFO could point anywhere or block; these are small files that live in the repo.
+                if (Scanning.RepoFile.ReadAll(path, Path.Combine(path, name), PinFiles.MaxBytes) is { } bytes)
                 {
-                    continue;
+                    pins.AddRange(PinFiles.Parse(name, System.Text.Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF')));
                 }
-
-                pins.AddRange(PinFiles.Parse(name, File.ReadAllText(file.FullName)));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             {

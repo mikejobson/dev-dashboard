@@ -16,6 +16,17 @@ public sealed record GitHubRepo
     public DateTimeOffset? PushedAt { get; init; }
     public bool IsArchived { get; init; }
     public bool IsPrivate { get; init; }
+
+    /// <summary>
+    /// <c>PUBLIC</c>, <c>PRIVATE</c> or <c>INTERNAL</c>. Internal (GitHub Enterprise) repositories report
+    /// <see cref="IsPrivate"/> true, yet every member of the enterprise can open issues and comment on them.
+    /// Null in a poll cached before this was asked for.
+    /// </summary>
+    public string? Visibility { get; init; }
+
+    /// <summary>Private to its collaborators: private and not internal.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsCollaboratorsOnly => IsPrivate && !string.Equals(Visibility, "INTERNAL", StringComparison.OrdinalIgnoreCase);
     public bool IsFork { get; init; }
     public string? DefaultBranch { get; init; }
     public string? HeadSha { get; init; }

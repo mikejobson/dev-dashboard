@@ -103,7 +103,10 @@ builder.Services.AddT3Integration();
 
 // ---- alerts --------------------------------------------------------------------------------------
 // No request logging for this client: the addresses it posts to are secrets (a webhook id, an ntfy topic).
-builder.Services.AddHttpClient<AlertSender>(c => c.Timeout = TimeSpan.FromSeconds(30)).RemoveAllLoggers();
+// Every connection is checked after DNS: never a link-local or cloud metadata address.
+builder.Services.AddHttpClient<AlertSender>(c => c.Timeout = TimeSpan.FromSeconds(30))
+    .ConfigurePrimaryHttpMessageHandler(AlertAddressGuard.CreateHandler)
+    .RemoveAllLoggers();
 builder.Services.AddSingleton<AlertSettings>();
 builder.Services.AddSingleton<AlertService>();
 builder.Services.AddHostedService<AlertWorker>();
@@ -156,6 +159,7 @@ if (!app.Environment.IsDevelopment())
 app.UseWhen(
     context => !context.Request.Path.StartsWithSegments("/api") && !context.Request.Path.StartsWithSegments("/mcp"),
     branch => branch.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true));
+app.UseSameOriginGuard();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();

@@ -32,6 +32,9 @@ public sealed record T3StartRequest
     public IssueRef? Issue { get; init; }
     public bool Automatic { get; init; }
     public bool Again { get; init; }
+
+    /// <summary>A caution for the person starting it by hand, about what the prepared prompt holds (comments by people not on the allowed list). Not sent anywhere.</summary>
+    public string? Warning { get; init; }
 }
 
 public sealed record T3StartOutcome(T3ThreadEntity? Thread, string? Error)

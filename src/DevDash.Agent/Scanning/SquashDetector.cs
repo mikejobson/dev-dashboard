@@ -102,7 +102,7 @@ public sealed class SquashDetector(GitRunner git)
             {
                 // Which trunk commit to name: the newest equivalent one that changes something. Empty
                 // commits ("Initial plan") all share one patch id, so they match each other and say nothing.
-                var left = await run(["log", "--cherry-mark", "--left-only", "--no-merges", "--shortstat", "--format=%m%H", "-n", MaxTrunkCommits.ToString(CultureInfo.InvariantCulture), $"{trunk}...{tip}"]).ConfigureAwait(false);
+                var left = await run(["log", "--cherry-mark", "--left-only", "--no-merges", "--no-ext-diff", "--no-textconv", "--shortstat", "--format=%m%H", "-n", MaxTrunkCommits.ToString(CultureInfo.InvariantCulture), $"{trunk}...{tip}"]).ConfigureAwait(false);
                 string? current = null;
                 foreach (var line in left.Ok ? Lines(left.StdOut) : [])
                 {

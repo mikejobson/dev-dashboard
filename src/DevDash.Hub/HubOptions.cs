@@ -98,9 +98,19 @@ public sealed class AuthOptions
 
     /// <summary>
     /// Tailscale only: comma-separated tailnet logins (e.g. <c>you@example.com,you@github</c>) allowed to use
-    /// the dashboard. Empty means any tailnet user whose request reaches the hub through <c>tailscale serve</c>.
+    /// the dashboard. Empty means any tailnet user whose request reaches the hub through <c>tailscale serve</c>,
+    /// which the dashboard warns about.
     /// </summary>
     public string AllowedUsers { get; set; } = "";
+
+    /// <summary>
+    /// Tailscale only: the loopback address the hub listens on and <c>tailscale serve</c> proxies to.
+    /// Identity headers are trusted only on connections that arrive at this address. It must not be
+    /// 127.0.0.1: in userspace mode tailscaled hands a tailnet peer's direct connection to the node's
+    /// own IP to 127.0.0.1 on the same port, so a hub listening there could be reached around serve,
+    /// with headers the peer wrote itself.
+    /// </summary>
+    public string ServeAddress { get; set; } = "127.0.0.2";
 
     public IReadOnlySet<string> AllowedUserSet =>
         AllowedUsers.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

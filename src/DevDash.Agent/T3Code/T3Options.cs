@@ -2,12 +2,19 @@ namespace DevDash.Agent.T3Code;
 
 /// <summary>
 /// T3 Code on this machine (<c>Agent:T3</c>). On by default: the agent looks for T3's command-line tool,
-/// reports each repository's threads, and, when actions are on too, takes the "open in T3" and "start a
-/// thread" actions. <c>--no-t3</c> turns all of it off.
+/// reports each repository's threads, and, when actions are on too, takes the "open in T3" action. Starting a
+/// thread from the hub also needs <see cref="AllowStartFromHub"/>. <c>--no-t3</c> turns all of it off.
 /// </summary>
 public sealed class T3Options
 {
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Start T3 Code threads asked for from the hub (a repo's "Ask Claude in T3", "Fix in T3", issue threads). Off by
+    /// default, even with actions on: the hub chooses the prompt, and a thread usually runs with full access to this
+    /// machine, so whoever controls the hub (or an issue it turns into a prompt) would be running Claude here.
+    /// </summary>
+    public bool AllowStartFromHub { get; set; }
 
     /// <summary>
     /// The CLI to run, when it is not where T3 Code puts it (<c>~/.t3/bin/t3</c>; on Windows <c>t3.exe</c>,

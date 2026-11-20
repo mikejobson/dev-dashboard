@@ -1,5 +1,5 @@
 @* An open pull request as a small link to GitHub: CI state as a dot, the number, and its draft or review state. *@
-<a class="pr-chip @Tone" href="@PullRequest.Url" target="_blank" rel="noopener" title="@Tooltip" @onclick:stopPropagation="true">
+<a class="pr-chip @Tone" href="@Fmt.SafeLink(PullRequest.Url)" target="_blank" rel="noopener" title="@Tooltip" @onclick:stopPropagation="true">
     <span class="dot @CiClass" role="img" aria-label="@(CiText ?? "no CI")"></span>
     <span class="pr-chip-n">#@PullRequest.Number</span>
     @if (ShowTitle && PullRequest.Title.Length > 0) { <span class="pr-chip-title">@PullRequest.Title</span> }

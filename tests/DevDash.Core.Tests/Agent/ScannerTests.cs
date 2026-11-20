@@ -703,6 +703,165 @@ public sealed class ScannerTests : IDisposable
         Assert.Null(System.Text.Json.JsonSerializer.Deserialize<GitState>("{}", SnapshotSchema.JsonOptions)!.RemoteBranches);
     }
 
+    /// <summary>Config that runs a program, the way a repository whose .git came from an archive could carry it: writes <paramref name="marker"/> when run.</summary>
+    private static string Touch(string marker) => $"touch '{marker.Replace('\\', '/')}'";
+
+    [Fact]
+    public async Task A_clean_filter_in_the_repos_own_config_is_not_run_by_a_scan()
+    {
+        var marker = Path.Combine(_root, "filter-ran");
+        File.WriteAllText(Path.Combine(Widget, ".gitattributes"), "* filter=x\n");
+        File.WriteAllText(Path.Combine(Widget, "package.json"), """{ "name": "changed" }""");
+        Git(Widget, "config", "filter.x.clean", Touch(marker) + "; cat");
+        Git(Widget, "config", "filter.x.required", "true");
+
+        var snapshot = await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None);
+
+        Assert.False(File.Exists(marker));
+        var widget = snapshot.Entries.Single(e => e.Name == "widget");
+        Assert.Null(widget.Git);
+        Assert.Contains("filter.x.clean", widget.Error);
+    }
+
+    [Fact]
+    public async Task Includes_and_textconv_in_the_repos_own_config_stop_status_but_husky_hooks_do_not()
+    {
+        var git = new GitRunner();
+        Git(Widget, "config", "core.hooksPath", ".husky");
+        Assert.True((await git.RunAsync(Widget, ["status", "--porcelain=v2"], TimeSpan.FromSeconds(30))).Ok);
+
+        Git(Widget, "config", "diff.x.textconv", "cat");
+        var textconv = await git.RunAsync(Widget, ["status", "--porcelain=v2"], TimeSpan.FromSeconds(30));
+        Assert.Equal((false, true), (textconv.Ok, textconv.StdErr.Contains("diff.x.textconv")));
+
+        Git(Widget, "config", "--unset", "diff.x.textconv");
+        Git(Widget, "config", "include.path", "../../elsewhere.config");
+        Assert.Contains("include.path", (await git.RunAsync(Widget, ["status", "--porcelain=v2"], TimeSpan.FromSeconds(30))).StdErr);
+    }
+
+    [Fact]
+    public async Task A_filter_in_a_submodules_own_config_stops_status_too()
+    {
+        var modules = Directory.CreateDirectory(Path.Combine(Widget, ".git", "modules", "lib")).FullName;
+        File.WriteAllText(Path.Combine(modules, "config"), "[core]\n\tbare = false\n[filter \"x\"]\n\tprocess = sh -c 'touch pwned'\n");
+
+        var result = await new GitRunner().RunAsync(Widget, ["status", "--porcelain=v2"], TimeSpan.FromSeconds(30));
+
+        Assert.False(result.Ok);
+        Assert.Contains("filter.x.process", result.StdErr);
+    }
+
+    [Fact]
+    public async Task Fetch_and_ls_remote_are_not_run_where_the_repos_own_config_names_a_program()
+    {
+        var marker = Path.Combine(_root, "upload-pack-ran");
+        var git = new GitRunner();
+
+        // A local remote runs remote.<name>.uploadpack through a shell.
+        Git(Widget, "config", "remote.origin.uploadpack", Touch(marker) + "; git-upload-pack");
+        var fetch = await git.FetchAsync(Widget, TimeSpan.FromSeconds(30));
+        var tags = await git.ListRemoteTagsAsync(Widget, "origin", TimeSpan.FromSeconds(30));
+
+        Assert.False(File.Exists(marker));
+        Assert.Equal((false, false), (fetch.Ok, tags.Ok));
+        Assert.Contains("remote.origin.uploadpack", fetch.StdErr);
+        Assert.Contains("remote.origin.uploadpack", tags.StdErr);
+
+        Git(Widget, "config", "--unset-all", "remote.origin.uploadpack");
+        foreach (var (key, value) in new (string, string)[] { ("core.sshCommand", "ssh"), ("gpg.program", "gpg"), ("credential.helper", "store"), ("protocol.ext.allow", "always"), ("remote.origin.vcs", "x"), ("includeIf.gitdir:/x/.path", "y") })
+        {
+            Git(Widget, "config", key, value);
+            var refused = await git.FetchAsync(Widget, TimeSpan.FromSeconds(30));
+            Assert.Equal((false, true), (refused.Ok, refused.StdErr.ToLowerInvariant().Contains(key.ToLowerInvariant())));
+            Git(Widget, "config", "--unset-all", key);
+        }
+
+        Assert.True((await git.FetchAsync(Widget, TimeSpan.FromSeconds(30))).Ok); // and with nothing of the sort, it fetches
+    }
+
+    [Fact]
+    public async Task The_repos_hooks_never_run_when_the_agent_fetches()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return; // hooks need the executable bit
+        }
+
+        // Something new on the remote, so the fetch updates a ref and git would run reference-transaction.
+        var seed = Path.Combine(_root, "seed");
+        File.WriteAllText(Path.Combine(seed, "new.txt"), "new");
+        Git(seed, "add", "new.txt");
+        Git(seed, "commit", "-q", "-m", "new");
+        Git(seed, "push", "-q", _origin, "main");
+
+        var marker = Path.Combine(_root, "hook-ran");
+        var hook = Path.Combine(Widget, ".git", "hooks", "reference-transaction");
+        File.WriteAllText(hook, $"#!/bin/sh\n{Touch(marker)}\n");
+        File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var fetch = await new GitRunner().FetchAsync(Widget, TimeSpan.FromSeconds(30));
+
+        Assert.True(fetch.Ok, fetch.StdErr);
+        Assert.False(File.Exists(marker));
+        Assert.Equal(Git(seed, "rev-parse", "HEAD"), Git(Widget, "rev-parse", "origin/main"));
+    }
+
+    [Fact]
+    public async Task An_origin_head_that_looks_like_an_option_is_ignored()
+    {
+        // --short turns refs/heads/--output=x into "--output=x"; with a develop branch the scan compares tip times.
+        Git(Widget, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/--output=x");
+        Git(Widget, "branch", "develop");
+
+        var snapshot = await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None);
+
+        var git = snapshot.Entries.Single(e => e.Name == "widget").Git!;
+        Assert.Equal("main", git.DefaultBranch); // fell back to the conventional name
+        Assert.False(File.Exists(Path.Combine(Widget, "x")));
+    }
+
+    [Theory]
+    [InlineData("filter.lfs.clean", false, true)]
+    [InlineData("filter.lfs.required", false, false)]
+    [InlineData("diff.word.textconv", false, true)]
+    [InlineData("Diff.Word.Command", false, true)]
+    [InlineData("include.path", true, true)]
+    [InlineData("includeif.gitdir:~/work/.path", true, true)]
+    [InlineData("core.fsmonitor", false, false)] // overridden on the command line
+    [InlineData("core.hookspath", false, false)] // overridden on the command line
+    [InlineData("core.sshcommand", true, false)]
+    [InlineData("core.gitproxy", true, false)]
+    [InlineData("gpg.ssh.program", true, false)]
+    [InlineData("credential.https://example.com.helper", true, false)]
+    [InlineData("credential.helper", true, false)]
+    [InlineData("remote.origin.receivepack", true, false)]
+    [InlineData("remote.origin.vcs", true, false)]
+    [InlineData("protocol.allow", true, false)]
+    [InlineData("protocol.ext.allow", true, false)]
+    [InlineData("http.proxy", false, false)]
+    [InlineData("remote.origin.url", false, false)]
+    public void Knows_which_config_runs_programs(string key, bool network, bool status) =>
+        Assert.Equal((network, status), (GitRunner.RunsProgramOnNetwork(key), GitRunner.RunsProgramOnStatus(key)));
+
+    [Fact]
+    public void Finds_the_command_after_global_options()
+    {
+        Assert.Equal("status", GitRunner.Command(["--no-optional-locks", "status", "--porcelain=v2"]));
+        Assert.Equal("fetch", GitRunner.Command(["-c", "gc.auto=0", "-c", "fetch=x", "fetch", "--prune"]));
+        Assert.Equal("push", GitRunner.Command(["-c", "core.fsmonitor=false", "push", "--", "origin", "main"]));
+        Assert.Null(GitRunner.Command(["-c", "x=y"]));
+    }
+
+    [Theory]
+    [InlineData("filter.lfs.clean", "git-lfs clean -- %f", true)]
+    [InlineData("filter.lfs.smudge", "git-lfs smudge -- %f", true)]
+    [InlineData("filter.lfs.process", "git-lfs filter-process", true)]
+    [InlineData("filter.lfs.process", "git-lfs filter-process; touch /tmp/pwned", false)]
+    [InlineData("filter.lfs.clean", "sh -c evil", false)]
+    [InlineData("filter.other.clean", "git-lfs clean -- %f", false)]
+    public void Only_the_exact_git_lfs_filter_commands_are_let_through(string key, string value, bool standard) =>
+        Assert.Equal(standard, GitRunner.IsStandardLfs(key, value));
+
     private MachineScanner CreateScanner(bool autoFetch)
     {
         var options = new StaticOptions(new AgentOptions

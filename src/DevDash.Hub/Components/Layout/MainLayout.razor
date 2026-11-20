@@ -1,4 +1,5 @@
 @inherits LayoutComponentBase
+@inject Microsoft.Extensions.Options.IOptionsMonitor<AuthOptions> Auth
 
 <div class="shell">
     <aside class="sidebar">
@@ -10,6 +11,14 @@
         <HubUpdateNotice />
     </aside>
     <main class="main">
+        @if (string.Equals(Auth.CurrentValue.Mode, "Tailscale", StringComparison.OrdinalIgnoreCase) && Auth.CurrentValue.AllowedUserSet.Count == 0)
+        {
+            @* Anyone signed in to the tailnet (including users of nodes shared in from other tailnets) can queue actions on every machine. *@
+            <div class="banner warn">
+                Anyone on your tailnet can use this dashboard, including queueing actions on your machines.
+                Set <code>DEVDASH_ALLOWED_USERS</code> in the hub's <code>.env</code> to your Tailscale login(s) and restart the hub.
+            </div>
+        }
         @Body
     </main>
 </div>

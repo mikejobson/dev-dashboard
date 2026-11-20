@@ -41,8 +41,13 @@ public sealed class LocalDevIdentityProvider(IOptionsMonitor<AuthOptions> option
 /// <summary>
 /// Behind <c>tailscale serve</c>: the proxy runs in the same network namespace and connects over loopback,
 /// adding <c>Tailscale-User-Login</c> / <c>Tailscale-User-Name</c> for requests from user-owned devices.
-/// Headers are only trusted on loopback connections, so a tailnet peer that reaches the hub's port
-/// directly cannot forge them. Tagged devices get no identity headers and are refused (agents use API keys).
+/// Tagged devices get no identity headers and are refused (agents use API keys).
+/// <para>
+/// Headers are trusted only on a loopback connection to <see cref="AuthOptions.ServeAddress"/> (127.0.0.2),
+/// the address serve proxies to. Loopback alone is not enough: in userspace mode tailscaled forwards a
+/// tailnet peer's direct connection to the node's IP to 127.0.0.1 on the same port, so a check for
+/// "came from loopback" let any device on the tailnet name itself in the header.
+/// </para>
 /// </summary>
 public sealed class TailscaleIdentityProvider(IOptionsMonitor<AuthOptions> options, ILogger<TailscaleIdentityProvider> logger) : IBrowserIdentityProvider
 {
@@ -52,7 +57,7 @@ public sealed class TailscaleIdentityProvider(IOptionsMonitor<AuthOptions> optio
     public BrowserIdentity? Resolve(HttpContext context)
     {
         var remote = context.Connection.RemoteIpAddress;
-        if (remote is null || !IPAddress.IsLoopback(remote))
+        if (remote is null || !IPAddress.IsLoopback(remote) || !ArrivedAtServeAddress(context, options.CurrentValue))
         {
             return null;
         }
@@ -72,6 +77,17 @@ public sealed class TailscaleIdentityProvider(IOptionsMonitor<AuthOptions> optio
 
         var name = context.Request.Headers[NameHeader].ToString().Trim();
         return new BrowserIdentity(login, name.Length > 0 ? name : null);
+    }
+
+    private static bool ArrivedAtServeAddress(HttpContext context, AuthOptions auth)
+    {
+        var local = context.Connection.LocalIpAddress;
+        if (local is null || !IPAddress.TryParse(auth.ServeAddress, out var expected))
+        {
+            return false;
+        }
+
+        return (local.IsIPv4MappedToIPv6 ? local.MapToIPv4() : local).Equals(expected);
     }
 }
 

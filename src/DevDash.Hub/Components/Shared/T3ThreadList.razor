@@ -20,7 +20,7 @@ else
                                 <span class="chip @T3Threads.ChipClass(row.State)" title="@StatusTitle(thread)">@T3Threads.Label(row.State)</span>
                                 @if (thread.Link is { } link)
                                 {
-                                    <a class="title-link t3-thread-title" href="@link" target="_blank" rel="noopener" title="Open the thread in T3 Code">@(thread.Title.Length > 0 ? thread.Title : "Untitled thread")</a>
+                                    <a class="title-link t3-thread-title" href="@Fmt.SafeLink(link)" target="_blank" rel="noopener" title="Open the thread in T3 Code">@(thread.Title.Length > 0 ? thread.Title : "Untitled thread")</a>
                                 }
                                 else
                                 {
@@ -28,7 +28,7 @@ else
                                 }
                                 @foreach (var pr in thread.PullRequests.Where(p => p.Url is not null))
                                 {
-                                    <a class="chip info" href="@pr.Url" target="_blank" rel="noopener">PR@(pr.Number is { } n ? $" #{n}" : "")@(pr.State is { } s ? $" · {s.ToLowerInvariant()}" : "")</a>
+                                    <a class="chip info" href="@Fmt.SafeLink(pr.Url)" target="_blank" rel="noopener">PR@(pr.Number is { } n ? $" #{n}" : "")@(pr.State is { } s ? $" · {s.ToLowerInvariant()}" : "")</a>
                                 }
                                 @if (row.Started is { } started)
                                 {

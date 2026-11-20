@@ -268,7 +268,7 @@ public sealed class ArchiveActions(
                 $"Archived {path} to {archivePath} ({manifest.FileCount:N0} files, {Size(manifest.TotalBytes)}; the archive is {Size(manifest.ArchiveBytes)}).",
                 $"Checked: read back {manifest.FileCount + manifest.DirectoryCount + manifest.LinkCount:N0} entries against the folder; SHA-256 {sha}.",
                 plan.Excluded.Count > 0 ? $"Left out as regenerable build output: {string.Join(", ", plan.Excluded.Take(10))}{(plan.Excluded.Count > 10 ? $" and {plan.Excluded.Count - 10} more" : "")}." : "",
-                plan.Skipped.Count > 0 ? $"Links not kept (a zip on Windows cannot hold them): {string.Join(", ", plan.Skipped.Take(10))}." : "",
+                plan.Skipped.Count > 0 ? $"Links not kept (a zip on Windows cannot hold them, or they lead out of the project): {string.Join(", ", plan.Skipped.Take(10))}." : "",
                 $"Then moved {path} to {where}.",
                 .. notes,
             ];
@@ -449,23 +449,66 @@ public sealed class ArchiveActions(
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromMinutes(Math.Max(1, options.CurrentValue.Archive.TimeoutMinutes)));
+        // The archive is copied, and hashed as it is copied, into a folder only this user can open, and unpacked from that
+        // copy: what is unpacked is exactly what was checked, even if the archive (on a share, say) changes meanwhile.
+        // The manifest's machine is not compared with this one: the hub only restores onto the machine whose tombstone
+        // it is, and the machine id defaults to the host name, which a rename would change and so strand every archive.
         progress?.Invoke($"Checking the checksum of {archivePath}.");
-        string sha;
+        DirectoryInfo privateCopy;
         try
         {
-            sha = await Task.Run(() => ProjectArchive.Sha256Of(archivePath, timeout.Token), timeout.Token).ConfigureAwait(false);
+            privateCopy = Directory.CreateTempSubdirectory("devdash-restore-");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return Refuse(stopwatch, $"could not read {archivePath}: {ex.Message}");
+            return Refuse(stopwatch, $"could not make a temporary folder for the archive: {ex.Message}");
         }
 
-        if (sha != manifest.ArchiveSha256)
+        try
         {
-            return Refuse(stopwatch, $"{archivePath} does not match its manifest's SHA-256 (it is damaged or was changed). Nothing was restored.");
+            var copy = Path.Combine(privateCopy.FullName, "archive");
+            string sha;
+            try
+            {
+                sha = await Task.Run(() => ProjectArchive.CopyAndHash(archivePath, copy, timeout.Token), timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Refuse(stopwatch, $"could not read {archivePath}: {ex.Message}");
+            }
+
+            if (sha != manifest.ArchiveSha256)
+            {
+                return Refuse(stopwatch, $"{archivePath} does not match its manifest's SHA-256 (it is damaged or was changed). Nothing was restored.");
+            }
+
+            return await UnpackAsync(action, stopwatch, progress, archivePath, copy, folder, manifest, timeout.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            return Fail(stopwatch, target, $"Restoring took longer than {options.CurrentValue.Archive.TimeoutMinutes} minutes and was stopped. Nothing was restored.");
+        }
+        finally
+        {
+            try
+            {
+                privateCopy.Delete(recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning("Could not delete the temporary copy {Path}: {Error}", privateCopy.FullName, ex.Message);
+            }
+        }
+    }
+
+    /// <summary>Unpacks the checked private <paramref name="copy"/> of <paramref name="archivePath"/> beside the target and renames it into place.</summary>
+    private async Task<ActionOutcome> UnpackAsync(
+        AgentAction action, Stopwatch stopwatch, Action<string>? progress, string archivePath, string copy, string folder, ArchiveManifest manifest, CancellationToken ct)
+    {
+        var target = action.RepoPath!;
 
         // Unpacked beside the target under a dot name (the scanner skips those), checked, then renamed into place in one step.
+        // Nothing in it is run, git included: the restored repository's own config is never read here.
         var parent = Path.GetDirectoryName(target.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))!;
         var temporary = Path.Combine(parent, $".devdash-restore-{Guid.NewGuid():N}");
         var done = false;
@@ -473,7 +516,7 @@ public sealed class ArchiveActions(
         {
             logger.LogWarning("Restoring {Archive} into {Target}: asked for from the dashboard", archivePath, target);
             progress?.Invoke($"Unpacking {archivePath}.");
-            var contents = await Task.Run(() => ProjectArchive.Extract(archivePath, manifest.Format, manifest.RootName, temporary, timeout.Token), timeout.Token).ConfigureAwait(false);
+            var contents = await Task.Run(() => ProjectArchive.Extract(copy, manifest.Format, manifest.RootName, temporary, ct), ct).ConfigureAwait(false);
             if (Mismatch(contents, manifest.FileCount, manifest.DirectoryCount, manifest.LinkCount, manifest.TotalBytes, manifest.ContentSha256) is { } bad)
             {
                 return Fail(stopwatch, target, $"{archivePath} did not unpack as its manifest says ({bad}). Nothing was restored.");
@@ -490,10 +533,6 @@ public sealed class ArchiveActions(
                 $"Restored {archivePath} into {target} ({contents.FileCount:N0} files, {Size(contents.TotalBytes)}); every file checked against the manifest. The archive is still in {folder}."
                 + (manifest.ExcludedBuildOutput.Count > 0 ? $"\nBuild output was not archived and needs rebuilding: {string.Join(", ", manifest.ExcludedBuildOutput.Take(10))}." : "")),
                 [target], stopwatch.ElapsedMilliseconds);
-        }
-        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
-        {
-            return Fail(stopwatch, target, $"Restoring took longer than {options.CurrentValue.Archive.TimeoutMinutes} minutes and was stopped. Nothing was restored.");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {

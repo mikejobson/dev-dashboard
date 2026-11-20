@@ -73,6 +73,10 @@
                 {
                     <div class="banner warn">@Warning</div>
                 }
+                @if (_preparedWarning is not null)
+                {
+                    <div class="banner warn">@_preparedWarning</div>
+                }
                 <p>It is recorded as started by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and nothing starts.</p>
                 @if (_error is not null)
                 {
@@ -135,7 +139,7 @@
     private IReadOnlyList<BaseOption> _baseOptions = [];
     private int _target;
     private string _prompt = "", _title = "", _branch = "", _base = "", _login = "";
-    private string? _error;
+    private string? _error, _preparedWarning;
     private T3ThreadEntity? _queued;
 
     /// <summary>
@@ -209,9 +213,11 @@
         }
 
         var git = target.Target.Git;
+        _preparedWarning = null;
         if (Prepare is not null && await Prepare(target) is { } prepared)
         {
             (_prompt, _title, _branch, _base) = (prepared.Prompt, prepared.Title, prepared.NewBranch, prepared.WorktreeBase);
+            _preparedWarning = prepared.Warning;
         }
         else
         {

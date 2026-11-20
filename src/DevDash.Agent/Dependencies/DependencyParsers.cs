@@ -12,8 +12,9 @@ public sealed record VulnerableResult(SeverityCounts? Counts, IReadOnlyList<Vuln
 public sealed record OutdatedResult(int? Count, IReadOnlyList<OutdatedPackage> Top, string? Skipped = null, bool Transient = false);
 
 /// <summary>
-/// Reduces the package tools' JSON to counts by severity and the top few package names and advisory
-/// ids. Nothing else of their output is kept or sent. Pure, so the tests feed it captured text.
+/// Reduces npm's JSON, and NuGet's restore output checked against nuget.org's data, to counts by
+/// severity and the top few package names and advisory ids. Nothing else is kept or sent. Pure, so the
+/// tests feed it captured text.
 /// </summary>
 public static class DependencyParsers
 {
@@ -23,138 +24,66 @@ public static class DependencyParsers
 
     private static readonly string[] Order = ["critical", "high", "moderate", "low"];
 
-    // ---- dotnet list package --format json --------------------------------------------------------
+    // ---- project.assets.json against nuget.org's data -------------------------------------------
 
-    public static VulnerableResult DotnetVulnerable(string output)
+    /// <summary>
+    /// The resolved packages (direct and transitive, as restore wrote them) that nuget.org's vulnerability
+    /// data lists at their version. One package at one version counts once, at its worst severity.
+    /// </summary>
+    public static VulnerableResult NuGetVulnerable(IEnumerable<PackageVersion> resolved, IReadOnlyDictionary<string, List<NuGetAdvisory>> advisories, string? note)
     {
-        if (!TryParseDotnet(output, out var packages, out var skipped, out var transient))
-        {
-            return new VulnerableResult(null, [], skipped, transient);
-        }
-
-        // One package can be in many projects and frameworks: it counts once, at its worst severity.
         var found = new Dictionary<string, (string Name, string? Version, int Rank, SortedSet<string> Advisories)>(StringComparer.OrdinalIgnoreCase);
-        foreach (var package in packages)
+        foreach (var package in resolved)
         {
-            if (!package.TryGetProperty("vulnerabilities", out var list) || list.ValueKind != JsonValueKind.Array || list.GetArrayLength() == 0 || Text(package, "id") is not { } id)
+            if (!advisories.TryGetValue(package.Id, out var list) || !NuGetVersion.TryParse(package.Version, out var version))
             {
                 continue;
             }
 
-            var version = Text(package, "resolvedVersion");
-            var key = $"{id}@{version}";
-            (string Name, string? Version, int Rank, SortedSet<string> Advisories) entry =
-                found.TryGetValue(key, out var existing) ? existing : (id, version, Order.Length - 1, new SortedSet<string>(StringComparer.Ordinal));
-            foreach (var vulnerability in list.EnumerateArray())
+            foreach (var advisory in list.Where(a => a.Versions.Contains(version)))
             {
-                if (vulnerability.ValueKind != JsonValueKind.Object)
+                var key = $"{package.Id}@{package.Version}";
+                (string Name, string? Version, int Rank, SortedSet<string> Advisories) entry =
+                    found.TryGetValue(key, out var existing) ? existing : (package.Id, package.Version, Order.Length - 1, new SortedSet<string>(StringComparer.Ordinal));
+                entry.Rank = Math.Min(entry.Rank, 3 - Math.Clamp(advisory.Severity, 0, 3)); // NuGet: 3 critical … 0 low
+                if (AdvisoryId(advisory.Url) is { } id)
                 {
-                    continue;
+                    entry.Advisories.Add(id);
                 }
 
-                entry.Rank = Math.Min(entry.Rank, Rank(Text(vulnerability, "severity")));
-                if (AdvisoryId(Text(vulnerability, "advisoryurl")) is { } advisory)
-                {
-                    entry.Advisories.Add(advisory);
-                }
+                found[key] = entry;
             }
-
-            found[key] = entry;
         }
 
-        return Vulnerable(found.Values.Select(f => (f.Name, f.Version, f.Rank, (IEnumerable<string>)f.Advisories)), skipped);
+        return Vulnerable(found.Values.Select(f => (f.Name, f.Version, f.Rank, (IEnumerable<string>)f.Advisories)), note);
     }
 
-    public static OutdatedResult DotnetOutdated(string output)
+    /// <summary>
+    /// The top-level packages with a newer version on nuget.org: the newest stable one, or the newest of
+    /// all when the project already uses a prerelease (as <c>dotnet list package --outdated</c> decides).
+    /// </summary>
+    public static OutdatedResult NuGetOutdated(IEnumerable<(PackageVersion Package, IReadOnlyList<string> Available)> packages, string? note)
     {
-        if (!TryParseDotnet(output, out var packages, out var skipped, out var transient))
-        {
-            return new OutdatedResult(null, [], skipped, transient);
-        }
-
         var found = new SortedDictionary<string, OutdatedPackage>(StringComparer.OrdinalIgnoreCase);
-        foreach (var package in packages)
+        foreach (var (package, available) in packages)
         {
-            if (Text(package, "id") is { } id && Text(package, "latestVersion") is { } latest && Text(package, "resolvedVersion") is var current && !string.Equals(latest, current, StringComparison.OrdinalIgnoreCase))
+            if (!NuGetVersion.TryParse(package.Version, out var current))
             {
-                found.TryAdd(id, new OutdatedPackage { Name = Clip(id)!, Current = Clip(current), Latest = Clip(latest) });
+                continue;
+            }
+
+            var latest = available
+                .Select(text => (Text: text, Ok: NuGetVersion.TryParse(text, out var v), Version: v))
+                .Where(x => x.Ok && (current.IsPrerelease || !x.Version.IsPrerelease))
+                .OrderByDescending(x => x.Version)
+                .FirstOrDefault();
+            if (latest.Text is not null && latest.Version.CompareTo(current) > 0)
+            {
+                found.TryAdd(package.Id, new OutdatedPackage { Name = Clip(package.Id)!, Current = Clip(package.Version), Latest = Clip(latest.Text) });
             }
         }
 
-        return new OutdatedResult(found.Count, found.Values.Take(DependencyHealth.MaxNames).ToList(), skipped);
-    }
-
-    /// <summary>Every package element of every project and framework. False when there is nothing usable, with the reason.</summary>
-    private static bool TryParseDotnet(string output, out List<JsonElement> packages, out string? skipped, out bool transient)
-    {
-        packages = [];
-        skipped = null;
-        transient = false;
-        if (Json(output) is not { } root)
-        {
-            skipped = Unreadable;
-            return false;
-        }
-
-        var projects = 0;
-        var withPackages = 0;
-        if (root.TryGetProperty("projects", out var projectList) && projectList.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var project in projectList.EnumerateArray())
-            {
-                projects++;
-                if (project.ValueKind != JsonValueKind.Object || !project.TryGetProperty("frameworks", out var frameworks) || frameworks.ValueKind != JsonValueKind.Array)
-                {
-                    continue;
-                }
-
-                withPackages++;
-                foreach (var framework in frameworks.EnumerateArray())
-                {
-                    foreach (var list in (string[])["topLevelPackages", "transitivePackages"])
-                    {
-                        if (framework.ValueKind == JsonValueKind.Object && framework.TryGetProperty(list, out var items) && items.ValueKind == JsonValueKind.Array)
-                        {
-                            packages.AddRange(items.EnumerateArray().Where(i => i.ValueKind == JsonValueKind.Object).Select(i => i.Clone()));
-                        }
-                    }
-                }
-            }
-        }
-
-        var problems = new List<string>();
-        if (root.TryGetProperty("problems", out var problemList) && problemList.ValueKind == JsonValueKind.Array)
-        {
-            problems.AddRange(problemList.EnumerateArray().Where(p => p.ValueKind == JsonValueKind.Object).Select(p => Text(p, "text") ?? ""));
-        }
-
-        var notRestored = problems.Count(p => p.Contains("No assets file", StringComparison.OrdinalIgnoreCase) || p.Contains("run restore", StringComparison.OrdinalIgnoreCase));
-        var unreachable = problems.Any(p => p.Contains("Unable to load the service index", StringComparison.OrdinalIgnoreCase)
-            || p.Contains("No such host", StringComparison.OrdinalIgnoreCase)
-            || p.Contains("could not be resolved", StringComparison.OrdinalIgnoreCase)
-            || p.Contains("timed out", StringComparison.OrdinalIgnoreCase));
-        if (unreachable)
-        {
-            skipped = Unreachable;
-            transient = true;
-            return false;
-        }
-
-        if (notRestored > 0 && withPackages == 0)
-        {
-            skipped = NotRestored;
-            return false;
-        }
-
-        if (projects == 0)
-        {
-            skipped = problems.Count > 0 ? "dotnet list reported a problem" : "no projects found";
-            return false;
-        }
-
-        // Some projects answered: their numbers stand, with a note about the rest.
-        skipped = notRestored > 0 ? $"{notRestored} of {projects} projects not restored" : null;
-        return true;
+        return new OutdatedResult(found.Count, found.Values.Take(DependencyHealth.MaxNames).ToList(), note);
     }
 
     // ---- npm --json -------------------------------------------------------------------------------

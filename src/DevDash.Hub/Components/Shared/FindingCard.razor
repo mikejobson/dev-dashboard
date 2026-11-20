@@ -45,7 +45,7 @@
             }
             @if (Finding.Url is not null)
             {
-                <span> · <a href="@Finding.Url" target="_blank" rel="noopener">open on GitHub</a></span>
+                <span> · <a href="@Fmt.SafeLink(Finding.Url)" target="_blank" rel="noopener">open on GitHub</a></span>
             }
         </p>;
 

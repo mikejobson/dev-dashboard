@@ -72,7 +72,7 @@ else
                     var (statusText, statusClass, statusTitle) = T3View.Status(row);
                     <tr @key="(issue.RepoKey, issue.Number)">
                         <td class="cell-main">
-                            <a class="title-link" href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span>
+                            <a class="title-link" href="@Fmt.SafeLink(issue.Url)" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span>
                             <div class="chips issue-labels">
                                 <a class="chip muted" href="@Fmt.RepoUrl(issue.RepoKey)">@issue.Repo</a>
                                 @foreach (var label in issue.Labels)
@@ -90,7 +90,7 @@ else
                                     var link = row.Live?.Link ?? row.Latest?.Link;
                                     @if (link is not null)
                                     {
-                                        <a class="chip @statusClass" href="@link" target="_blank" rel="noopener" title="@statusTitle">@statusText</a>
+                                        <a class="chip @statusClass" href="@Fmt.SafeLink(link)" target="_blank" rel="noopener" title="@statusTitle">@statusText</a>
                                     }
                                     else
                                     {
@@ -98,7 +98,7 @@ else
                                     }
                                     @foreach (var pr in (row.Live?.PullRequests ?? []).Where(p => p.Url is not null))
                                     {
-                                        <a class="chip info" href="@pr.Url" target="_blank" rel="noopener">PR@(pr.Number is { } n ? $" #{n}" : "")</a>
+                                        <a class="chip info" href="@Fmt.SafeLink(pr.Url)" target="_blank" rel="noopener">PR@(pr.Number is { } n ? $" #{n}" : "")</a>
                                     }
                                 }
                             </div>
@@ -143,7 +143,7 @@ else
         <h3>Start a thread when an issue is labelled</h3>
         <p class="muted small">
             Off unless switched on, and then only for the repos ticked below. A thread usually runs with full access to its machine, so the label is not enough on its own:
-            it must have been added by an allowed GitHub login, and on a public repo the issue must also have been written by one. Otherwise the issue waits here for a manual start, with the reason.
+            it must have been added by an allowed GitHub login, and on a public (or internal) repo the issue must also have been written by one, and comments by anyone else are left out of the prompt. Otherwise the issue waits here for a manual start, with the reason.
             Never more than one automatic thread per issue.
         </p>
         <label class="check"><input type="checkbox" @bind="_edit.AutoStart" /> On</label>
@@ -160,7 +160,7 @@ else
         {
             <p class="muted small">No tracked repos yet: they are the GitHub repos agents report clones of.</p>
         }
-        @foreach (var (key, _) in _tracked)
+        @foreach (var (key, _, _) in _tracked)
         {
             var repo = Repo(key);
             var machines = Worker.MachinesFor(key);
@@ -202,7 +202,7 @@ else
     private IssueSettings _settings = new();
     private IssueSettings _edit = new();
     private string _template = T3Prompts.DefaultIssueTemplate;
-    private IReadOnlyList<(string Key, bool? IsPrivate)> _tracked = [];
+    private IReadOnlyList<(string Key, bool? IsPrivate, bool IsInternal)> _tracked = [];
     private Dictionary<string, RepoRow> _repos = new(StringComparer.OrdinalIgnoreCase);
     private string _query = "", _repoFilter = "";
     private bool _withThreads, _editing;
@@ -258,8 +258,8 @@ else
     {
         var allowed = _settings.AllowedSet(GitHub.Current.ViewerLogin);
         var reason = row.Latest is { Status: IssueThreadStatus.NeedsManualStart } decision ? $"Not started automatically: {decision.Reason}. " : "";
-        var stranger = row.Repo.IsPrivate != true && (row.Issue.Author is null || !allowed.Contains(row.Issue.Author))
-            ? $"This issue was written by {row.Issue.Author ?? "an unknown user"}{(row.Repo.IsPrivate is null ? "" : " on a public repo")}: read the prompt before starting, as the thread will be able to act on this machine."
+        var stranger = !IssueTrigger.CollaboratorsOnly(row.Repo.IsPrivate, row.Repo.IsInternal) && (row.Issue.Author is null || !allowed.Contains(row.Issue.Author))
+            ? $"This issue was written by {row.Issue.Author ?? "an unknown user"}{(row.Repo.IsInternal ? " on an internal repo" : row.Repo.IsPrivate is null ? "" : " on a public repo")}: read the prompt before starting, as the thread will be able to act on this machine."
             : "";
         var text = (reason + stranger).Trim();
         return text.Length == 0 ? null : text;

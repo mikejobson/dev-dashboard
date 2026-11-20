@@ -14,7 +14,7 @@ public interface IGitHubTokenProvider
 
 /// <summary>
 /// Token lookup order: <c>GitHub:Token</c> setting, the <c>GITHUB_TOKEN</c> environment variable, then
-/// <c>gh auth token</c> (local development). The token is only ever used for read-only queries.
+/// <c>gh auth token</c> (local development). The token is used for read-only queries, and for issue write-back (a comment and a label) when that is turned on.
 /// </summary>
 public sealed class GitHubTokenProvider(IOptionsMonitor<GitHubOptions> options, IConfiguration configuration, ILogger<GitHubTokenProvider> logger)
     : IGitHubTokenProvider

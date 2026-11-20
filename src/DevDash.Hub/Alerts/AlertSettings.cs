@@ -10,9 +10,10 @@ namespace DevDash.Hub.Alerts;
 
 /// <summary>Whether a secret has a value, and where it comes from. Never the value.</summary>
 /// <param name="SavedHere">Set on the Alerts page (kept in the database), not in configuration.</param>
-public sealed record SecretState(bool Set, bool SavedHere)
+/// <param name="Withheld">Configuration has a value, but the channel's address was changed on the page, so it is not used: enter it again.</param>
+public sealed record SecretState(bool Set, bool SavedHere, bool Withheld = false)
 {
-    public string Text => !Set ? "not set" : SavedHere ? "set" : "set in configuration";
+    public string Text => Withheld ? "enter it again: the address changed" : !Set ? "not set" : SavedHere ? "set" : "set in configuration";
 }
 
 /// <summary>
@@ -20,7 +21,11 @@ public sealed record SecretState(bool Set, bool SavedHere)
 /// whatever was changed on the Alerts page laid over it. Those changes are rows in <c>AlertSettings</c>,
 /// one per setting that differs from configuration, so a setting nobody touched keeps following
 /// configuration. Secrets are stored encrypted with the hub's data-protection key and are write-only:
-/// nothing here hands one to a page, and nothing logs one.
+/// nothing here hands one to a page, and nothing logs one. A secret belongs to its channel's address
+/// (<see cref="Bindings"/>): changing the address on the page forgets the secret saved for the old one
+/// unless a new one is typed in the same save, and a secret from configuration is only used with
+/// configuration's own address. Otherwise anyone who can save the page could point the address at their
+/// own server, press Send test, and read the token.
 /// </summary>
 public sealed class AlertSettings(
     IDbContextFactory<DevDashDbContext> dbFactory,
@@ -42,6 +47,28 @@ public sealed class AlertSettings(
     public static readonly IReadOnlySet<string> SecretKeys =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { WebhookUrl, WebhookToken, NtfyTopic, NtfyToken, HomeAssistantWebhookId };
 
+    public const string NtfyServer = "Channels:Ntfy:Server";
+    public const string HomeAssistantUrl = "Channels:HomeAssistant:Url";
+
+    /// <summary>Each channel's address, and the secrets that go to it and only to it.</summary>
+    public static readonly IReadOnlyList<(string Address, IReadOnlyList<string> Secrets)> Bindings =
+    [
+        (WebhookUrl, [WebhookToken]),
+        (NtfyServer, [NtfyTopic, NtfyToken]),
+        (HomeAssistantUrl, [HomeAssistantWebhookId]),
+    ];
+
+    /// <summary>How the page names a secret.</summary>
+    public static string SecretLabel(string key) => key switch
+    {
+        WebhookUrl => "webhook URL",
+        WebhookToken => "webhook bearer token",
+        NtfyTopic => "ntfy topic",
+        NtfyToken => "ntfy access token",
+        HomeAssistantWebhookId => "Home Assistant webhook ID",
+        _ => key,
+    };
+
     private readonly IDataProtector _protector = protection.CreateProtector("DevDash.Alerts.Secrets.v1");
 
     /// <summary>What configuration alone says, before anything saved on the page.</summary>
@@ -60,10 +87,14 @@ public sealed class AlertSettings(
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rows = await db.AlertSettings.AsNoTracking().ToListAsync(ct);
         var effective = Flatten(Effective(rows), secrets: true);
+        var configured = Flatten(Configured(), secrets: true);
         var saved = rows.Where(r => r.IsSecret).Select(r => r.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return SecretKeys.ToDictionary(
             key => key,
-            key => new SecretState(effective.GetValueOrDefault(key) is { Length: > 0 }, saved.Contains(key)),
+            key => new SecretState(
+                effective.GetValueOrDefault(key) is { Length: > 0 },
+                saved.Contains(key),
+                !saved.Contains(key) && configured.GetValueOrDefault(key) is { Length: > 0 } && effective.GetValueOrDefault(key) is not { Length: > 0 }),
             StringComparer.OrdinalIgnoreCase);
     }
 
@@ -77,9 +108,11 @@ public sealed class AlertSettings(
     /// <summary>
     /// Saves what the page holds. Only what differs from configuration is stored. <paramref name="secrets"/>
     /// has an entry for each secret the user typed (stored) or asked to remove (null or empty: the saved
-    /// value goes, and configuration's shows through again); a secret with no entry is left as it is.
+    /// value goes, and configuration's shows through again); a secret with no entry is left as it is, unless
+    /// its channel's address changed in this save: then it is forgotten. Returns the secrets forgotten that
+    /// way, which must be entered again.
     /// </summary>
-    public async Task SaveAsync(AlertOptions edited, IReadOnlyDictionary<string, string?> secrets, string by, CancellationToken ct = default)
+    public async Task<IReadOnlyList<string>> SaveAsync(AlertOptions edited, IReadOnlyDictionary<string, string?> secrets, string by, CancellationToken ct = default)
     {
         var secretEdits = new Dictionary<string, string?>(secrets, StringComparer.OrdinalIgnoreCase);
 
@@ -97,6 +130,7 @@ public sealed class AlertSettings(
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rows = (await db.AlertSettings.ToListAsync(ct)).ToDictionary(r => r.Key, StringComparer.OrdinalIgnoreCase);
+        var before = Flatten(Effective(rows.Values.ToList()), secrets: true);
 
         void Set(string key, string value, bool secret)
         {
@@ -149,10 +183,35 @@ public sealed class AlertSettings(
             }
         }
 
+        // A new address does not take the old address's secrets with it.
+        var after = Flatten(Effective(rows.Values.ToList()), secrets: true);
+        var cleared = new List<string>();
+        foreach (var (address, bound) in Bindings.Where(b => !SameAddress(before.GetValueOrDefault(b.Address), after.GetValueOrDefault(b.Address))))
+        {
+            foreach (var key in bound.Where(k => !(secretEdits.TryGetValue(k, out var typed) && !string.IsNullOrWhiteSpace(typed))))
+            {
+                Remove(key);
+                if (before.GetValueOrDefault(key) is { Length: > 0 })
+                {
+                    cleared.Add(key);
+                }
+            }
+        }
+
         await db.SaveChangesAsync(ct);
         logger.LogInformation("Alert settings saved by {User}: {Count} differ from configuration", by, rows.Count);
+        if (cleared.Count > 0)
+        {
+            logger.LogInformation("Alert settings: a channel address changed, so {Secrets} must be entered again", string.Join(", ", cleared.Select(SecretLabel)));
+        }
+
         notifier.Notify(DashboardChange.Alerts);
+        return cleared;
     }
+
+    /// <summary>The same address, give or take case, spaces and a trailing slash.</summary>
+    internal static bool SameAddress(string? a, string? b) =>
+        string.Equals((a ?? "").Trim().TrimEnd('/'), (b ?? "").Trim().TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Forgets everything saved on the page, secrets included: configuration alone applies again.</summary>
     public async Task ResetAsync(string by, CancellationToken ct = default)
@@ -185,6 +244,28 @@ public sealed class AlertSettings(
             }
         }
 
+        var options = Build(overrides);
+
+        // A secret from configuration goes only to configuration's own address: once the page has changed the
+        // address, it is withheld until one is entered on the page.
+        var flat = Flatten(options, secrets: true);
+        var configured = Flatten(Configured(), secrets: true);
+        var savedSecrets = rows.Where(r => r.IsSecret).Select(r => r.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var withheld = false;
+        foreach (var (address, bound) in Bindings.Where(b => !SameAddress(flat.GetValueOrDefault(b.Address), configured.GetValueOrDefault(b.Address))))
+        {
+            foreach (var key in bound.Where(k => !savedSecrets.Contains(k) && flat.GetValueOrDefault(k) is { Length: > 0 }))
+            {
+                overrides[key] = "";
+                withheld = true;
+            }
+        }
+
+        return withheld ? Build(overrides) : options;
+    }
+
+    private AlertOptions Build(IReadOnlyDictionary<string, string?> overrides)
+    {
         var merged = new ConfigurationBuilder()
             .AddConfiguration(configuration.GetSection(SectionName))
             .AddInMemoryCollection(overrides)

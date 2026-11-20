@@ -33,7 +33,7 @@ COPY --from=build /app ./
 ENV ASPNETCORE_ENVIRONMENT=Production \
     DOTNET_RUNNING_IN_CONTAINER=true \
     Hub__DataDirectory=/data \
-    Urls=http://127.0.0.1:8080 \
+    Urls=http://127.0.0.2:8080 \
     ASPNETCORE_HTTP_PORTS=
 
 USER $APP_UID

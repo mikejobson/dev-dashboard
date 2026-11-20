@@ -314,63 +314,8 @@ public sealed class DependencyCheckTests : IDisposable
 {
     private readonly FakeMachine _machine = new();
     private readonly string _repo;
-    private readonly string _dotnet;
     private readonly string _npm;
     private readonly ToolLocator _locator;
-
-    private const string HelpWithNoRestore = "Options:\n  --vulnerable\n  --outdated\n  --format <console|json>\n  --no-restore   Do not restore before running the command.\n";
-    private const string HelpWithoutNoRestore = "Options:\n  --vulnerable\n  --outdated\n  --format <console|json>\n";
-
-    private const string VulnerableJson = """
-        {
-          "version": 1,
-          "parameters": "--vulnerable --include-transitive",
-          "sources": [ "https://packages.example.test/v3/index.json" ],
-          "projects": [
-            { "path": "/repo/src/App/App.csproj",
-              "frameworks": [
-                { "framework": "net8.0",
-                  "topLevelPackages": [
-                    { "id": "Some.Json", "requestedVersion": "12.0.1", "resolvedVersion": "12.0.1",
-                      "vulnerabilities": [ { "severity": "High", "advisoryurl": "https://github.com/advisories/GHSA-5crp-9r3c-p9vr" } ] } ],
-                  "transitivePackages": [
-                    { "id": "Deep.Crypto", "resolvedVersion": "4.3.0",
-                      "vulnerabilities": [ { "severity": "Moderate", "advisoryurl": "https://github.com/advisories/GHSA-aaaa-1111-bbbb" },
-                                           { "severity": "Critical", "advisoryurl": "https://github.com/advisories/GHSA-cccc-2222-dddd" } ] } ] },
-                { "framework": "net10.0",
-                  "topLevelPackages": [
-                    { "id": "Some.Json", "requestedVersion": "12.0.1", "resolvedVersion": "12.0.1",
-                      "vulnerabilities": [ { "severity": "High", "advisoryurl": "https://github.com/advisories/GHSA-5crp-9r3c-p9vr" } ] } ] } ] },
-            { "path": "/repo/src/Lib/Lib.csproj" },
-            { "path": "/repo/tests/App.Tests/App.Tests.csproj",
-              "frameworks": [ { "framework": "net8.0", "transitivePackages": [
-                    { "id": "Old.Text", "resolvedVersion": "1.0.0", "vulnerabilities": [ { "severity": "Low", "advisoryurl": "https://example.test/not-an-advisory" } ] } ] } ] }
-          ]
-        }
-        """;
-
-    private const string OutdatedJson = """
-        { "version": 1, "parameters": "--outdated",
-          "projects": [
-            { "path": "/repo/src/App/App.csproj", "frameworks": [ { "framework": "net8.0", "topLevelPackages": [
-                { "id": "Some.Json", "requestedVersion": "12.0.1", "resolvedVersion": "12.0.1", "latestVersion": "13.0.3" },
-                { "id": "Fresh.Lib", "requestedVersion": "2.0.0", "resolvedVersion": "2.0.0", "latestVersion": "2.0.0" } ] } ] },
-            { "path": "/repo/tests/App.Tests/App.Tests.csproj", "frameworks": [ { "framework": "net8.0", "topLevelPackages": [
-                { "id": "Some.Json", "requestedVersion": "12.0.1", "resolvedVersion": "12.0.1", "latestVersion": "13.0.3" },
-                { "id": "Test.Runner", "requestedVersion": "2.9.0", "resolvedVersion": "2.9.0", "latestVersion": "3.1.0" } ] } ] } ] }
-        """;
-
-    private const string NotRestoredJson = """
-        { "version": 1, "parameters": "--vulnerable --include-transitive",
-          "problems": [ { "project": "/repo/src/App/App.csproj", "level": "error", "text": "No assets file was found for `/repo/src/App/App.csproj`. Please run restore before running this command." } ],
-          "projects": [ { "path": "/repo/src/App/App.csproj" } ] }
-        """;
-
-    private const string OfflineJson = """
-        { "version": 1, "parameters": "--vulnerable",
-          "problems": [ { "level": "error", "text": "Unable to load the service index for source https://packages.example.test/v3/index.json." } ],
-          "projects": [ { "path": "/repo/src/App/App.csproj" } ] }
-        """;
 
     private const string AuditJson = """
         {
@@ -394,15 +339,12 @@ public sealed class DependencyCheckTests : IDisposable
     public DependencyCheckTests()
     {
         _repo = _machine.Dir("dev", "widget");
-        _dotnet = _machine.Tool("usr", "local", "share", "dotnet", "dotnet");
         _npm = _machine.Tool("opt", "homebrew", "bin", "npm");
         _machine.Tool("opt", "homebrew", "bin", "node");
         _locator = new ToolLocator(_machine.Environment());
     }
 
     public void Dispose() => _machine.Dispose();
-
-    private void Dotnet() => File.WriteAllText(Path.Combine(_repo, "Widget.sln"), "");
 
     private void Npm(bool lockfile = true, bool modules = true)
     {
@@ -431,122 +373,6 @@ public sealed class DependencyCheckTests : IDisposable
             Assert.DoesNotContain(call.Arguments, a => a is "restore" or "install" or "ci" or "i" or "fix" or "update" or "add" or "build" or "--force");
             Assert.Contains(call.Arguments[0], (string[])["list", "audit", "outdated"]);
         });
-    }
-
-    [Fact]
-    public async Task Reduces_dotnet_list_package_to_counts_and_a_few_names()
-    {
-        Dotnet();
-        var tools = new FakeTools()
-            .On("dotnet", "list package --help", HelpWithNoRestore)
-            .On("dotnet", "list Widget.sln package --vulnerable", VulnerableJson)
-            .On("dotnet", "list Widget.sln package --outdated", OutdatedJson);
-
-        var entry = await CheckAsync(tools);
-
-        var report = Assert.Single(entry.Health.Reports);
-        Assert.Equal((DependencyReport.NuGet, "Widget.sln", (string?)null), (report.Ecosystem, report.Target, report.Skipped));
-        // One package in two frameworks counts once, at the worst of its severities.
-        Assert.Equal((1, 1, 0, 1), (report.Vulnerable!.Critical, report.Vulnerable.High, report.Vulnerable.Moderate, report.Vulnerable.Low));
-        Assert.Equal(
-            [("Deep.Crypto", "4.3.0", "critical", "GHSA-aaaa-1111-bbbb,GHSA-cccc-2222-dddd"), ("Some.Json", "12.0.1", "high", "GHSA-5crp-9r3c-p9vr"), ("Old.Text", "1.0.0", "low", "")],
-            report.TopVulnerable.Select(p => (p.Name, p.Version!, p.Severity, string.Join(',', p.Advisories))));
-        Assert.Equal(2, report.Outdated);
-        Assert.Equal([("Some.Json", "12.0.1", "13.0.3"), ("Test.Runner", "2.9.0", "3.1.0")], report.TopOutdated.Select(p => (p.Name, p.Current!, p.Latest!)));
-        Assert.False(entry.Transient);
-        Assert.Equal(new DateTimeOffset(2026, 11, 20, 3, 0, 0, TimeSpan.Zero), entry.Health.CheckedAt);
-
-        Assert.Equal(
-        [
-            "dotnet list package --help",
-            "dotnet list Widget.sln package --vulnerable --include-transitive --format json --no-restore",
-            "dotnet list Widget.sln package --outdated --format json --no-restore",
-        ], tools.Lines);
-        Assert.All(tools.Calls, c => Assert.Equal((_dotnet, _repo, true), (c.FileName, c.WorkingDirectory, c.LowPriority)));
-        AssertHarmless(tools);
-
-        // What goes to the hub has no path, no package source and nothing of the tool's own text.
-        var sent = System.Text.Json.JsonSerializer.Serialize(entry.Health, SnapshotSchema.JsonOptions);
-        Assert.DoesNotContain("example.test", sent);
-        Assert.DoesNotContain("/repo/", sent);
-        Assert.DoesNotContain("frameworks", sent);
-    }
-
-    [Fact]
-    public async Task An_sdk_that_never_restores_is_not_given_a_flag_it_does_not_know()
-    {
-        Dotnet();
-        var tools = new FakeTools()
-            .On("dotnet", "list package --help", HelpWithoutNoRestore)
-            .On("dotnet", "list Widget.sln package --vulnerable", VulnerableJson)
-            .On("dotnet", "list Widget.sln package --outdated", OutdatedJson);
-
-        await CheckAsync(tools);
-
-        Assert.DoesNotContain(tools.Calls, c => c.Arguments.Contains("--no-restore"));
-        AssertHarmless(tools);
-    }
-
-    [Fact]
-    public async Task A_repo_that_is_not_restored_is_skipped_and_never_restored()
-    {
-        Dotnet();
-        var tools = new FakeTools()
-            .On("dotnet", "list package --help", HelpWithNoRestore)
-            .On("dotnet", "list Widget.sln package --vulnerable", NotRestoredJson, exit: 1);
-
-        var entry = await CheckAsync(tools);
-
-        var report = Assert.Single(entry.Health.Reports);
-        Assert.Null(report.Vulnerable);
-        Assert.Null(report.Outdated);
-        Assert.Equal(DependencyParsers.NotRestored, report.Skipped);
-        Assert.False(entry.Transient); // nothing will change by asking again in two hours
-        Assert.Equal(2, tools.Calls.Count); // the second question is not asked
-        AssertHarmless(tools);
-    }
-
-    [Fact]
-    public async Task Offline_is_a_reason_to_ask_again_later_not_a_result()
-    {
-        Dotnet();
-        Npm();
-        var tools = new FakeTools()
-            .On("dotnet", "list package --help", HelpWithNoRestore)
-            .On("dotnet", "list Widget.sln package --vulnerable", OfflineJson)
-            .On("npm", "audit --json", """{ "error": { "code": "ENOTFOUND", "summary": "request to https://registry.example.test failed", "detail": "" } }""", exit: 1);
-
-        var entry = await CheckAsync(tools);
-
-        Assert.True(entry.Transient);
-        Assert.All(entry.Health.Reports, r => Assert.Equal((null, null, DependencyParsers.Unreachable), (r.Vulnerable, r.Outdated, r.Skipped)));
-        Assert.DoesNotContain(tools.Lines, l => l.Contains("outdated"));
-        AssertHarmless(tools);
-    }
-
-    [Fact]
-    public async Task A_timeout_a_missing_tool_and_a_pinned_sdk_that_is_not_installed_are_each_said_plainly()
-    {
-        Dotnet();
-        var hang = new FakeTools()
-            .On("dotnet", "list package --help", HelpWithNoRestore)
-            .On(c => c.Arguments.Contains("--vulnerable"), _ => new ToolResult(-1, "", "timed out after 30s", true));
-        var timedOut = await CheckAsync(hang);
-        Assert.Equal(("timed out", true), (timedOut.Health.Reports[0].Skipped, timedOut.Transient));
-
-        var noSdk = await CheckAsync(new FakeTools().On("dotnet", "list package --help", "", exit: 145, stderr: "A compatible .NET SDK was not found."));
-        Assert.Equal(("the .NET SDK this repo asks for is not installed", false), (noSdk.Health.Reports[0].Skipped, noSdk.Transient));
-
-        var old = await CheckAsync(new FakeTools().On("dotnet", "list package --help", "Options:\n  --outdated\n  --include-transitive\n"));
-        Assert.Equal("this .NET SDK is too old to report as JSON", old.Health.Reports[0].Skipped);
-
-        var nowhere = await new DependencyChecker(new FakeTools(), new ToolLocator(_machine.Environment() with { SystemRoot = Path.Combine(_machine.Root, "nothing") }))
-            .CheckAsync(_repo, TimeSpan.FromSeconds(1), CancellationToken.None);
-        Assert.Equal("dotnet was not found on this machine", nowhere.Health.Reports[0].Skipped);
-
-        var garbage = await CheckAsync(new FakeTools().On("dotnet", "list package --help", HelpWithNoRestore).On("dotnet", "list Widget.sln", "MSBUILD : error MSB1009: Project file does not exist.", exit: 1));
-        Assert.Null(garbage.Health.Reports[0].Vulnerable);
-        Assert.NotNull(garbage.Health.Reports[0].Skipped);
     }
 
     [Fact]
@@ -634,8 +460,6 @@ public sealed class DependencyCheckTests : IDisposable
     [InlineData("{ \"unrelated\": true }")]
     public void Text_that_is_not_the_expected_json_gives_no_counts(string output)
     {
-        Assert.Null(DependencyParsers.DotnetVulnerable(output).Counts);
-        Assert.Null(DependencyParsers.DotnetOutdated(output).Count);
         Assert.Null(DependencyParsers.NpmAudit(output).Counts);
     }
 
@@ -659,11 +483,14 @@ public sealed class DependencyCheckTests : IDisposable
     [Fact]
     public void Only_the_top_few_names_are_kept()
     {
-        var packages = string.Join(",", Enumerable.Range(1, 40).Select(i => $$"""{ "id": "Pkg{{i:00}}", "resolvedVersion": "1.0.0", "latestVersion": "2.0.0", "vulnerabilities": [ { "severity": "{{(i == 40 ? "Critical" : "Low")}}", "advisoryurl": "https://github.com/advisories/GHSA-0000-0000-00{{i:00}}" } ] }"""));
-        var json = $$"""{ "projects": [ { "path": "p", "frameworks": [ { "framework": "net8.0", "topLevelPackages": [ {{packages}} ] } ] } ] }""";
+        var packages = Enumerable.Range(1, 40).Select(i => new PackageVersion($"Pkg{i:00}", "1.0.0")).ToList();
+        var advisories = packages.ToDictionary(p => p.Id.ToLowerInvariant(), p => new List<NuGetAdvisory>
+        {
+            new(new NuGetVersionRange(null, false, null, false), p.Id == "Pkg40" ? 3 : 0, $"https://github.com/advisories/GHSA-0000-0000-00{p.Id[^2..]}"),
+        }, StringComparer.OrdinalIgnoreCase);
 
-        var vulnerable = DependencyParsers.DotnetVulnerable(json);
-        var outdated = DependencyParsers.DotnetOutdated(json);
+        var vulnerable = DependencyParsers.NuGetVulnerable(packages, advisories, null);
+        var outdated = DependencyParsers.NuGetOutdated(packages.Select(p => (p, (IReadOnlyList<string>)["1.0.0", "2.0.0"])), null);
 
         Assert.Equal((40, DependencyHealth.MaxNames, "Pkg40"), (vulnerable.Counts!.Total, vulnerable.Top.Count, vulnerable.Top[0].Name));
         Assert.Equal((40, DependencyHealth.MaxNames), (outdated.Count, outdated.Top.Count));

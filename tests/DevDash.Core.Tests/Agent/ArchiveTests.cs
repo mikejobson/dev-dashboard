@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Formats.Tar;
+using System.IO.Compression;
 using System.Text.Json;
 using DevDash.Agent;
 using DevDash.Agent.Actions;
@@ -202,7 +204,10 @@ public sealed class ArchiveTests : IDisposable
         {
             File.SetUnixFileMode(script, File.GetUnixFileMode(script) | UnixFileMode.UserExecute | UnixFileMode.GroupExecute);
             File.CreateSymbolicLink(Path.Combine(Widget, "docs-link"), "README.md");
-            // A link that leads out of the project is kept as a link; what it points at is not archived.
+            // A link that leads out of the project is not archived (a restore would refuse it), and listed as skipped.
+            // A relative one inside, the shape of node_modules/.bin, is kept.
+            Directory.CreateDirectory(Path.Combine(Widget, "tools", "bin"));
+            File.CreateSymbolicLink(Path.Combine(Widget, "tools", "bin", "build"), "../../build.sh");
             File.WriteAllText(Path.Combine(_root, "outside.txt"), "not part of the project\n");
             File.CreateSymbolicLink(Path.Combine(Widget, "outside-link"), Path.Combine(_root, "outside.txt"));
             Directory.CreateSymbolicLink(Path.Combine(Widget, "dir-link"), _root);
@@ -241,7 +246,15 @@ public sealed class ArchiveTests : IDisposable
         Assert.Equal(["node_modules"], manifest.ExcludedBuildOutput);
         Assert.False(manifest.IncludesBuildOutput);
         Assert.Equal(MachineInfoProvider.AgentVersion, manifest.DevDashVersion);
-        Assert.Equal(posix ? 3 : 0, manifest.LinkCount);
+        Assert.Equal(posix ? 2 : 0, manifest.LinkCount);
+        if (posix)
+        {
+            Assert.Equal(
+                [$"dir-link -> {_root} (is an absolute path, outside the project)", $"outside-link -> {Path.Combine(_root, "outside.txt")} (is an absolute path, outside the project)"],
+                manifest.Skipped);
+            Assert.Contains("lead out of the project", outcome.Output);
+        }
+
         Assert.True(manifest.FileCount > 10, "the .git folder is in the archive");
         Assert.Contains("node_modules", outcome.Output);
 
@@ -252,10 +265,10 @@ public sealed class ArchiveTests : IDisposable
             Assert.Contains("widget/docs-link -> README.md", listing);
             Assert.Matches(@"(?m)^-rwx\S*\s.*widget/build\.sh$", listing);
             Assert.DoesNotContain("node_modules", listing);
-            // Links out of the project stay links: nothing they lead to is in the archive.
-            Assert.Contains($"widget/outside-link -> {Path.Combine(_root, "outside.txt")}", listing);
-            Assert.Contains($"widget/dir-link -> {_root}", listing);
-            Assert.DoesNotContain("widget/dir-link/", listing);
+            Assert.Contains("widget/tools/bin/build -> ../../build.sh", listing);
+            // Links out of the project are not in it, nor anything they lead to.
+            Assert.DoesNotContain("outside-link", listing);
+            Assert.DoesNotContain("dir-link", listing);
         }
 
         // The agent remembers the project's remotes for a re-clone into the same folder.
@@ -279,8 +292,8 @@ public sealed class ArchiveTests : IDisposable
             Assert.True(File.GetUnixFileMode(Path.Combine(Widget, "build.sh")).HasFlag(UnixFileMode.UserExecute));
             Assert.False(File.GetUnixFileMode(Path.Combine(Widget, "README.md")).HasFlag(UnixFileMode.UserExecute));
             Assert.Equal("README.md", new FileInfo(Path.Combine(Widget, "docs-link")).LinkTarget);
-            Assert.Equal(Path.Combine(_root, "outside.txt"), new FileInfo(Path.Combine(Widget, "outside-link")).LinkTarget);
-            Assert.Equal(_root, new DirectoryInfo(Path.Combine(Widget, "dir-link")).LinkTarget);
+            Assert.Equal("../../build.sh", new FileInfo(Path.Combine(Widget, "tools", "bin", "build")).LinkTarget);
+            Assert.False(Path.Exists(Path.Combine(Widget, "outside-link")) || new FileInfo(Path.Combine(Widget, "outside-link")).LinkTarget is not null);
             Assert.Equal("# Widget\nchanged\n", File.ReadAllText(Path.Combine(Widget, "docs-link")));
         }
     }
@@ -474,6 +487,138 @@ public sealed class ArchiveTests : IDisposable
         {
             Assert.Throws<InvalidDataException>(() => ProjectArchive.Relative(bad, "widget"));
         }
+    }
+
+    [Fact]
+    public void Link_targets_must_stay_inside_the_project()
+    {
+        Assert.Null(ProjectArchive.LinkProblem("docs-link", "README.md"));
+        Assert.Null(ProjectArchive.LinkProblem("node_modules/.bin/tsc", "../typescript/bin/tsc"));
+        Assert.Null(ProjectArchive.LinkProblem("a/b/c", "../../x/./y/"));
+        Assert.Null(ProjectArchive.LinkProblem("here", "."));
+        Assert.NotNull(ProjectArchive.LinkProblem("L", "/Users/u"));
+        Assert.NotNull(ProjectArchive.LinkProblem("L", ".."));
+        Assert.NotNull(ProjectArchive.LinkProblem("a/L", "../.."));
+        Assert.NotNull(ProjectArchive.LinkProblem("a/b/L", "../../../../etc/passwd"));
+        Assert.NotNull(ProjectArchive.LinkProblem("y", "x/.."));
+        Assert.NotNull(ProjectArchive.LinkProblem("y", "x/../.."));
+        Assert.NotNull(ProjectArchive.LinkProblem("y", ""));
+    }
+
+    public static TheoryData<string[]> HostileTars => new()
+    {
+        // A link to the home folder, then a link through it: unpacked in order, it would plant ~/.zshenv.
+        { ["L|link|HOME", "L/.zshenv|link|/tmp/payload"] },
+        { ["L|link|../../..", "L/.zshenv|link|x"] },
+        // The same with a file, and with the entries the other way round.
+        { ["L/.zshenv|file|", "L|link|HOME"] },
+        { ["L|link|.", "L/x|file|"] },
+        // Different case: one folder on macOS and Windows.
+        { ["l|link|HOME", "L/.zshenv|file|"] },
+        // Each looks inside on paper; together they leave the folder.
+        { ["x|link|.", "y|link|x/.."] },
+        { ["up|link|..", "f|file|"] },
+    };
+
+    [Theory]
+    [MemberData(nameof(HostileTars))]
+    public async Task A_restore_refuses_links_that_lead_out_and_writes_nothing_outside(string[] entries)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var home = Path.Combine(_root, "home");
+        Directory.CreateDirectory(home);
+        var archivePath = Path.Combine(_archive, "widget-20260101-000000.tar.gz");
+        using (var stream = File.Create(archivePath))
+        {
+            using var gzip = new GZipStream(stream, CompressionLevel.Fastest);
+            using var tar = new TarWriter(gzip, TarEntryFormat.Pax);
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.Directory, "widget/"));
+            foreach (var spec in entries)
+            {
+                var parts = spec.Split('|');
+                var name = "widget/" + parts[0];
+                if (parts[1] == "link")
+                {
+                    tar.WriteEntry(new PaxTarEntry(TarEntryType.SymbolicLink, name) { LinkName = parts[2] == "HOME" ? home : parts[2] });
+                }
+                else
+                {
+                    tar.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, name) { DataStream = new MemoryStream("echo pwned\n"u8.ToArray()) });
+                }
+            }
+        }
+
+        // Whatever the manifest says, the archive itself is refused while it is unpacked.
+        var sha = ProjectArchive.Sha256Of(archivePath, CancellationToken.None);
+        var manifest = new ArchiveManifest
+        {
+            RootName = "widget",
+            SourcePath = Path.Combine(_dev, "gone"),
+            ArchiveFile = Path.GetFileName(archivePath),
+            Format = ArchiveFormats.TarGz,
+            ArchiveSha256 = sha,
+            ContentSha256 = "",
+        };
+        File.WriteAllText(ArchiveActions.ManifestPathOf(archivePath), JsonSerializer.Serialize(manifest, SnapshotSchema.JsonOptions));
+
+        var target = Path.Combine(_dev, "gone");
+        var outcome = await Run(AgentAction.RestoreArchive(archivePath, sha, target));
+
+        Assert.False(outcome.Succeeded, outcome.Output);
+        Assert.Contains("Nothing was restored", outcome.Output);
+        Assert.Contains("link", outcome.Output);
+        Assert.DoesNotContain("did not unpack as its manifest says", outcome.Output);
+        Assert.False(Path.Exists(target));
+        Assert.Empty(Directory.GetFileSystemEntries(home));
+        Assert.False(Path.Exists(Path.Combine(_dev, ".zshenv")) || Path.Exists(Path.Combine(_root, ".zshenv")));
+        Assert.DoesNotContain(Directory.GetFileSystemEntries(_dev), d => Path.GetFileName(d).StartsWith('.'));
+    }
+
+    [Fact]
+    public void A_folder_on_the_way_that_is_a_link_stops_a_link_being_made()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var restore = Path.Combine(_root, "restore");
+        Directory.CreateDirectory(Path.Combine(restore, "real"));
+        Directory.CreateSymbolicLink(Path.Combine(restore, "sneaky"), _root);
+        ProjectArchive.RefuseLinkedParents(restore, Path.Combine(restore, "real", "link"));
+        ProjectArchive.RefuseLinkedParents(restore, Path.Combine(restore, "link"));
+        Assert.Throws<InvalidDataException>(() => ProjectArchive.RefuseLinkedParents(restore, Path.Combine(restore, "sneaky", "link")));
+        Assert.Throws<InvalidDataException>(() => ProjectArchive.RefuseLinkedParents(restore, Path.Combine(_root, "elsewhere", "link")));
+    }
+
+    [Fact]
+    public async Task A_restore_unpacks_the_bytes_it_checked_from_a_private_copy()
+    {
+        MakeAtRisk();
+        var outcome = await Run(await ArchiveOf(Widget));
+        Assert.True(outcome.Succeeded, outcome.Output);
+        var manifest = ManifestOf(outcome);
+
+        var copy = Path.Combine(_root, "copy");
+        var sha = ProjectArchive.CopyAndHash(outcome.Archive!.ArchivePath, copy, CancellationToken.None);
+        Assert.Equal(manifest.ArchiveSha256, sha);
+        Assert.Equal(File.ReadAllBytes(outcome.Archive.ArchivePath), File.ReadAllBytes(copy));
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(copy));
+        }
+
+        Assert.Throws<IOException>(() => ProjectArchive.CopyAndHash(outcome.Archive.ArchivePath, copy, CancellationToken.None));
+
+        var temp = Path.GetTempPath();
+        var before = Directory.GetDirectories(temp, "devdash-restore-*").ToHashSet();
+        var restored = await Run(AgentAction.RestoreArchive(outcome.Archive.ArchivePath, manifest.ArchiveSha256, Widget));
+        Assert.True(restored.Succeeded, restored.Output);
+        Assert.DoesNotContain(Directory.GetDirectories(temp, "devdash-restore-*"), d => !before.Contains(d));
     }
 
     [Fact]

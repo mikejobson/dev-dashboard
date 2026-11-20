@@ -83,7 +83,9 @@ public sealed class RepoScanner
         string? defaultBranch = null;
         string? mergeTarget = null;
         var originHead = await Run("symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
-        if (originHead.Ok && originHead.StdOut.Trim() is { Length: > 0 } remoteHead)
+        // origin/HEAD is the repository's to set, to anything: a target such as refs/heads/--output=x would
+        // come back from --short as an option. Such a name is ignored, and names are passed as option values.
+        if (originHead.Ok && originHead.StdOut.Trim() is { Length: > 0 } remoteHead && !remoteHead.StartsWith('-'))
         {
             mergeTarget = remoteHead;
             var slash = remoteHead.IndexOf('/');
@@ -98,7 +100,7 @@ public sealed class RepoScanner
 
         if (mergeTarget is not null)
         {
-            var merged = await Run("for-each-ref", "--merged", mergeTarget, "--format=%(refname:short)", "refs/heads").ConfigureAwait(false);
+            var merged = await Run("for-each-ref", "--merged=" + mergeTarget, "--format=%(refname:short)", "refs/heads").ConfigureAwait(false);
             if (merged.Ok)
             {
                 var names = ForEachRefParser.ParseNames(merged.StdOut);
@@ -111,7 +113,7 @@ public sealed class RepoScanner
         var graphTrunk = await GraphTrunkAsync(args => Run(args), mergeTarget, defaultBranch).ConfigureAwait(false);
         if (graphTrunk is not null && graphTrunk != mergeTarget)
         {
-            var merged = await Run("for-each-ref", "--merged", graphTrunk, "--format=%(refname:short)", "refs/heads").ConfigureAwait(false);
+            var merged = await Run("for-each-ref", "--merged=" + graphTrunk, "--format=%(refname:short)", "refs/heads").ConfigureAwait(false);
             if (merged.Ok)
             {
                 var names = ForEachRefParser.ParseNames(merged.StdOut);
@@ -352,7 +354,8 @@ public sealed class RepoScanner
 
     private static async Task<long?> TipTimeAsync(Func<string[], Task<GitResult>> run, string rev)
     {
-        var result = await run(["log", "-1", "--format=%ct", rev]).ConfigureAwait(false);
+        // The name comes from the repository (origin/HEAD): never let it be read as an option.
+        var result = await run(["log", "-1", "--format=%ct", "--end-of-options", rev]).ConfigureAwait(false);
         return result.Ok && long.TryParse(result.StdOut.Trim(), out var t) ? t : null;
     }
 

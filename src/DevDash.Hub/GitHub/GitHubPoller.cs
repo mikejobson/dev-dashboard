@@ -19,6 +19,7 @@ public sealed class GitHubPoller(
     private static readonly TimeSpan MinimumGap = TimeSpan.FromSeconds(20);
 
     private readonly SemaphoreSlim _wake = new(0, 1);
+    private volatile HashSet<string> _unanswered = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Ask for a poll now (ignored while one is already queued).</summary>
     public void RequestPoll()
@@ -80,7 +81,8 @@ public sealed class GitHubPoller(
         }
 
         var known = store.Current.LocalRemotes;
-        if (!store.HasData || LocalRemoteKeys().Any(k => !known.ContainsKey(k)))
+        var unanswered = _unanswered;
+        if (!store.HasData || LocalRemoteKeys().Any(k => !known.ContainsKey(k) && !unanswered.Contains(k)))
         {
             RequestPoll();
         }
@@ -100,8 +102,11 @@ public sealed class GitHubPoller(
         store.SetStatus(s => s with { Polling = true });
         try
         {
-            var snapshot = await client.PollAsync(LocalRemoteKeys(), ct);
+            var keys = LocalRemoteKeys();
+            var snapshot = await client.PollAsync(keys, ct, store.Current.LocalRemotes);
             await store.SetAsync(snapshot, ct);
+            // Keys this poll had no answer for (over the per-poll cap, or not checkable) do not wake the next one early.
+            _unanswered = keys.Where(k => !snapshot.LocalRemotes.ContainsKey(k)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             logger.LogInformation("GitHub poll: {Prs} PRs, {Issues} issues, {Repos} recent repos across {Orgs} orgs, {Lookups} local remotes, {Warnings} warnings",
                 snapshot.PullRequests.Count, snapshot.Issues.Count, snapshot.RecentRepos.Count, snapshot.Organizations.Count,
                 snapshot.LocalRemotes.Count, snapshot.Warnings.Count);

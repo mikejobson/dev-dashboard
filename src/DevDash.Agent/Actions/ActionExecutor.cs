@@ -255,9 +255,10 @@ public sealed class ActionExecutor(
             logger.LogInformation("Running action: {Command}", AgentActions.CommandLine(action));
             var result = action.Kind is AgentActionKind.Fetch
                 ? await git.FetchAsync(repo, network, ct).ConfigureAwait(false)
-                : await git.ExecuteAsync(repo, [.. Prefix, .. AgentActions.GitArgs(action)], action.Kind is AgentActionKind.Push ? network : local, ct).ConfigureAwait(false);
+                : await git.ExecuteAsync(repo, [.. Prefix, .. AgentActions.GitArgs(action)], action.Kind is AgentActionKind.Push ? network : local, ct, runHooks: action.Kind is AgentActionKind.Push).ConfigureAwait(false);
 
-            var output = string.Join('\n', new[] { result.StdOut.Trim(), result.StdErr.Trim() }.Where(s => s.Length > 0));
+            // A failed push or fetch repeats the remote's URL, token and all; the output goes to the hub.
+            var output = DevDash.Core.Git.RemoteUrlNormalizer.RedactCredentials(string.Join('\n', new[] { result.StdOut.Trim(), result.StdErr.Trim() }.Where(s => s.Length > 0)));
             logger.LogInformation("Action {Kind} in {Repo} {Outcome} (exit {Exit})", action.Kind, repo, result.Ok ? "succeeded" : "failed", result.ExitCode);
 
             string[] affected = action.WorktreePath is null ? [repo] : [repo, action.WorktreePath];

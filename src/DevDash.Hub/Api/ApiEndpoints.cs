@@ -219,9 +219,18 @@ public static class ApiEndpoints
 
         // A key belongs to one machine: it binds on first use and is refused for any other machine after that.
         var keyId = int.Parse(user.FindFirstValue(AgentKeyAuthenticationHandler.KeyIdClaim)!, CultureInfo.InvariantCulture);
-        if (!await keys.BindAndTouchAsync(keyId, snapshot.Machine.MachineId, ct))
+        switch (await keys.BindAndTouchAsync(keyId, snapshot.Machine.MachineId, ct))
         {
-            return Results.Problem("This API key belongs to a different machine.", statusCode: StatusCodes.Status403Forbidden);
+            case KeyBinding.Bound:
+                break;
+            case KeyBinding.MachineHasKey:
+                return Results.Problem(
+                    $"Another API key already belongs to machine '{snapshot.Machine.MachineId}'. Revoke that key on the Machines page first, then try again.",
+                    statusCode: StatusCodes.Status403Forbidden);
+            case KeyBinding.Revoked:
+                return Results.Problem("This API key has been revoked.", statusCode: StatusCodes.Status403Forbidden);
+            default:
+                return Results.Problem("This API key belongs to a different machine.", statusCode: StatusCodes.Status403Forbidden);
         }
 
         var view = await store.IngestAsync(snapshot, ct);

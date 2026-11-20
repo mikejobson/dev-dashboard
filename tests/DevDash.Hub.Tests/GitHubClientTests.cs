@@ -240,4 +240,114 @@ public class GitHubClientTests
 
         Assert.Empty(handler.Requests);
     }
+
+    [Fact]
+    public async Task Remote_lookups_are_capped_per_poll_and_a_repository_GitHub_does_not_have_is_not_asked_about_again_for_hours()
+    {
+        var asked = new List<string>();
+        var handler = new StubHandler((url, body) =>
+        {
+            if (!body.Contains("r0: repository"))
+            {
+                return Default(url, body);
+            }
+
+            // Every repository asked about is unknown to GitHub.
+            var aliases = System.Text.RegularExpressions.Regex.Matches(JsonDocument.Parse(body).RootElement.GetProperty("query").GetString()!, @"(r\d+): repository\(owner: ""([^""]+)"", name: ""([^""]+)""\)");
+            lock (asked)
+            {
+                asked.AddRange(aliases.Select(m => $"github.com/{m.Groups[2].Value}/{m.Groups[3].Value}"));
+            }
+
+            var errors = string.Join(",", aliases.Select(m => $$"""{ "type": "NOT_FOUND", "path": ["{{m.Groups[1].Value}}"], "message": "Could not resolve" }"""));
+            return (HttpStatusCode.OK, $$"""{ "data": { {{string.Join(",", aliases.Select(m => $"\"{m.Groups[1].Value}\": null"))}} }, "errors": [ {{errors}} ] }""");
+        });
+        var keys = Enumerable.Range(0, GitHubClient.MaxLookupsPerPoll + 50).Select(i => $"github.com/junk/repo{i:D3}").ToList();
+        var client = Client(handler);
+
+        var first = await client.PollAsync(keys, CancellationToken.None);
+        Assert.Equal(GitHubClient.MaxLookupsPerPoll, asked.Count);
+        Assert.Equal(GitHubClient.MaxLookupsPerPoll, first.LocalRemotes.Count);
+        Assert.All(first.LocalRemotes.Values, l => Assert.False(l.Found));
+        Assert.Contains(first.Warnings, w => w.Contains("50 more local remotes were not looked up"));
+
+        // The next poll asks only about the 50 it has never asked about: the rest are known not to exist.
+        asked.Clear();
+        var second = await client.PollAsync(keys, CancellationToken.None, first.LocalRemotes);
+        Assert.Equal(50, asked.Count);
+        Assert.Equal(keys.Skip(GitHubClient.MaxLookupsPerPoll).Order(), asked.Order());
+        Assert.Equal(keys.Count, second.LocalRemotes.Count);
+        Assert.DoesNotContain(second.Warnings, w => w.Contains("not looked up"));
+
+        // Once the not-found answers are old enough, they are asked again (still capped).
+        asked.Clear();
+        var stale = second.LocalRemotes.ToDictionary(kv => kv.Key, kv => kv.Value with { CheckedAt = kv.Value.CheckedAt - GitHubClient.NotFoundFor }, StringComparer.OrdinalIgnoreCase);
+        await client.PollAsync(keys, CancellationToken.None, stale);
+        Assert.Equal(GitHubClient.MaxLookupsPerPoll, asked.Count);
+    }
+
+    [Fact]
+    public void A_repositorys_visibility_is_read_so_an_internal_one_is_not_taken_for_collaborators_only()
+    {
+        var node = JsonDocument.Parse(Repo.Replace("\"isPrivate\": true,", "\"isPrivate\": true, \"visibility\": \"INTERNAL\",")).RootElement;
+        var repo = GitHubClient.ParseRepo(node)!;
+        Assert.Equal(("INTERNAL", true, false), (repo.Visibility, repo.IsPrivate, repo.IsCollaboratorsOnly));
+        Assert.True(GitHubClient.ParseRepo(JsonDocument.Parse(Repo).RootElement)!.IsCollaboratorsOnly);
+    }
+
+    /// <summary>Answers an issue's events by page, with GitHub's <c>Link</c> header, oldest events first.</summary>
+    private sealed class EventPages(int last, Func<int, string> page) : HttpMessageHandler
+    {
+        public List<int> Asked { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var url = request.RequestUri!.ToString();
+            var n = int.Parse(System.Text.RegularExpressions.Regex.Match(url, @"[?&]page=(\d+)").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            Asked.Add(n);
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(page(n), Encoding.UTF8, "application/json") };
+            if (last > 1)
+            {
+                var basis = url[..url.LastIndexOf("page=", StringComparison.Ordinal)];
+                response.Headers.TryAddWithoutValidation("Link", $"<{basis}page={Math.Min(n + 1, last)}>; rel=\"next\", <{basis}page={last}>; rel=\"last\"");
+            }
+
+            return Task.FromResult(response);
+        }
+    }
+
+    private static string Labeled(string label, string who) => $$$"""{"event":"labeled","label":{"name":"{{{label}}}"},"actor":{"login":"{{{who}}}"}}""";
+
+    private static GitHubIssuesClient IssuesClient(HttpMessageHandler handler) =>
+        new(new HttpClient(handler), new FixedToken("token-123"), new Monitor(new GitHubOptions()));
+
+    [Fact]
+    public async Task Who_added_a_label_is_read_from_the_newest_events_walking_back_from_the_last_page()
+    {
+        // Five pages: the label was first added by an old collaborator, removed, and added again recently by someone else.
+        var pages = new EventPages(5, n => n switch
+        {
+            1 => $"[{Labeled("t3", "old-friend")},{{\"event\":\"unlabeled\",\"label\":{{\"name\":\"t3\"}},\"actor\":{{\"login\":\"me\"}}}}]",
+            4 => $"[{Labeled("t3", "me")},{Labeled("t3", "mallory")},{Labeled("bug", "someone")}]",
+            _ => $"[{Labeled("bug", "someone")}]",
+        });
+
+        Assert.Equal("mallory", await IssuesClient(pages).LatestLabelerAsync("github.com/acme/widget", 12, "T3", CancellationToken.None));
+        Assert.Equal([1, 5, 4], pages.Asked); // the first page only for its Link header, then newest first
+
+        // Only the newest pages are read: a label added long ago, before 300 newer events, is not found.
+        var old = new EventPages(10, n => n == 1 ? $"[{Labeled("t3", "me")}]" : $"[{Labeled("bug", "someone")}]");
+        Assert.Null(await IssuesClient(old).LatestLabelerAsync("github.com/acme/widget", 12, "t3", CancellationToken.None));
+        Assert.Equal([1, 10, 9, 8], old.Asked);
+
+        // One page: no Link header, and its last match wins.
+        var single = new EventPages(1, _ => $"[{Labeled("t3", "first")},{Labeled("t3", "me")}]");
+        Assert.Equal("me", await IssuesClient(single).LatestLabelerAsync("github.com/acme/widget", 12, "t3", CancellationToken.None));
+        Assert.Equal([1], single.Asked);
+
+        // The Link header only ever gives a page number; its address is never followed.
+        using var response = new HttpResponseMessage();
+        response.Headers.TryAddWithoutValidation("Link", "<https://evil.example.test/x?page=7>; rel=\"last\"");
+        Assert.Equal(7, GitHubIssuesClient.LastPageOf(response));
+    }
 }

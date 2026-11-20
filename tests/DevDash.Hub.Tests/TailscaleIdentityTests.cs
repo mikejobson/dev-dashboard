@@ -15,10 +15,11 @@ public sealed class TailscaleIdentityTests
         return new TailscaleIdentityProvider(monitor, NullLogger<TailscaleIdentityProvider>.Instance);
     }
 
-    private static DefaultHttpContext Request(string remote, string? login, string? name = null)
+    private static DefaultHttpContext Request(string remote, string? login, string? name = null, string local = "127.0.0.2")
     {
         var context = new DefaultHttpContext();
         context.Connection.RemoteIpAddress = IPAddress.Parse(remote);
+        context.Connection.LocalIpAddress = IPAddress.Parse(local);
         if (login is not null) { context.Request.Headers[TailscaleIdentityProvider.LoginHeader] = login; }
         if (name is not null) { context.Request.Headers[TailscaleIdentityProvider.NameHeader] = name; }
         return context;
@@ -40,6 +41,16 @@ public sealed class TailscaleIdentityTests
     }
 
     [Fact]
+    public void Ignores_headers_on_a_loopback_connection_that_did_not_come_through_serve()
+    {
+        // Userspace tailscaled forwards a peer's direct connection to the node's IP to 127.0.0.1 on the same port:
+        // it arrives from loopback, so only the address it arrived at tells it apart from serve's own proxy.
+        Assert.Null(Provider().Resolve(Request("127.0.0.1", "forged@example.com", local: "127.0.0.1")));
+        Assert.Null(Provider().Resolve(Request("::1", "forged@example.com", local: "::1")));
+        Assert.NotNull(Provider().Resolve(Request("127.0.0.1", "user@example.com", local: "::ffff:127.0.0.2")));
+    }
+
+    [Fact]
     public void Refuses_requests_without_a_user_such_as_tagged_devices()
     {
         Assert.Null(Provider().Resolve(Request("127.0.0.1", null)));
@@ -51,7 +62,7 @@ public sealed class TailscaleIdentityTests
     [InlineData("someone@example.com", false)]
     public void Applies_the_allowlist(string login, bool allowed)
     {
-        var identity = Provider("user@example.com, other@github").Resolve(Request("::1", login));
+        var identity = Provider("user@example.com, other@github").Resolve(Request("127.0.0.1", login));
         Assert.Equal(allowed, identity is not null);
     }
 

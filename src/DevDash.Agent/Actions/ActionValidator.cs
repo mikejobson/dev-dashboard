@@ -169,8 +169,8 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return "The worktree path is not a plain absolute path.";
         }
 
-        var worktrees = await WorktreesAsync(action.RepoPath!, ct).ConfigureAwait(false);
         var resolved = PathSafety.Resolve(target);
+        var worktrees = await WorktreesAsync(action.RepoPath!, ct).ConfigureAwait(false);
         var index = worktrees.ToList().FindIndex(w => PathSafety.SamePath(PathSafety.Resolve(w.Path), resolved));
         if (index < 0)
         {
@@ -197,6 +197,13 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
         if (T3Code.T3Locator.MarkOwned([worktrees[0], worktree], options.CurrentValue.T3.WorktreesFolder())[1].T3Owned == true)
         {
             return "T3 Code made this worktree for a thread. Archive the thread in T3 Code instead; it removes the worktree itself.";
+        }
+
+        // Only a worktree where the agent looks: git would otherwise delete a folder anywhere the repository's own
+        // worktree list (which lives in the repository, and so in whatever was cloned) says one is.
+        if (!options.CurrentValue.ResolveRoots().Select(PathSafety.Resolve).Any(r => PathSafety.IsInside(r, resolved)))
+        {
+            return $"{target} is outside this agent's scan roots.";
         }
 
         // Commits made on a detached HEAD belong to no branch, so removing the worktree could strand them.

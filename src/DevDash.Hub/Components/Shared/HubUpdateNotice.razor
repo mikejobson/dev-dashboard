@@ -15,7 +15,7 @@
         <div class="hub-update-body">
             @if (release.Url is not null)
             {
-                <a class="small" href="@release.Url" target="_blank" rel="noopener">Release notes</a>
+                <a class="small" href="@Fmt.SafeLink(release.Url)" target="_blank" rel="noopener">Release notes</a>
             }
             <span class="muted small">On the Docker host, in the project folder:</span>
             <div class="command">

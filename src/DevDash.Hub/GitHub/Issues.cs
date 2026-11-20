@@ -49,6 +49,9 @@ public sealed record RepoIssues
 
     /// <summary>Null when the repository's visibility was not known. A repository not known to be private is treated as public.</summary>
     public bool? IsPrivate { get; init; }
+
+    /// <summary>A GitHub Enterprise internal repository: private, but anyone in the enterprise can write issues and comments, so treated as public.</summary>
+    public bool IsInternal { get; init; }
     public IReadOnlyList<TrackedIssue> Issues { get; init; } = [];
 
     /// <summary>More open issues than one page: only the most recently updated are listed.</summary>
@@ -166,9 +169,21 @@ public sealed partial class GitHubIssuesClient(HttpClient http, IGitHubTokenProv
         return result;
     }
 
+    /// <summary>Most pages of issue events read, newest first, when looking for who added a label.</summary>
+    public const int MaxEventPages = 3;
+
+    [GeneratedRegex(@"<([^>]*)>\s*;\s*rel=""last""")]
+    private static partial Regex LastLink();
+
+    [GeneratedRegex(@"[?&]page=(\d+)")]
+    private static partial Regex PageParameter();
+
     /// <summary>
     /// Who most recently added <paramref name="label"/> to the issue, from its events (<c>labeled</c>, with
-    /// that label's name). Null when no such event is found in the newest 300 events, or they could not be read.
+    /// that label's name). GitHub lists events oldest first, so this reads the first page only to learn from
+    /// its <c>Link</c> header which page is last, then walks back from the last page, newest event first, for
+    /// at most <see cref="MaxEventPages"/> pages (the newest 300 events). Null when no such event is among
+    /// them, or they could not be read.
     /// </summary>
     public async Task<string?> LatestLabelerAsync(string repoKey, int number, string label, CancellationToken ct)
     {
@@ -177,40 +192,75 @@ public sealed partial class GitHubIssuesClient(HttpClient http, IGitHubTokenProv
             return null;
         }
 
-        string? latest = null;
-        for (var page = 1; page <= 3; page++)
+        var path = $"/repos/{owner}/{name}/issues/{number.ToString(CultureInfo.InvariantCulture)}/events?per_page=100&page=";
+        var first = await EventPageAsync(path + "1", ct);
+        if (first is null)
         {
-            using var request = await RequestAsync(HttpMethod.Get, $"/repos/{owner}/{name}/issues/{number.ToString(CultureInfo.InvariantCulture)}/events?per_page=100&page={page.ToString(CultureInfo.InvariantCulture)}", ct);
-            using var response = await http.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
+            return null;
+        }
+
+        var last = first.Value.LastPage ?? 1;
+        for (var page = last; page >= 1 && page > last - MaxEventPages; page--)
+        {
+            var events = page == 1 ? first.Value.Events : (await EventPageAsync(path + page.ToString(CultureInfo.InvariantCulture), ct))?.Events;
+            if (events is null)
             {
-                return latest;
+                return null;
             }
 
-            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            for (var i = events.Count - 1; i >= 0; i--)
             {
-                return latest;
-            }
-
-            var count = 0;
-            foreach (var e in doc.RootElement.EnumerateArray())
-            {
-                count++;
-                // Events come oldest first, so the last match is the latest.
-                if (Str(e, "event") == "labeled" && Obj(e, "label") is { } l && string.Equals(Str(l, "name"), label, StringComparison.OrdinalIgnoreCase))
+                if (events[i].Event == "labeled" && string.Equals(events[i].Label, label, StringComparison.OrdinalIgnoreCase))
                 {
-                    latest = Obj(e, "actor") is { } actor ? Str(actor, "login") : null;
+                    return events[i].Actor;
                 }
-            }
-
-            if (count < 100)
-            {
-                break;
             }
         }
 
-        return latest;
+        return null;
+    }
+
+    /// <summary>One page of an issue's events, oldest first, and the number of the last page when there is more than one.</summary>
+    private async Task<(IReadOnlyList<(string? Event, string? Label, string? Actor)> Events, int? LastPage)?> EventPageAsync(string path, CancellationToken ct)
+    {
+        using var request = await RequestAsync(HttpMethod.Get, path, ct);
+        using var response = await http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        if (doc.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var events = doc.RootElement.EnumerateArray()
+            .Select(e => (Str(e, "event"), Obj(e, "label") is { } l ? Str(l, "name") : null, Obj(e, "actor") is { } a ? Str(a, "login") : null))
+            .ToList();
+        return (events, LastPageOf(response));
+    }
+
+    /// <summary>The page number in the <c>rel="last"</c> link, if any. Only the number is used: the link itself is never followed.</summary>
+    internal static int? LastPageOf(HttpResponseMessage response)
+    {
+        if (!response.Headers.TryGetValues("Link", out var links))
+        {
+            return null;
+        }
+
+        foreach (var link in links)
+        {
+            if (LastLink().Match(link) is { Success: true } last
+                && PageParameter().Match(last.Groups[1].Value) is { Success: true } page
+                && int.TryParse(page.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n >= 1)
+            {
+                return n;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>The issue's latest comments, oldest of them first.</summary>

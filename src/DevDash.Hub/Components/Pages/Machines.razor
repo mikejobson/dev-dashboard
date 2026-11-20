@@ -24,7 +24,7 @@
                 Latest agent release
                 @if (latest.Url is not null)
                 {
-                    <a href="@latest.Url" target="_blank" rel="noopener" class="mono">@latest.Version</a>
+                    <a href="@Fmt.SafeLink(latest.Url)" target="_blank" rel="noopener" class="mono">@latest.Version</a>
                 }
                 else
                 {

@@ -124,6 +124,10 @@ public sealed class AlertSender(HttpClient http)
             AlertChannels.HomeAssistant => HomeAssistant(message, options.Channels.HomeAssistant),
             _ => Webhook(message, options.Channels.Webhook),
         };
+        if (AlertAddressGuard.WhyRefused(request.RequestUri) is { } refused)
+        {
+            return new DeliveryResult(channel, false, refused);
+        }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(Timeout);

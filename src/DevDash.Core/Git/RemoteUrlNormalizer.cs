@@ -28,7 +28,8 @@ public static partial class RemoteUrlNormalizer
             return null;
         }
 
-        url = url.Trim();
+        // Credentials first, so a password containing '@' cannot end up in the host.
+        url = StripCredentials(url.Trim());
         string host;
         string path;
 
@@ -95,23 +96,56 @@ public static partial class RemoteUrlNormalizer
         return new RemoteIdentity(host, path);
     }
 
-    /// <summary>Removes <c>user:password@</c> from URL-style remotes so tokens never leave the machine.</summary>
+    [GeneratedRegex(@"^(?<scheme>[A-Za-z][A-Za-z0-9+.\-]*)://")]
+    private static partial Regex SchemePrefix();
+
+    [GeneratedRegex(@"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'""<>]+")]
+    private static partial Regex UrlInText();
+
+    /// <summary>
+    /// Removes <c>user:password@</c>, and any query string or fragment, from URL-style remotes so tokens
+    /// never leave the machine. The credentials run to the LAST <c>@</c> of the authority, since a
+    /// password may itself contain one, and a URL with no path (<c>https://tok@host</c>) is covered too.
+    /// </summary>
     public static string StripCredentials(string url)
     {
-        var m = UrlLike().Match(url);
-        if (!m.Success || !m.Groups["user"].Success)
+        var m = SchemePrefix().Match(url);
+        if (!m.Success)
         {
-            return url;
+            return url; // scp-like or a local path: nothing that can carry a token in the usual places
         }
 
-        var scheme = m.Groups["scheme"].Value;
-        // Keep the conventional "git@" user for ssh; drop everything for http(s).
-        if (scheme.Equals("ssh", StringComparison.OrdinalIgnoreCase) && !m.Groups["user"].Value.Contains(':'))
+        var start = m.Length;
+        var end = url.IndexOfAny(['/', '?', '#'], start);
+        var authority = end < 0 ? url[start..] : url[start..end];
+        var rest = end < 0 ? "" : url[end..];
+
+        // A query or fragment can carry a token (?private_token=…); a remote never needs one to be shown.
+        var cut = rest.IndexOfAny(['?', '#']);
+        if (cut >= 0)
         {
-            return url;
+            rest = rest[..cut];
         }
 
-        var userGroup = m.Groups["user"];
-        return url.Remove(userGroup.Index, userGroup.Length + 1);
+        var at = authority.LastIndexOf('@');
+        if (at >= 0)
+        {
+            var user = authority[..at];
+            // Keep the conventional "git@" user for ssh; drop everything for http(s) and the rest.
+            var keep = m.Groups["scheme"].Value.Equals("ssh", StringComparison.OrdinalIgnoreCase) && !user.Contains(':') && !user.Contains('@');
+            if (!keep)
+            {
+                authority = authority[(at + 1)..];
+            }
+        }
+
+        return url[..start] + authority + rest;
     }
+
+    /// <summary>
+    /// <see cref="StripCredentials"/> applied to every URL inside free text, such as git's error output,
+    /// which repeats the remote's URL (token and all) when a fetch fails.
+    /// </summary>
+    public static string RedactCredentials(string text) =>
+        string.IsNullOrEmpty(text) ? text : UrlInText().Replace(text, match => StripCredentials(match.Value));
 }

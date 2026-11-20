@@ -382,6 +382,14 @@ public sealed class ActionTests : IDisposable
         Assert.Contains("not a worktree of", (await Run(AgentAction.RemoveWorktree(Widget, Path.Combine(_dev, "other-repo")))).Output);
         Assert.Contains("not a worktree of", (await Run(AgentAction.RemoveWorktree(Widget, Path.Combine(_root, "seed")))).Output);
 
+        // A real, clean linked worktree, but outside every scan root: not the agent's to delete.
+        var outside = Path.Combine(_root, "outside-worktree");
+        Git(Widget, "worktree", "add", "-q", outside, "-b", "outside", "main");
+        var refused = await Run(AgentAction.RemoveWorktree(Widget, outside));
+        Assert.True(refused.Refused, refused.Output);
+        Assert.Contains("outside this agent's scan roots", refused.Output);
+        Assert.True(Directory.Exists(outside));
+
         Assert.True(Directory.Exists(locked));
         Assert.True(Directory.Exists(detached));
         Assert.True(Directory.Exists(Path.Combine(_dev, "other-repo")));

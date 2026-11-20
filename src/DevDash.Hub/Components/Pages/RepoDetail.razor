@@ -39,7 +39,7 @@ else
             }
             @if (_row.GitHub is { } gh)
             {
-                <a class="btn" href="@gh.Url" target="_blank" rel="noopener">Open on GitHub</a>
+                <a class="btn" href="@Fmt.SafeLink(gh.Url)" target="_blank" rel="noopener">Open on GitHub</a>
                 @if (gh.IsArchived) { <span class="chip warn">archived</span> }
                 <span class="chip">@(gh.IsPrivate ? "private" : "public")</span>
                 @if (gh.PrimaryLanguage is not null) { <span class="chip muted">@gh.PrimaryLanguage</span> }
@@ -66,7 +66,7 @@ else
     {
         <div class="card">
             <dl class="kv">
-                <dt>GitHub</dt><dd><a href="@repo.Url" target="_blank" rel="noopener">@repo.NameWithOwner</a></dd>
+                <dt>GitHub</dt><dd><a href="@Fmt.SafeLink(repo.Url)" target="_blank" rel="noopener">@repo.NameWithOwner</a></dd>
                 <dt>Default branch</dt><dd><span class="mono">@repo.DefaultBranch</span> at <span class="mono">@Fmt.Sha(repo.HeadSha)</span> — @repo.HeadMessage</dd>
                 <dt>Last push</dt><dd>@Fmt.Ago(repo.PushedAt, Now)@(repo.LastPusher is null ? "" : $" · head commit by {repo.LastPusher}")</dd>
                 <dt>Open PRs</dt><dd>@repo.OpenPullRequests</dd>
@@ -149,7 +149,7 @@ else
                     {
                         <tr @key="issue.Url">
                             <td class="cell-main">
-                                <a class="title-link" href="@issue.Url" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span>
+                                <a class="title-link" href="@Fmt.SafeLink(issue.Url)" target="_blank" rel="noopener">@issue.Title</a> <span class="muted">#@issue.Number</span>
                                 <div class="chips">
                                     @if (issue.Assigned) { <span class="chip info">assigned</span> }
                                     @if (issue.Mentioned) { <span class="chip muted">mentioned</span> }

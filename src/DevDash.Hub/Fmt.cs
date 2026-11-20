@@ -139,6 +139,18 @@ public static class Fmt
 
     public static string RepoUrl(string key) => "repo?key=" + Uri.EscapeDataString(key);
 
+    /// <summary>
+    /// An outside link fit for an <c>href</c>: absolute http or https, or null. Blazor does not filter
+    /// <c>javascript:</c> URLs, and links such as a T3 thread's come from a machine's snapshot, so a
+    /// compromised agent could otherwise put script on a page every user opens.
+    /// </summary>
+    public static string? SafeLink(string? url) =>
+        url is { Length: > 0 and <= 2048 }
+        && Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp)
+            ? uri.AbsoluteUri
+            : null;
+
     public static string SeverityClass(Core.Cleanup.FindingSeverity severity) => severity switch
     {
         Core.Cleanup.FindingSeverity.High => "danger",

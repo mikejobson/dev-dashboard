@@ -206,7 +206,7 @@ else
                                 <div class="chips gh-chips">
                                     @if (row.GitHub is { } gh)
                                     {
-                                        <a class="chip" href="@gh.Url" target="_blank" rel="noopener">@(gh.IsPrivate ? "private" : "public")</a>
+                                        <a class="chip" href="@Fmt.SafeLink(gh.Url)" target="_blank" rel="noopener">@(gh.IsPrivate ? "private" : "public")</a>
                                         @if (gh.IsArchived) { <span class="chip warn">archived</span> }
                                         @if (row.PullRequests.Count > 0) { <span class="chip info">@row.PullRequests.Count of my PRs</span> }
                                         @if (row.Issues.Count > 0) { <span class="chip info">@row.Issues.Count @(row.Issues.Count == 1 ? "issue" : "issues")</span> }

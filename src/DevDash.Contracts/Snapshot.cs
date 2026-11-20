@@ -122,6 +122,13 @@ public sealed record MachineInfo
     /// </summary>
     public bool AcceptsT3 { get; init; }
 
+    /// <summary>
+    /// Whether this agent starts T3 Code threads asked for from the hub (<c>Agent:T3:AllowStartFromHub</c>, off by
+    /// default): a thread runs a prompt the hub sends, usually with full access to the machine. Null from an older
+    /// agent, which took them whenever <see cref="AcceptsT3"/> was true. Opening a repository in T3 does not need it.
+    /// </summary>
+    public bool? AcceptsStartT3Thread { get; init; }
+
     /// <summary>The developer caches outside the repositories (§21), measured every few hours. Null from an agent before 0.8.0 or with <c>Agent:Disk:Enabled</c> off.</summary>
     public DiskReport? Disk { get; init; }
 

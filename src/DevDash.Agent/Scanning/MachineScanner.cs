@@ -126,7 +126,7 @@ public sealed class MachineScanner
         if (_t3 is not null && await _t3.InfoAsync(ct).ConfigureAwait(false) is { } t3Info)
         {
             scanned = await _t3.EnrichAsync(scanned, fullScan: true, ct).ConfigureAwait(false);
-            machine = machine with { T3 = _t3.Current ?? t3Info, AcceptsT3 = options.Actions.Enabled && t3Info.Available };
+            machine = machine with { T3 = _t3.Current ?? t3Info, AcceptsT3 = options.Actions.Enabled && t3Info.Available, AcceptsStartT3Thread = options.T3.AllowStartFromHub };
         }
 
         machine = await WithMachineFactsAsync(machine, scanned, ct).ConfigureAwait(false);

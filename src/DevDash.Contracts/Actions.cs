@@ -350,7 +350,8 @@ public static partial class AgentActions
         AgentActionKind.Clone => machine.ActionsEnabled && machine.AcceptsClone,
         AgentActionKind.CleanBuildDirs => machine.ActionsEnabled && machine.AcceptsCleanBuildDirs,
         AgentActionKind.PullFastForward => machine.ActionsEnabled && machine.AcceptsPull,
-        AgentActionKind.OpenInT3 or AgentActionKind.StartT3Thread => machine.ActionsEnabled && machine.AcceptsT3,
+        AgentActionKind.OpenInT3 => machine.ActionsEnabled && machine.AcceptsT3,
+        AgentActionKind.StartT3Thread => machine.ActionsEnabled && machine.AcceptsT3 && machine.AcceptsStartT3Thread != false,
         AgentActionKind.CleanCache => machine.ActionsEnabled && machine.AcceptsCleanCache,
         AgentActionKind.StopDevServer => machine.ActionsEnabled && machine.AcceptsStopDevServer,
         AgentActionKind.ArchiveProject => machine.ActionsEnabled && machine.AcceptsArchiveProject,
@@ -363,6 +364,10 @@ public static partial class AgentActions
 
     /// <summary>Kinds that may run for minutes or hours: the hub ends a claim with one, so nothing waits behind it on a lease.</summary>
     public static bool IsLongRunning(AgentActionKind kind) => kind is AgentActionKind.Clone or AgentActionKind.ArchiveProject or AgentActionKind.RestoreArchive;
+
+    /// <summary>What an agent that does not take thread starts from the hub says, and the hub shows (<see cref="MachineInfo.AcceptsStartT3Thread"/>).</summary>
+    public static string StartFromHubOff(string hostname) =>
+        $"The agent on {hostname} does not accept thread starts from the hub. Set Agent:T3:AllowStartFromHub to true in its config.";
 
     /// <summary>True for the kinds that run T3 Code's CLI rather than git.</summary>
     public static bool IsT3Action(AgentActionKind kind) => kind is AgentActionKind.OpenInT3 or AgentActionKind.StartT3Thread;
@@ -391,6 +396,11 @@ public static partial class AgentActions
         var on = string.IsNullOrWhiteSpace(machine.AgentVersion) ? "" : $" (it is on {machine.AgentVersion})";
         if (IsT3Action(kind))
         {
+            if (kind == AgentActionKind.StartT3Thread && machine.AcceptsT3 && machine.AcceptsStartT3Thread == false)
+            {
+                return StartFromHubOff(machine.Hostname);
+            }
+
             // A 0.7.0 agent that does not accept these has looked for T3 Code and not found it (or has it switched off).
             var minimum = SemVer.ParseOrNull(T3MinAgentVersion)!;
             if (SemVer.ParseOrNull(machine.AgentVersion) is { } version && version.CompareTo(minimum) >= 0)
@@ -815,7 +825,9 @@ public static partial class AgentActions
     private static string? TitleProblem(string title) =>
         string.IsNullOrWhiteSpace(title) || title.Length > MaxTitleChars || title.Any(char.IsControl)
             ? $"The thread title must be one line of 1 to {MaxTitleChars} characters."
-            : null;
+            : title.TrimStart().StartsWith('-')
+                ? "The thread title must not start with '-' (T3 Code's CLI would read it as an option)."
+                : null;
 
     /// <summary>
     /// A base for a worktree: a branch, a remote-tracking branch, a tag or a commit, written plainly

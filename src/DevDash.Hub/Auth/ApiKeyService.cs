@@ -8,6 +8,19 @@ namespace DevDash.Hub.Auth;
 
 public sealed record IssuedKey(ApiKeyEntity Entity, string Plaintext);
 
+public enum KeyBinding
+{
+    Bound,
+
+    /// <summary>The key already belongs to another machine.</summary>
+    OtherMachine,
+
+    /// <summary>The key is unbound, but another key that is not revoked already belongs to this machine.</summary>
+    MachineHasKey,
+
+    Revoked,
+}
+
 /// <summary>Issues, validates and revokes agent API keys. Keys are random 32-byte tokens stored as SHA-256 hashes.</summary>
 public sealed class ApiKeyService(
     IDbContextFactory<DevDashDbContext> dbFactory,
@@ -54,30 +67,43 @@ public sealed class ApiKeyService(
     }
 
     /// <summary>
-    /// Records use of a key and scopes it to the machine on first use. Returns false when the key
-    /// already belongs to a different machine.
+    /// Records use of a key and scopes it to the machine on first use. A key that already belongs to another
+    /// machine is refused, and so is an unbound key naming a machine that a live key already owns: otherwise any
+    /// fresh key (or the first-run key, which is in the container log) could take over that machine's snapshot
+    /// and claim the actions queued for it. To move a machine to a new key, revoke its old one first.
     /// </summary>
-    public async Task<bool> BindAndTouchAsync(int keyId, string machineId, CancellationToken ct = default)
+    public async Task<KeyBinding> BindAndTouchAsync(int keyId, string machineId, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var key = await db.ApiKeys.FirstOrDefaultAsync(k => k.Id == keyId, ct);
         if (key is null || key.RevokedAt is not null)
         {
-            return false;
+            return KeyBinding.Revoked;
         }
 
         if (key.MachineId is null)
         {
+            // SQLite compares case-sensitively, machine ids do not: compare in memory over the few live keys.
+            var owners = await db.ApiKeys.AsNoTracking()
+                .Where(k => k.Id != keyId && k.RevokedAt == null && k.MachineId != null)
+                .Select(k => k.MachineId!)
+                .ToListAsync(ct);
+            if (owners.Any(m => string.Equals(m, machineId, StringComparison.OrdinalIgnoreCase)))
+            {
+                logger.LogWarning("Refused to bind API key {KeyId} to machine {MachineId}: another key that is not revoked belongs to it.", keyId, machineId);
+                return KeyBinding.MachineHasKey;
+            }
+
             key.MachineId = machineId;
         }
         else if (!string.Equals(key.MachineId, machineId, StringComparison.OrdinalIgnoreCase))
         {
-            return false;
+            return KeyBinding.OtherMachine;
         }
 
         key.LastUsedAt = time.GetUtcNow();
         await db.SaveChangesAsync(ct);
-        return true;
+        return KeyBinding.Bound;
     }
 
     public async Task<IReadOnlyList<ApiKeyEntity>> ListAsync(CancellationToken ct = default)
@@ -113,6 +139,7 @@ public sealed class ApiKeyService(
         }
 
         var issued = await IssueAsync("first-run", ct: ct);
+        // It stays in the container log; a key cannot take over a machine another key owns, and it can be revoked once used.
         logger.LogWarning("No agent API keys existed, so one was created. It is shown only once:\n\n    {Key}\n", issued.Plaintext);
 
         if (environment.IsDevelopment())

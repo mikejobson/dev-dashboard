@@ -111,7 +111,7 @@ public sealed class IssueWorker(
     }
 
     /// <summary>The GitHub repos some machine has a clone of, that GitHub knows, and that are not archived.</summary>
-    public IReadOnlyList<(string Key, bool? IsPrivate)> TrackedRepos()
+    public IReadOnlyList<(string Key, bool? IsPrivate, bool IsInternal)> TrackedRepos()
     {
         var local = snapshots.Machines
             .SelectMany(m => RepoIdentity.Flatten(m.Snapshot.Entries))
@@ -123,7 +123,7 @@ public sealed class IssueWorker(
             .Where(l => l.Found && l.Repo is { IsArchived: false } && local.Contains(l.Key))
             .OrderByDescending(l => l.Repo!.PushedAt)
             .Take(MaxRepos)
-            .Select(l => (l.Key.ToLowerInvariant(), (bool?)l.Repo!.IsPrivate))
+            .Select(l => (l.Key.ToLowerInvariant(), (bool?)l.Repo!.IsPrivate, l.Repo.IsPrivate && !l.Repo.IsCollaboratorsOnly))
             .ToList();
     }
 
@@ -132,14 +132,14 @@ public sealed class IssueWorker(
         var previous = await store.GetAsync(ct);
         var repos = new Dictionary<string, RepoIssues>(StringComparer.OrdinalIgnoreCase);
         var now = time.GetUtcNow();
-        foreach (var (key, isPrivate) in TrackedRepos())
+        foreach (var (key, isPrivate, isInternal) in TrackedRepos())
         {
             var before = previous.Repos.GetValueOrDefault(key);
             var result = await client.ListOpenAsync(key, before?.Error is null ? before?.ETag : null, ct);
             var name = GitHubIssuesClient.TrySplit(key, out var owner, out var repo) ? $"{owner}/{repo}" : key;
             repos[key] = result.Status switch
             {
-                IssueListStatus.NotModified when before is not null => before with { FetchedAt = now, IsPrivate = isPrivate },
+                IssueListStatus.NotModified when before is not null => before with { FetchedAt = now, IsPrivate = isPrivate, IsInternal = isInternal },
                 IssueListStatus.Changed => new RepoIssues
                 {
                     RepoKey = key,
@@ -147,10 +147,11 @@ public sealed class IssueWorker(
                     ETag = result.ETag,
                     FetchedAt = now,
                     IsPrivate = isPrivate,
+                    IsInternal = isInternal,
                     Issues = result.Issues,
                     Truncated = result.Truncated,
                 },
-                _ => (before ?? new RepoIssues { RepoKey = key, Repo = name }) with { Error = result.Error ?? "Could not list the issues.", IsPrivate = isPrivate },
+                _ => (before ?? new RepoIssues { RepoKey = key, Repo = name }) with { Error = result.Error ?? "Could not list the issues.", IsPrivate = isPrivate, IsInternal = isInternal },
             };
         }
 
@@ -205,6 +206,7 @@ public sealed class IssueWorker(
                     Issue = issue,
                     Settings = settings,
                     RepoIsPrivate = repo.IsPrivate,
+                    RepoIsInternal = repo.IsInternal,
                     ViewerLogin = github.Current.ViewerLogin,
                     Labeler = await LabelerAsync(issue, settings.Label, ct),
                     AlreadyStarted = false,
@@ -263,7 +265,16 @@ public sealed class IssueWorker(
         }
     }
 
-    /// <summary>The start request for an issue on one clone: the prompt from the template with the latest comments, a free branch, the default base.</summary>
+    /// <summary>Most comments read for an automatic start, before the ones by people not allowed are left out (one page).</summary>
+    private const int CommentsRead = 100;
+
+    /// <summary>
+    /// The start request for an issue on one clone: the prompt from the template with the latest comments, a free
+    /// branch, the default base. On a repository anyone can comment on (<see cref="IssueTrigger.CollaboratorsOnly"/>
+    /// false), an automatic start leaves out every comment by a login that is not allowed and says how many it left
+    /// out; a manual start keeps them (a person reads the prompt first) and its <see cref="T3StartRequest.Warning"/>
+    /// names their authors.
+    /// </summary>
     public async Task<T3StartRequest?> BuildRequestAsync(TrackedIssue issue, string? template, string machineId, string repoPath, bool automatic, CancellationToken ct, bool again = false)
     {
         if (snapshots.Get(machineId) is not { } machine
@@ -273,14 +284,35 @@ public sealed class IssueWorker(
         }
 
         var branch = T3Prompts.FreeBranch(T3Prompts.IssueBranch(issue.Number, issue.Title), git.Branches.Select(b => b.Name));
+        var repoIssues = (await store.GetAsync(ct)).Repos.GetValueOrDefault(issue.RepoKey);
+        var strangersWrite = !IssueTrigger.CollaboratorsOnly(repoIssues?.IsPrivate, repoIssues?.IsInternal ?? false);
+        var allowed = (await settingsStore.GetAsync(ct)).AllowedSet(github.Current.ViewerLogin);
+        bool Allowed(IssueComment c) => c.Author is { } login && allowed.Contains(login);
+
         IReadOnlyList<IssueComment> comments = [];
         try
         {
-            comments = await client.LatestCommentsAsync(issue.RepoKey, issue.Number, issue.Comments, T3Prompts.MaxComments, ct);
+            comments = await client.LatestCommentsAsync(issue.RepoKey, issue.Number, issue.Comments, automatic && strangersWrite ? CommentsRead : T3Prompts.MaxComments, ct);
         }
         catch (Exception ex) when (ex is HttpRequestException or System.Text.Json.JsonException or GitHubAuthException)
         {
             logger.LogDebug("Could not read the comments of {Repo}#{Number}: {Error}", issue.Repo, issue.Number, ex.Message);
+        }
+
+        var omitted = 0;
+        string? warning = null;
+        if (strangersWrite && automatic)
+        {
+            omitted = comments.Count(c => !Allowed(c));
+            comments = comments.Where(Allowed).TakeLast(T3Prompts.MaxComments).ToList();
+        }
+        else if (strangersWrite)
+        {
+            var strangers = comments.TakeLast(T3Prompts.MaxComments).Where(c => !Allowed(c)).Select(c => c.Author ?? "an unknown user").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (strangers.Count > 0)
+            {
+                warning = $"The prompt includes comments by {string.Join(", ", strangers)}, who {(strangers.Count == 1 ? "is" : "are")} not on the allowed list: read them in the prompt before starting, or take them out.";
+            }
         }
 
         var prompt = T3Prompts.RenderIssue(template, new IssuePromptInput
@@ -293,6 +325,7 @@ public sealed class IssueWorker(
             Author = issue.Author,
             Labels = issue.Labels,
             Comments = comments,
+            OmittedComments = omitted,
             Branch = branch,
         });
         return new T3StartRequest
@@ -308,6 +341,7 @@ public sealed class IssueWorker(
             Issue = new IssueRef(issue.RepoKey, issue.Number),
             Automatic = automatic,
             Again = again,
+            Warning = warning,
         };
     }
 

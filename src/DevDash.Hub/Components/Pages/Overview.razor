@@ -94,7 +94,7 @@
                     @foreach (var pr in _failingNow.Take(FindingTriage.TodayRows))
                     {
                         <li>
-                            <span class="dot danger"></span><a href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
+                            <span class="dot danger"></span><a href="@Fmt.SafeLink(pr.Url)" target="_blank" rel="noopener">@pr.Title</a>
                             <div class="sub muted small">CI failing@(pr.IsDraft ? " (draft)" : "") · @pr.Repo#@pr.Number · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
                         </li>
                     }
@@ -105,7 +105,7 @@
                     @foreach (var pr in _reviewsShown)
                     {
                         <li>
-                            <span class="dot warn"></span><a href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
+                            <span class="dot warn"></span><a href="@Fmt.SafeLink(pr.Url)" target="_blank" rel="noopener">@pr.Title</a>
                             <div class="sub muted small">Review requested@(pr.IsDraft ? " (draft)" : "") · @pr.Repo#@pr.Number · @pr.Author · updated @Fmt.Ago(pr.UpdatedAt, Now)</div>
                         </li>
                     }

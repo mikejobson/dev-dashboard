@@ -522,8 +522,11 @@ A hub database from before alerts gains the three alert tables on start, like th
 
 ### GitHub
 
-The hub polls GitHub every 5 minutes with read-only GraphQL queries. It takes the token from
-`GitHub:Token`, then `GITHUB_TOKEN`, then `gh auth token`. All your orgs are discovered
+The hub polls GitHub every 5 minutes with read-only GraphQL queries. It writes only when you turn on
+issue write-back (a comment and a label on issues it started threads for). It takes the token from
+`GitHub:Token`, then `GITHUB_TOKEN`, then `gh auth token`. A fine-grained token with read-only
+Metadata, Contents, Pull requests and Issues (Issues: write for write-back) is the least access it
+needs; `gh auth token` works too but can write to every repo you can. All your orgs are discovered
 automatically; list any to skip in `GitHub:ExcludeOrgs` in `src/DevDash.Hub/appsettings.json`.
 
 #### GitHub on the branch map
@@ -562,6 +565,11 @@ T3 Code app on that machine) and **Ask Claude in T3**: a prompt, a machine, and 
 checked-out work is not touched. **Fix in T3** buttons start one with the prompt filled in, for a pull
 request of yours with failing CI (with the failing run's address), vulnerable packages, and a pinned
 toolchain a machine lacks. ⌘K offers "Open … in T3" and "Ask Claude in T3 about …".
+
+Starting a thread sends a prompt that Claude then acts on with that machine's access, so each agent
+must also allow it: set `Agent:T3:AllowStartFromHub` to `true` in its config (from 0.8.2; off by
+default, and Open in T3 does not need it). Until then the buttons say why they are greyed out, and
+issue threads for that machine wait.
 
 The **Issues** page lists the open issues of the GitHub repositories you have cloned (conditional
 requests, so an unchanged list costs nothing), each with **Start in T3**: the issue, its labels and
@@ -676,15 +684,20 @@ requests a minute (`Hub:Mcp:RequestsPerMinute`); `Hub:Mcp:Enabled=false` turns t
 ## Run the hub in Docker on your tailnet
 
 The hub runs as two containers: Tailscale, which joins your tailnet as its own ephemeral node, and
-the hub, which shares Tailscale's network and listens on `127.0.0.1:8080` only. `tailscale serve`
+the hub, which shares Tailscale's network and listens on `127.0.0.2:8080` only. `tailscale serve`
 provides HTTPS with a tailnet certificate and tells the hub who you are, so there is no login page and
-no port is published on the host.
+no port is published on the host. (Not 127.0.0.1: in userspace mode Tailscale hands a tailnet device's
+direct connection to the node's own IP to 127.0.0.1, and the hub only trusts the identity headers on
+connections that arrive at 127.0.0.2, which only `serve` uses. If you keep your own `serve.json`, point
+it at `http://127.0.0.2:8080`.)
 
 1. **Tailnet setup, once:** in the Tailscale admin console, turn on MagicDNS and HTTPS certificates.
    If you use an OAuth client (recommended), add `"tag:devdash": ["autogroup:admin"]` to `tagOwners`
    in the ACL policy.
 2. **Configure:** `cp .env.example .env`. Fill in `TS_AUTHKEY` and `GITHUB_TOKEN` (`gh auth token`
-   prints one). `DEVDASH_ALLOWED_USERS` is optional. `.env.example` explains each setting.
+   prints one, though a read-only fine-grained token is safer). Set `DEVDASH_ALLOWED_USERS` to your
+   Tailscale login: whoever can open the dashboard can queue actions on your machines.
+   `.env.example` explains each setting.
 3. **Start:** `docker compose up -d` runs the published image,
    `ghcr.io/mikejobson/dev-dashboard-hub` (`DEVDASH_VERSION` in `.env` picks the release; the default
    is `latest`). To build the hub from your checkout instead: `docker compose up -d --build`.

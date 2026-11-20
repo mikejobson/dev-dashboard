@@ -165,7 +165,7 @@
                                                     <span class="bm-tag squash">squash-merged</span> @SquashTitle(row)
                                                     @if (row.MergedPullRequest is { } merged)
                                                     {
-                                                        <a href="@merged.Url" target="_blank" rel="noopener">#@merged.Number</a>
+                                                        <a href="@Fmt.SafeLink(merged.Url)" target="_blank" rel="noopener">#@merged.Number</a>
                                                     }
                                                 </div>
                                             }

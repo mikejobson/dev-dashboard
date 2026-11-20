@@ -114,7 +114,12 @@ case "$release_public_key" in
     ;;
   *)
     if ! command -v openssl >/dev/null 2>&1; then
-      say "Note: openssl was not found, so the release signature was not checked (the checksum was)."
+      # The checksum comes from the same place as the download, so on its own it proves nothing about who made it.
+      if [ "${DEVDASH_ALLOW_UNSIGNED:-0}" = "1" ]; then
+        say "Warning: openssl was not found, so the release signature was not checked; continuing because DEVDASH_ALLOW_UNSIGNED=1."
+      else
+        fail "openssl is needed to check the release signature. Install it (it ships with macOS and most Linux distributions), or set DEVDASH_ALLOW_UNSIGNED=1 to install without checking."
+      fi
     elif ! curl -fsSL --proto "$proto" --tlsv1.2 -o "$tmp/checksums.txt.sig" "$base/checksums.txt.sig" 2>/dev/null; then
       if [ "${DEVDASH_ALLOW_UNSIGNED:-0}" = "1" ]; then
         say "Warning: this release has no signature; continuing because DEVDASH_ALLOW_UNSIGNED=1."

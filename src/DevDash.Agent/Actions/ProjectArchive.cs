@@ -41,7 +41,8 @@ internal readonly record struct ArchiveProgress(int Files, long Bytes);
 /// Writing, reading back and unpacking project archives. tar.gz (PAX) keeps symbolic links as links and the
 /// permission bits, including the executable bit; zip is used on Windows, where neither exists in that form.
 /// Links are never followed, in either direction: a link is stored as a link, and unpacking creates links last,
-/// so no file is ever written through one.
+/// so no file is ever written through one. Only links that stay inside the project are kept or unpacked
+/// (<see cref="LinkProblem"/>), and nothing may be listed below a link.
 /// </summary>
 internal static class ProjectArchive
 {
@@ -54,7 +55,8 @@ internal static class ProjectArchive
     /// <summary>
     /// Walks <paramref name="root"/> without following any link. A folder is left out when
     /// <paramref name="exclude"/> says so (asked only about folders that are build output by name, never inside
-    /// <c>.git</c>). On Windows a link cannot go in a zip, so it is listed in <see cref="ArchivePlan.Skipped"/>.
+    /// <c>.git</c>). On Windows a link cannot go in a zip, so it is listed in <see cref="ArchivePlan.Skipped"/>; so is
+    /// a link that leads out of the project (absolute, or up past its folder), which a restore would refuse.
     /// </summary>
     public static async Task<ArchivePlan> PlanAsync(
         string root, Func<string, string, CancellationToken, Task<bool>>? exclude, bool storeLinks, CancellationToken ct)
@@ -86,7 +88,11 @@ internal static class ProjectArchive
                 var childRelative = relative.Length == 0 ? child.Name : relative + "/" + child.Name;
                 if (child.LinkTarget is not null)
                 {
-                    if (storeLinks)
+                    if (storeLinks && LinkProblem(childRelative, child.LinkTarget) is { } leaves)
+                    {
+                        skipped.Add($"{childRelative} -> {child.LinkTarget} ({leaves})");
+                    }
+                    else if (storeLinks)
                     {
                         items.Add(Item(child, childName, ArchiveEntryKind.Link));
                     }
@@ -328,6 +334,12 @@ internal static class ProjectArchive
         int files = 0, directories = 0, links = 0;
         long bytes = 0;
         var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        // Every link's name, and every folder some entry is below. Nothing may be below a link, whichever comes first
+        // in the archive: unpacking it would write through the link. Without case on the file systems that ignore it.
+        var nameComparer = OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+        var linkNames = new HashSet<string>(nameComparer);
+        var parents = new HashSet<string>(nameComparer);
         var folders = new List<(string Path, UnixFileMode Mode, DateTimeOffset Modified)>();
         var pendingLinks = new List<(string Path, string Target)>();
 
@@ -339,6 +351,35 @@ internal static class ProjectArchive
             if (!seen.Add(name))
             {
                 throw new InvalidDataException($"The archive lists {name} twice.");
+            }
+
+            for (var cut = relative.LastIndexOf('/'); cut > 0; cut = relative.LastIndexOf('/', cut - 1))
+            {
+                var parent = relative[..cut];
+                if (linkNames.Contains(parent))
+                {
+                    throw new InvalidDataException($"{name} is listed below {rootName}/{parent}, which is a link.");
+                }
+
+                if (!parents.Add(parent))
+                {
+                    break; // its own parents were added with it
+                }
+            }
+
+            if (kind == ArchiveEntryKind.Link)
+            {
+                if (relative.Length == 0 || parents.Contains(relative))
+                {
+                    throw new InvalidDataException($"{name} is a link, and the archive lists entries below it.");
+                }
+
+                if (LinkProblem(relative, linkTarget) is { } problem)
+                {
+                    throw new InvalidDataException($"{name} is a link to {linkTarget}, which {problem}.");
+                }
+
+                linkNames.Add(relative);
             }
 
             var target = destination is null ? null : relative.Length == 0 ? destination : Path.Combine(destination, relative.Replace('/', Path.DirectorySeparatorChar));
@@ -458,9 +499,11 @@ internal static class ProjectArchive
 
         if (destination is not null)
         {
-            // Links last, so nothing above was written through one. A link is made as it was: its target is not looked at.
+            // Links last, so nothing above was written through one. A link is made as it was: its target is not looked at
+            // (it was checked to stay inside the project). Nothing on the way to it may be a link either, whatever put it there.
             foreach (var (path, target) in pendingLinks)
             {
+                RefuseLinkedParents(destination, path);
                 File.CreateSymbolicLink(path, target);
             }
 
@@ -499,6 +542,116 @@ internal static class ProjectArchive
         }
 
         return relative;
+    }
+
+    /// <summary>
+    /// Why a link at <paramref name="relative"/> (below the project folder, <c>/</c>-separated) pointing at
+    /// <paramref name="target"/> could not be unpacked, or null when it stays inside the project. The target must be
+    /// relative, and in the plain form <c>../../a/b</c>: any <c>..</c> first, and no further up than the link's own
+    /// folder is deep. A <c>..</c> after a name is refused because that name may itself be a link
+    /// (<c>x -&gt; .</c> then <c>y -&gt; x/..</c> leaves the folder although each looks inside it on paper).
+    /// </summary>
+    internal static string? LinkProblem(string relative, string? target)
+    {
+        if (string.IsNullOrEmpty(target) || target.Contains('\0'))
+        {
+            return "is empty or not a plain path";
+        }
+
+        if (target[0] is '/' or '\\' || Path.IsPathRooted(target) || (OperatingSystem.IsWindows() && target.Contains(':')))
+        {
+            return "is an absolute path, outside the project";
+        }
+
+        char[] separators = OperatingSystem.IsWindows() ? ['/', '\\'] : ['/'];
+        var depth = relative.Count(c => c == '/'); // folders between the project folder and the link
+        var named = false;
+        foreach (var segment in target.Split(separators))
+        {
+            if (segment.Length == 0 || segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                if (named)
+                {
+                    return "goes up after going down (only ../../name forms are unpacked)";
+                }
+
+                if (--depth < 0)
+                {
+                    return "leads out of the project";
+                }
+
+                continue;
+            }
+
+            named = true;
+        }
+
+        return null;
+    }
+
+    /// <summary>Refuses when any folder between <paramref name="root"/> and <paramref name="path"/> is a link (asked of the link itself, never followed).</summary>
+    internal static void RefuseLinkedParents(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, Path.GetDirectoryName(path)!);
+        if (relative == ".")
+        {
+            return;
+        }
+
+        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+        {
+            throw new InvalidDataException($"{path} is not inside {root}.");
+        }
+
+        var current = root;
+        foreach (var segment in relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            var info = new DirectoryInfo(current);
+            if (info.LinkTarget is not null || (info.Exists && (info.Attributes & FileAttributes.ReparsePoint) != 0))
+            {
+                throw new InvalidDataException($"{current} is a link; nothing is unpacked through one.");
+            }
+
+            if (!info.Exists)
+            {
+                throw new InvalidDataException($"{current} is not a folder.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Copies <paramref name="source"/> to <paramref name="copy"/> (which must not exist; only this user may read
+    /// or write it) and returns the SHA-256 of exactly the bytes copied, so what is then unpacked from the copy is
+    /// what was checked, whatever happens to the source meanwhile.
+    /// </summary>
+    public static string CopyAndHash(string source, string copy, CancellationToken ct)
+    {
+        var create = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, BufferSize = 1 << 16 };
+        if (!OperatingSystem.IsWindows())
+        {
+            create.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+        using var output = new FileStream(copy, create);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[1 << 16];
+        int read;
+        while ((read = input.Read(buffer)) > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            hash.AppendData(buffer, 0, read);
+            output.Write(buffer, 0, read);
+        }
+
+        output.Flush();
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 
     /// <summary>SHA-256 of a whole file, lower-case hex.</summary>

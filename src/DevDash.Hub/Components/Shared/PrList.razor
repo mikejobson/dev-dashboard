@@ -18,7 +18,7 @@ else
                 {
                     <tr @key="pr.Url">
                         <td class="cell-main">
-                            <a class="title-link" href="@pr.Url" target="_blank" rel="noopener">@pr.Title</a>
+                            <a class="title-link" href="@Fmt.SafeLink(pr.Url)" target="_blank" rel="noopener">@pr.Title</a>
                             <div class="sub">
                                 @if (ShowRepo)
                                 {

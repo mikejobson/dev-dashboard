@@ -13,6 +13,9 @@ public sealed record IssueTriggerInput
     /// <summary>Null when not known: treated as public.</summary>
     public bool? RepoIsPrivate { get; init; }
 
+    /// <summary>A GitHub Enterprise internal repository: anyone in the enterprise can write in it, so it counts as public.</summary>
+    public bool RepoIsInternal { get; init; }
+
     /// <summary>The user the hub's GitHub token belongs to.</summary>
     public string? ViewerLogin { get; init; }
 
@@ -47,7 +50,9 @@ public sealed record IssueTriggerDecision(IssueTriggerVerdict Verdict, string Re
 /// <item>Never a second thread for one issue: once one was started (whatever became of it), only a person can start another.</item>
 /// <item>The label must have been added by an allowed login (by default the token's own user), read from the issue's events, not assumed.</item>
 /// <item>On a repository not known to be private, the issue's author must be allowed too: otherwise anyone could
-/// write the instructions and only need someone trusted to add a label.</item>
+/// write the instructions and only need someone trusted to add a label. GitHub Enterprise internal repositories
+/// count as public here. On such a repository an automatic start also leaves out comments by anyone not allowed
+/// (<see cref="IssueWorker.BuildRequestAsync"/>).</item>
 /// <item>The preferred machine if the repo has one (and only it), else the most recently seen machine with a
 /// clone that can start threads now. None: pending, with the reason.</item>
 /// </list>
@@ -88,9 +93,9 @@ public static class IssueTrigger
             return Manual($"the {settings.Label} label was added by {input.Labeler}, who is not allowed to trigger threads");
         }
 
-        if (input.RepoIsPrivate != true && (issue.Author is null || !allowed.Contains(issue.Author)))
+        if (!CollaboratorsOnly(input.RepoIsPrivate, input.RepoIsInternal) && (issue.Author is null || !allowed.Contains(issue.Author)))
         {
-            var visibility = input.RepoIsPrivate is null ? "the repository may be public" : "the repository is public";
+            var visibility = Visibility(input.RepoIsPrivate, input.RepoIsInternal);
             return Manual($"{visibility} and the issue was written by {issue.Author ?? "an unknown user"}, who is not on the allowed list: read it before starting a thread");
         }
 
@@ -118,6 +123,18 @@ public static class IssueTrigger
             ? "no machine has a clone of this repository"
             : "no machine with a clone can start a T3 thread now: " + string.Join("; ", input.Machines.Select(m => m.WhyNot).Where(w => w is not null).Distinct()));
     }
+
+    /// <summary>
+    /// Only the repository's collaborators can write issues and comments: known to be private and not a
+    /// GitHub Enterprise internal repository. Anything else is treated as public.
+    /// </summary>
+    public static bool CollaboratorsOnly(bool? isPrivate, bool isInternal) => isPrivate == true && !isInternal;
+
+    /// <summary>Why strangers' text matters here, for a reason or a warning.</summary>
+    public static string Visibility(bool? isPrivate, bool isInternal) =>
+        isInternal ? "the repository is internal (anyone in the enterprise can write in it)"
+        : isPrivate is null ? "the repository may be public"
+        : "the repository is public";
 
     private static IssueTriggerDecision Manual(string reason) => new(IssueTriggerVerdict.NeedsManualStart, reason);
 

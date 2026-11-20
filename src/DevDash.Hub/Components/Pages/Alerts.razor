@@ -327,10 +327,12 @@
                 secrets[key] = value;
             }
 
-            await Settings.SaveAsync(_edit, secrets, await LoginAsync());
+            var cleared = await Settings.SaveAsync(_edit, secrets, await LoginAsync());
             await LoadSettingsAsync();
             _tests.Clear();
-            _notice = "Saved";
+            _notice = cleared.Count == 0
+                ? "Saved"
+                : $"Saved. The address changed, so the {string.Join(", ", cleared.Select(AlertSettings.SecretLabel))} saved for the old one {(cleared.Count == 1 ? "was" : "were")} removed: enter {(cleared.Count == 1 ? "it" : "them")} again.";
 
             // What was waiting for a channel can go now.
             await AlertRuns.EvaluateAsync();
@@ -411,7 +413,7 @@
         <input type="password" autocomplete="new-password" spellcheck="false" aria-label="@label"
                placeholder="@(state.Set && !removing ? "leave empty to keep it" : placeholder)"
                value="@_typed.GetValueOrDefault(key)" @onchange="e => _typed[key] = e.Value?.ToString() ?? string.Empty" />
-        <span class="chip @(removing ? "warn" : state.Set ? "ok" : "muted")" data-secret="@key">@(removing ? "will be removed" : state.Text)</span>
+        <span class="chip @(removing || state.Withheld ? "warn" : state.Set ? "ok" : "muted")" data-secret="@key">@(removing ? "will be removed" : state.Text)</span>
         @if (state.SavedHere && !removing)
         {
             <button type="button" class="link" title="Forget the value saved here when you press Save" @onclick="() => _removing.Add(key)">Remove</button>

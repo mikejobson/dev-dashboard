@@ -38,7 +38,7 @@ public static partial class DescriptionReader
             var readme = files.FirstOrDefault(f => ReadmeNames.Contains(Path.GetFileName(f), StringComparer.OrdinalIgnoreCase));
             if (readme is not null)
             {
-                excerpt = FirstParagraph(ReadText(readme));
+                excerpt = FirstParagraph(RepoFile.ReadText(path, readme, MaxBytes));
             }
 
             foreach (var file in files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
@@ -151,7 +151,7 @@ public static partial class DescriptionReader
         {
             if (name.Equals("package.json", StringComparison.OrdinalIgnoreCase))
             {
-                using var doc = JsonDocument.Parse(ReadText(file) ?? "{}", new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+                using var doc = JsonDocument.Parse(RepoFile.ReadText(root, file, MaxBytes) ?? "{}", new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
                 manifests.Add(new ManifestInfo
                 {
                     File = relative,
@@ -161,7 +161,7 @@ public static partial class DescriptionReader
             }
             else if (ext is ".csproj" or ".fsproj")
             {
-                var m = CsprojDescription().Match(ReadText(file) ?? "");
+                var m = CsprojDescription().Match(RepoFile.ReadText(root, file, MaxBytes) ?? "");
                 manifests.Add(new ManifestInfo { File = relative, Name = Path.GetFileNameWithoutExtension(name), Description = m.Success ? m.Groups["v"].Value : null });
             }
             else if (ext is ".sln" or ".slnx")
@@ -170,7 +170,7 @@ public static partial class DescriptionReader
             }
             else if (name is "pyproject.toml" or "Cargo.toml")
             {
-                var text = ReadText(file) ?? "";
+                var text = RepoFile.ReadText(root, file, MaxBytes) ?? "";
                 var n = TomlName().Match(text);
                 var d = TomlDescription().Match(text);
                 manifests.Add(new ManifestInfo { File = relative, Name = n.Success ? n.Groups["v"].Value : null, Description = d.Success ? NullIfEmpty(d.Groups["v"].Value) : null });
@@ -183,12 +183,4 @@ public static partial class DescriptionReader
     }
 
     private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-
-    private static string? ReadText(string file)
-    {
-        using var stream = File.OpenRead(file);
-        var buffer = new byte[(int)Math.Min(stream.Length, MaxBytes)];
-        var read = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
-        return System.Text.Encoding.UTF8.GetString(buffer, 0, read).TrimStart('﻿');
-    }
 }

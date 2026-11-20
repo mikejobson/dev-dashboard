@@ -127,6 +127,7 @@ public static class DependencyServices
         services.AddSingleton<ToolchainService>();
         services.AddSingleton(_ => new DependencyCache());
         services.AddSingleton<DependencyTargets>();
+        services.AddSingleton(_ => new NuGetOrg());
         services.AddSingleton<DependencyChecker>();
         return services;
     }

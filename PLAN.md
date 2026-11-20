@@ -1370,3 +1370,41 @@ time resolution is not noticed (its new content would be in the trash, not the a
 the uncompressed size, which is conservative, but space can still run out if something else fills the volume
 meanwhile; the write then fails and is cleaned up. Hard links come back as separate files. The write probe runs
 on every full scan, so a NAS sees a create and a delete every 15 minutes.
+
+## 24. Security review (0.8.2)
+
+A full review of the hub, the agent and CI (2026-11-20). What changed, and why:
+
+- **Browser sign-in.** The hub listens on 127.0.0.2:8080 and trusts `Tailscale-User-*` headers only on
+  connections that arrived there. In userspace mode tailscaled hands a tailnet peer's direct connection to
+  the node's IP to 127.0.0.1 on the same port, so "came from loopback" let any tailnet device sign in as
+  anyone (confirmed against the live hub). An empty `Auth:AllowedUsers` now shows a warning on every page.
+- **Cross-site requests.** Sign-in is not a cookie, so SameSite does nothing; `SameOriginGuard` refuses
+  non-navigation browser requests (API POSTs, the Blazor WebSocket) marked cross-site by `Sec-Fetch-Site`
+  or a foreign `Origin`.
+- **Agent keys.** An unbound key cannot bind to a machine that a live key already owns (revoke the old key
+  first), so a spare key cannot take over a machine's snapshot and its queued actions.
+- **Links.** Every outside `href`, and alert links, go through `Fmt.SafeLink` (http/https only): T3 thread
+  and PR links come from snapshots.
+- **T3 thread starts** need `Agent:T3:AllowStartFromHub` on the agent (off by default): a prompt is
+  instructions Claude carries out with the machine's access, which no other action allows.
+- **Issue threads.** Automatic starts leave out comments from logins that are not allowed; the untrusted
+  block uses a random marker per prompt and the text is normalised (NFKC, format characters removed, any
+  "UNTRUSTED" line neutralised); internal repos count as public; the label adder is read newest first.
+- **Scanning untrusted repos.** The dependency check reads `obj/project.assets.json` and asks nuget.org
+  instead of running `dotnet` in the repo (a repo's `global.json` `sdk.paths` could run its own SDK).
+  Every git call gets `core.hooksPath`, `core.fsmonitor`, `log.showSignature` and protocol overrides, and
+  network commands and `status` are refused where the repo's own config names a program (standard Git LFS
+  filters excepted). Repo files (README, manifests, pins) are read only when they are regular files with no
+  symlink on the way. Credentials are stripped from remote URLs and error text.
+- **Archive restore** refuses entries below a link and links that leave the project, and hashes and unpacks
+  one private copy of the archive. StopDevServer only stops listening processes; RemoveWorktree only inside
+  scan roots.
+- **Alerts.** Changing a channel's address clears its saved secret; link-local and metadata addresses are
+  refused at connect time.
+- **Supply chain.** Workflow actions are pinned to commit SHAs (Dependabot keeps them current);
+  `install.sh` refuses to skip the signature check when `openssl` is missing; `agent.json` is written 0600.
+
+Not changed: copied cleanup scripts quote for POSIX shells only (pasting one into PowerShell is unsafe
+for hostile branch names); a repo's `.npmrc` still picks npm's registry for `npm audit`.
+

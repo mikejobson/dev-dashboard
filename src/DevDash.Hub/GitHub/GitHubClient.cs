@@ -19,9 +19,18 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
     private const int SearchMaxResults = 100;
     private const int LookupBatchSize = 25;
 
+    /// <summary>
+    /// Most local remotes looked up in one poll. Agents report the remotes, so a misbehaving one could list
+    /// thousands; the rest wait for a later poll (keeping what an earlier one found), least recently checked first.
+    /// </summary>
+    public const int MaxLookupsPerPoll = 200;
+
+    /// <summary>How long "GitHub has no such repository" is believed before it is asked again.</summary>
+    public static readonly TimeSpan NotFoundFor = TimeSpan.FromHours(6);
+
     private const string RepoFields = """
         fragment RepoFields on Repository {
-          nameWithOwner url description pushedAt isArchived isPrivate isFork
+          nameWithOwner url description pushedAt isArchived isPrivate visibility isFork
           primaryLanguage { name }
           pullRequests(states: OPEN) { totalCount }
           defaultBranchRef { name target { ... on Commit { oid committedDate messageHeadline author { name user { login } } } } }
@@ -58,8 +67,13 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
     [GeneratedRegex(@"^[A-Za-z0-9_.\-]+$")]
     private static partial Regex SafeName();
 
-    /// <summary>Runs one full poll. <paramref name="localRemoteKeys"/> are the <c>github.com/owner/repo</c> keys agents reported.</summary>
-    public async Task<GitHubSnapshot> PollAsync(IReadOnlyCollection<string> localRemoteKeys, CancellationToken ct)
+    /// <summary>
+    /// Runs one full poll. <paramref name="localRemoteKeys"/> are the <c>github.com/owner/repo</c> keys agents
+    /// reported; <paramref name="previousLookups"/> what the last poll found for them, so a repository GitHub
+    /// does not have is not asked about again for <see cref="NotFoundFor"/>, and one left over by
+    /// <see cref="MaxLookupsPerPoll"/> keeps its last answer.
+    /// </summary>
+    public async Task<GitHubSnapshot> PollAsync(IReadOnlyCollection<string> localRemoteKeys, CancellationToken ct, IReadOnlyDictionary<string, RemoteRepoLookup>? previousLookups = null)
     {
         var settings = options.CurrentValue;
         var warnings = new List<string>();
@@ -225,17 +239,36 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
 
         // Join to local clones: look up every reported remote we have not already seen.
         var lookups = new Dictionary<string, RemoteRepoLookup>(StringComparer.OrdinalIgnoreCase);
-        var toQuery = new List<(string Key, string Owner, string Name)>();
+        var candidates = new List<(string Key, string Owner, string Name, RemoteRepoLookup? Before)>();
         foreach (var key in localRemoteKeys.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            var before = previousLookups?.GetValueOrDefault(key);
             if (repos.TryGetValue(key, out var known))
             {
                 lookups[key] = new RemoteRepoLookup { Key = key, Found = true, Repo = known, CheckedAt = now };
             }
+            else if (before is { Found: false } && now - before.CheckedAt < NotFoundFor)
+            {
+                lookups[key] = before;
+            }
             else if (GitHubKeys.TrySplit(key, out var owner, out var name) && SafeName().IsMatch(owner) && SafeName().IsMatch(name))
             {
-                toQuery.Add((key, owner, name));
+                candidates.Add((key, owner, name, before));
             }
+        }
+
+        // Never asked first, then the longest since asked; whatever is over the cap keeps its last answer.
+        var ordered = candidates.OrderBy(c => c.Before?.CheckedAt ?? DateTimeOffset.MinValue).ThenBy(c => c.Key, StringComparer.OrdinalIgnoreCase).ToList();
+        var toQuery = ordered.Take(MaxLookupsPerPoll).Select(c => (c.Key, c.Owner, c.Name)).ToList();
+        var deferred = ordered.Skip(MaxLookupsPerPoll).ToList();
+        foreach (var later in deferred.Where(c => c.Before is not null))
+        {
+            lookups[later.Key] = later.Before!;
+        }
+
+        if (deferred.Count > 0)
+        {
+            warnings.Add($"{deferred.Count} more local remotes were not looked up in this poll (at most {MaxLookupsPerPoll} a poll); later polls get to them.");
         }
 
         foreach (var batch in toQuery.Chunk(LookupBatchSize))
@@ -333,6 +366,7 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
             PushedAt = Date(node, "pushedAt"),
             IsArchived = Bool(node, "isArchived"),
             IsPrivate = Bool(node, "isPrivate"),
+            Visibility = Str(node, "visibility"),
             IsFork = Bool(node, "isFork"),
             DefaultBranch = branch,
             HeadSha = sha,

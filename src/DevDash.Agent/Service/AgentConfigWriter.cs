@@ -127,6 +127,12 @@ public static class AgentConfigWriter
     {
         CreatePrivateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, json, new UTF8Encoding(false));
+
+        // The config can hold an inline ApiKey or alert settings someone added by hand: keep it to this user.
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
     }
 
     /// <summary>

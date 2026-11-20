@@ -201,7 +201,7 @@ public sealed class ProjectActionTests : IDisposable
             Assert.False(AgentActions.Accepts(old, kind));
             Assert.Contains("Update the agent on old-host to 0.6.0", AgentActions.WhyNotAccepted(old, kind));
         });
-        Assert.Equal("0.6.0", MachineInfoProvider.AgentVersion);
+        Assert.True(Version.Parse(MachineInfoProvider.AgentVersion.Split('-')[0]) >= new Version(0, 6, 0)); // this agent takes them
     }
 
     // ---- remove ---------------------------------------------------------------------------------

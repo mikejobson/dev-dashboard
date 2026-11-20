@@ -175,7 +175,6 @@ else
                             }
                         </th>
                     }
-                    <th>GitHub</th>
                     <th class="right" aria-sort="@AriaSort(LocalSort.Activity)">@if (sortable) { @SortLink(LocalSort.Activity, "Last activity") } else { <span>Last activity</span> }</th>
                 </tr>
             </thead>
@@ -200,6 +199,31 @@ else
                             @if (row.Description is not null)
                             {
                                 <div class="sub clamp-2" title="@row.Description.Text">@row.Description.Text</div>
+                            }
+                            @* GitHub's view of the repo sits under its name, not in a column: with three or more machines there is no room for one. *@
+                            @if (HasGitHubCell(row))
+                            {
+                                <div class="chips gh-chips">
+                                    @if (row.GitHub is { } gh)
+                                    {
+                                        <a class="chip" href="@gh.Url" target="_blank" rel="noopener">@(gh.IsPrivate ? "private" : "public")</a>
+                                        @if (gh.IsArchived) { <span class="chip warn">archived</span> }
+                                        @if (row.PullRequests.Count > 0) { <span class="chip info">@row.PullRequests.Count of my PRs</span> }
+                                        @if (row.Issues.Count > 0) { <span class="chip info">@row.Issues.Count @(row.Issues.Count == 1 ? "issue" : "issues")</span> }
+                                    }
+                                    else if (row.RemoteMissing)
+                                    {
+                                        <span class="chip danger">not found</span>
+                                    }
+                                    else if (row.IsHosted)
+                                    {
+                                        <span class="chip muted">@row.Key.Split('/')[0]</span>
+                                    }
+                                    else if (row.Kind == EntryKind.GitRepo)
+                                    {
+                                        <span class="chip warn">local only</span>
+                                    }
+                                </div>
                             }
                         </td>
                         @foreach (var machine in _machines)
@@ -229,35 +253,12 @@ else
                                 </div>
                             </td>
                         }
-                        <td data-label="GitHub" class="@(HasGitHubCell(row) ? "" : "blank")">
-                            <div class="chips">
-                                @if (row.GitHub is { } gh)
-                                {
-                                    <a class="chip" href="@gh.Url" target="_blank" rel="noopener">@(gh.IsPrivate ? "private" : "public")</a>
-                                    @if (gh.IsArchived) { <span class="chip warn">archived</span> }
-                                    @if (row.PullRequests.Count > 0) { <span class="chip info">@row.PullRequests.Count of my PRs</span> }
-                                    @if (row.Issues.Count > 0) { <span class="chip info">@row.Issues.Count @(row.Issues.Count == 1 ? "issue" : "issues")</span> }
-                                }
-                                else if (row.RemoteMissing)
-                                {
-                                    <span class="chip danger">not found</span>
-                                }
-                                else if (row.IsHosted)
-                                {
-                                    <span class="chip muted">@row.Key.Split('/')[0]</span>
-                                }
-                                else if (row.Kind == EntryKind.GitRepo)
-                                {
-                                    <span class="chip warn">local only</span>
-                                }
-                            </div>
-                        </td>
                         <td data-label="Last activity" class="cell-when right nowrap sub" title="@Fmt.Date(row.LastActivity)">@Fmt.Ago(row.LastActivity, Now)</td>
                     </tr>
                 }
                 @if (rows.Count == 0)
                 {
-                    <tr><td class="empty" colspan="@(_machines.Count + 3)">Nothing matches these filters.</td></tr>
+                    <tr><td class="empty" colspan="@(_machines.Count + 2)">Nothing matches these filters.</td></tr>
                 }
             </tbody>
         </table>

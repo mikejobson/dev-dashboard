@@ -28,12 +28,27 @@
     <div class="card empty">No machine has reported yet.</div>
 }
 
+@if (_machines.Count > 1)
+{
+    @* Several machines are a long scroll apart: their totals side by side first, each linking to its section. *@
+    <div class="tiles disk-tiles">
+        @foreach (var disk in _machines)
+        {
+            <a class="tile" href="disk#disk-@disk.Machine.MachineId">
+                <div class="value">@(disk.Reported ? Fmt.Size(disk.Reclaimable) : "–")</div>
+                <div class="label"><strong>@disk.Machine.Machine.Hostname</strong></div>
+                <div class="label">@(disk.Reported ? $"reclaimable of {Fmt.Size(disk.Total)} in caches" : "caches not measured yet")@(disk.BuildOutputRepos > 0 ? $" · {Fmt.Size(disk.BuildOutputTotal)} build output" : "")</div>
+            </a>
+        }
+    </div>
+}
+
 @foreach (var disk in _machines)
 {
     var host = disk.Machine.Machine.Hostname;
     <section @key="disk.Machine.MachineId">
-        <h2 id="disk-@disk.Machine.MachineId">
-            @host
+        <h2 id="disk-@disk.Machine.MachineId" class="with-meta">
+            <span>@host</span>
             @if (disk.Reported)
             {
                 <span class="muted small">@Fmt.Size(disk.Total) in caches · <strong>@Fmt.Size(disk.Reclaimable)</strong> reclaimable · measured @Fmt.Ago(disk.Machine.Machine.Disk!.CollectedAt, Now)</span>

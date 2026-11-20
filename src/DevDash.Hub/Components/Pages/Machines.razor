@@ -66,7 +66,7 @@ else
     <div class="table-wrap">
         <table class="stack machines-table">
             <thead>
-                <tr><th>Machine</th><th>System</th><th>Agent</th><th>Scan</th><th>Roots</th><th>Actions</th><th class="right">Last seen</th><th></th></tr>
+                <tr><th>Machine</th><th>System</th><th>Agent</th><th>Scan</th><th>Roots</th><th>Actions</th><th></th></tr>
             </thead>
             <tbody>
                 @foreach (var machine in _machines)
@@ -77,6 +77,8 @@ else
                         <td class="cell-main cell-machine">
                             <div class="truncate" title="@machine.Machine.Hostname"><span class="dot @(online ? "ok" : "")"></span><strong>@machine.Machine.Hostname</strong></div>
                             <div class="sub mono truncate" title="@machine.MachineId">@machine.MachineId</div>
+                            @* Last seen sits here rather than in a column of its own, so three or more machines fit a laptop-width page. *@
+                            <div class="sub" title="Last seen @Fmt.Date(machine.LastSeenAt)"><span class="chip @(online ? "ok" : "muted")">@(online ? "online" : "offline")</span> @Fmt.Ago(machine.LastSeenAt, Now)</div>
                         </td>
                         <td data-label="System" class="cell-system">
                             <div>
@@ -148,7 +150,7 @@ else
                             }
                             </div>
                         </td>
-                        <td data-label="Scan" class="nowrap">
+                        <td data-label="Scan">
                             <div>
                                 <span title="@machine.Snapshot.ScanDurationMs ms">@Fmt.Count(machine.Snapshot.Entries.Count, "entry", "entries") in @Fmt.Duration(machine.Snapshot.ScanDurationMs)</span>
                                 <div class="sub" title="@Fmt.Date(machine.Snapshot.ScannedAt)">scanned @Fmt.Ago(machine.Snapshot.ScannedAt, Now)</div>
@@ -162,7 +164,7 @@ else
                                 }
                             </div>
                         </td>
-                        <td data-label="Actions">
+                        <td data-label="Actions" class="cell-actions">
                             @if (machine.Machine.ActionsEnabled)
                             {
                                 <span class="chip info" title="This agent runs allowlisted fixes queued from the dashboard, after you confirm each one.">on</span>
@@ -172,8 +174,16 @@ else
                                 }
                                 @if (machine.Machine.Archive is { } archive)
                                 {
-                                    <div class="sub mono truncate" title="@(archive.Problem ?? $"Archives go to {archive.Folder} ({archive.Format})")">
-                                        archive: @Fmt.Tilde(archive.Folder, home)@(archive.Problem is null ? archive.FreeBytes is { } free ? $" · {Fmt.Size(free)} free" : "" : " · not usable")
+                                    <div class="sub" title="@(archive.Problem ?? $"Archives go to {archive.Folder} ({archive.Format})")">
+                                        <div class="mono truncate">archive: @Fmt.Tilde(archive.Folder, home)</div>
+                                        @if (archive.Problem is not null)
+                                        {
+                                            <div><span class="chip warn">not usable</span></div>
+                                        }
+                                        else if (archive.FreeBytes is { } free)
+                                        {
+                                            <div>@Fmt.Size(free) free</div>
+                                        }
                                     </div>
                                 }
                                 @if (_removed.Count(r => string.Equals(r.Tombstone.MachineId, machine.MachineId, StringComparison.OrdinalIgnoreCase)) is > 0 and var gone)
@@ -185,12 +195,6 @@ else
                             {
                                 <span class="chip muted" title="This agent only reports. Start it with --enable-actions to allow Run buttons for this machine.">off</span>
                             }
-                        </td>
-                        <td data-label="Last seen" class="right nowrap">
-                            <div>
-                                <span class="chip @(online ? "ok" : "muted")">@(online ? "online" : "offline")</span>
-                                <div class="sub" title="@Fmt.Date(machine.LastSeenAt)">@Fmt.Ago(machine.LastSeenAt, Now)</div>
-                            </div>
                         </td>
                         <td class="right cell-buttons">
                             <button type="button" class="danger" title="Remove this machine's data from the hub. It reappears if its agent reports again." @onclick="() => ForgetAsync(machine.MachineId)">Forget</button>

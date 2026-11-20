@@ -243,7 +243,7 @@ public class HistoryTests
         Assert.Contains("<title>mac-host: 4 on 6 Nov</title>", svg);
         Assert.Contains("<title>pc-host: 7 on 7 Nov</title>", svg);
         Assert.Contains("class=\"chart-series s1\"", svg);
-        Assert.Contains(">pc-host</text>", svg);                    // direct label
+        Assert.Contains("<title>pc-host</title>7</text>", svg);     // its latest value at the line's end
         Assert.Contains("aria-label=\"At risk\"", svg);
 
         var spark = HistoryCharts.Sparkline([(from, 10 * Mb), (from.AddDays(3), 30 * Mb)], HistoryCharts.Bytes, "Size");

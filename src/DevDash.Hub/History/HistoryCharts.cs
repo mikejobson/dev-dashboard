@@ -26,7 +26,8 @@ public static class HistoryCharts
     /// <summary>A line chart of several series over the days from <paramref name="from"/> to <paramref name="to"/>, sharing one axis.</summary>
     public static string Line(IReadOnlyList<ChartSeries> series, DateOnly from, DateOnly to, Func<double, string> format, string label)
     {
-        const int width = 640, height = 170, left = 58, right = 96, top = 10, bottom = 22;
+        // Drawn about the size it is shown (half a laptop-width page), so its text stays readable; a phone scales it down.
+        const int width = 520, height = 180, left = 62, right = 70, top = 12, bottom = 26;
         var plotW = width - left - right;
         var plotH = height - top - bottom;
         var span = Math.Max(1, to.DayNumber - from.DayNumber);
@@ -52,7 +53,7 @@ public static class HistoryCharts
         sb.Append(Inv, $"<text class=\"chart-label\" x=\"{left}\" y=\"{height - 6}\">{Enc(DayLabel(from, today))}</text>");
         sb.Append(Inv, $"<text class=\"chart-label\" x=\"{left + plotW}\" y=\"{height - 6}\" text-anchor=\"end\">{Enc(DayLabel(to, today))}</text>");
 
-        var ends = new List<(double Y, string Text)>();
+        var ends = new List<(double Y, string Value, string Name, int Slot)>();
         foreach (var s in series)
         {
             var points = s.Points.Where(p => p.Day >= from && p.Day <= to).OrderBy(p => p.Day).ToList();
@@ -104,18 +105,19 @@ public static class HistoryCharts
             }
 
             sb.Append("</g>");
-            ends.Add((Y(last.Value), s.Name));
+            ends.Add((Y(last.Value), format(last.Value), s.Name, slot));
         }
 
-        // Direct labels at the right for up to four lines, nudged apart so they do not overlap.
-        if (ends.Count is > 0 and <= 4)
+        // The latest value at the end of each line, nudged apart so they do not overlap. The legend names the
+        // lines; a machine name here would not fit beside the plot once there are three of them.
+        if (ends.Count is > 0 and <= 6)
         {
             var placed = new List<double>();
-            foreach (var (y, text) in ends.OrderBy(e => e.Y))
+            foreach (var (y, value, name, slot) in ends.OrderBy(e => e.Y))
             {
-                var at = Math.Max(y + 3, placed.Count == 0 ? top + 6 : placed[^1] + 12);
+                var at = Math.Max(y + 4, placed.Count == 0 ? top + 6 : placed[^1] + 15);
                 placed.Add(at);
-                sb.Append(Inv, $"<text class=\"chart-end\" x=\"{left + plotW + 8}\" y=\"{at:0.#}\">{Enc(Short(text, 14))}</text>");
+                sb.Append(Inv, $"<text class=\"chart-end s{slot}\" x=\"{left + plotW + 8}\" y=\"{at:0.#}\"><title>{Enc(name)}</title>{Enc(value)}</text>");
             }
         }
 
@@ -161,8 +163,6 @@ public static class HistoryCharts
         value >= 10_000 ? (value / 1000).ToString("0.#", Inv) + "k" : Math.Round(value).ToString("0", Inv);
 
     public static string Bytes(double value) => Fmt.Size((long)Math.Round(value));
-
-    private static string Short(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
 
     private static string Enc(string text) => WebUtility.HtmlEncode(text);
 }

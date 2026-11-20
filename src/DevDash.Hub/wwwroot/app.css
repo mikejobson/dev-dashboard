@@ -129,6 +129,9 @@ a.tile:hover { border-color: var(--accent); text-decoration: none; }
 .tile.warn .value { color: var(--warn); }
 .tile.danger .value { color: var(--danger); }
 .tile.ok .value { color: var(--ok); }
+.disk-tiles { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: 14px; }
+h2.with-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; scroll-margin-top: 12px; }
+.list + h3, .table-wrap + h3 { margin-top: 16px; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
 
 /* ---- tables ---- */
@@ -572,8 +575,14 @@ th a.sort .dot { margin-right: 3px; }
 .sort-arrow { color: var(--accent); }
 .sort-links { display: none; gap: 10px; align-items: center; }
 .local-table th { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+/* One column per machine: a long branch or an unbroken word in a description must not push the table past the page. */
+.local-table .chip.branch { max-width: 150px; }
+.local-table td.cell-main { min-width: 190px; overflow-wrap: anywhere; }
+.local-table .clone-state .sub { overflow-wrap: anywhere; }
+.local-table .gh-chips { margin-top: 4px; }
 .machines-table td.cell-machine { max-width: 230px; }
-.machines-table td.cell-system { max-width: 250px; }
+.machines-table td.cell-system { max-width: 220px; }
+.machines-table td.cell-actions { max-width: 190px; }
 .machines-table td.mono { max-width: 220px; }
 .machines-table tr:target td { background: var(--info-bg); }
 .actions-table td.cell-action { max-width: 620px; }
@@ -987,16 +996,21 @@ a.chip.tag:hover { text-decoration: none; outline: 1px solid var(--accent); }
     .leftoff-when { margin-left: 0; flex-basis: 100%; }
 }
 /* ---- history (§22): line charts and sparklines drawn as SVG on the server; colours are the per-device --dev-N ---- */
-.charts { margin-bottom: 8px; }
+/* Four charts: two by two, whatever the width, so none is left alone on a row and each stays wide enough to read. */
+.grid-2.charts { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 8px; }
+@media (max-width: 1000px) {
+    .grid-2.charts { grid-template-columns: minmax(0, 1fr); }
+}
 .chart h3 { margin: 0; font-size: 14px; }
 .chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; }
-.chart-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); }
+/* Always on a line of its own, so charts side by side start their plots at the same height. */
+.chart-legend { display: flex; flex-basis: 100%; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); }
 .chart-legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 .chart-svg { display: block; max-width: 100%; height: auto; overflow: visible; }
 .chart-grid { stroke: var(--border); stroke-width: 1; }
 .chart-grid.base { stroke: var(--muted); stroke-opacity: .5; }
-.chart-label { fill: var(--muted); font-size: 10px; }
-.chart-end { fill: var(--text); font-size: 11px; }
+.chart-label { fill: var(--muted); font-size: 12px; }
+.chart-end { fill: var(--text); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .chart-series polyline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart-series .dot { stroke: var(--surface); stroke-width: 2; }
 .chart-series .hit { fill: transparent; stroke: none; }

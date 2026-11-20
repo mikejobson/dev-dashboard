@@ -103,7 +103,10 @@ public static partial class T3Prompts
     public static string RenderIssue(string? template, IssuePromptInput issue, Func<string>? newMarker = null)
     {
         var marker = (newMarker ?? NewMarker)();
+        // One kind of line ending: a template saved from a Windows browser, or this file checked out on Windows,
+        // has CRLF, and the marker lines must match exactly line for line.
         var text = (string.IsNullOrWhiteSpace(template) ? DefaultIssueTemplate : template)
+            .ReplaceLineEndings("\n")
             .Replace(BeginUntrusted, BeginLine("{{marker}}"), StringComparison.Ordinal)
             .Replace(EndUntrusted, EndLine("{{marker}}"), StringComparison.Ordinal);
         var bodyLimit = MaxBodyChars;

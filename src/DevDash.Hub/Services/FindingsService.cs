@@ -26,7 +26,11 @@ public sealed record FindingView(Finding Finding, FindingStatus? Status, DateTim
         IsActive
         && command.Action is not null
         && Finding.MachineIdFor(command) is { } machine
-        && RunnableMachines.Contains(machine);
+        && RunnableMachines.Contains(machine)
+        && Supports(machine, command.Action.Kind);
+
+    /// <summary>Whether a machine's agent knows a kind of action: the kinds from 0.6.0 are not offered to an older agent.</summary>
+    public Func<string, AgentActionKind, bool> Supports { get; init; } = (_, _) => true;
 
     /// <summary>The latest queued, running or just-finished action for this command, if any.</summary>
     public AgentActionEntity? ActionFor(FindingCommand command) =>
@@ -92,7 +96,7 @@ public sealed class FindingsService(
 
                 return new FindingView(f, state.Status, state.SnoozedUntil);
             })
-            .Select(v => v with { RunnableMachines = runnable, RecentActions = recent })
+            .Select(v => v with { RunnableMachines = runnable, RecentActions = recent, Supports = actions.CanRun })
             .OrderByDescending(v => v.Finding.Severity)
             .ThenBy(v => v.Finding.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();

@@ -5,6 +5,7 @@
 @inject GitHubStore GitHub
 @inject FindingsService Findings
 @inject AgentUpdates Updates
+@inject NavCounts Counts
 
 <PageTitle>Overview · DevDash</PageTitle>
 
@@ -44,6 +45,10 @@
         <div class="value">@_dirty</div>
         <div class="label">with uncommitted changes</div>
     </a>
+    <a class="tile @(_onlyCopy > 0 ? "danger" : "")" href="safety">
+        <div class="value">@_onlyCopy</div>
+        <div class="label">with commits on no remote</div>
+    </a>
     <a class="tile @(_reviews.Count > 0 ? "warn" : "")" href="github">
         <div class="value">@_reviews.Count</div>
         <div class="label">PRs waiting for my review</div>
@@ -57,6 +62,20 @@
         <div class="label">cleanup findings</div>
     </a>
 </div>
+
+@if (_hasActivity)
+{
+    <h2 id="activity">Activity</h2>
+    <ActivityHeatmap Days="_activity" Today="Today" Caption="@ActivityCaption" Note="A commit that several machines have is counted once.">
+        @if (_canMine)
+        {
+            <span class="sort-links small">
+                <a class="sort @(Mine ? "active" : "")" href="" title="Commits made with each clone's own git user.email">Mine</a>
+                <a class="sort @(Mine ? "" : "active")" href="?activity=all" title="Every commit in every repo, whoever wrote it">Everyone's</a>
+            </span>
+        }
+    </ActivityHeatmap>
+}
 
 <div class="grid-2">
     <section>
@@ -207,6 +226,36 @@
 </div>
 
 @code {
+    /// <summary><c>?activity=all</c>: count everyone's commits in the heatmap, not only mine.</summary>
+    [SupplyParameterFromQuery] public string? Activity { get; set; }
+
+    private IReadOnlyDictionary<DateOnly, int> _activity = new Dictionary<DateOnly, int>();
+    private bool _hasActivity, _canMine;
+    private int _activityRepos;
+
+    /// <summary>Mine by default, when any machine can tell which commits those are.</summary>
+    private bool Mine => _canMine && !string.Equals(Activity, "all", StringComparison.OrdinalIgnoreCase);
+
+    private DateOnly Today => DateOnly.FromDateTime(Time.GetLocalNow().DateTime);
+
+    private string ActivityCaption => $"{(Mine ? "of mine " : "")}in the last year, across {Fmt.Count(_activityRepos, "repo")}";
+
+    protected override void OnParametersSet()
+    {
+        if (Loaded)
+        {
+            LoadActivity();
+        }
+    }
+
+    private void LoadActivity()
+    {
+        _hasActivity = ActivityView.Any(_repos);
+        _canMine = ActivityView.AnyMine(_repos);
+        _activity = ActivityView.Total(_repos, Mine);
+        _activityRepos = _repos.Count(r => ActivityView.ForRepo(r, Mine).Count > 0);
+    }
+
     private IReadOnlyList<MachineView> _machines = [];
     private IReadOnlyList<RepoRow> _repos = [];
     private List<PullRequestInfo> _reviews = [];
@@ -236,6 +285,7 @@
     private int _failingOld;
     private int _online;
     private int _dirty;
+    private int _onlyCopy;
     private int _notCloned;
     private int _behind;
 
@@ -246,6 +296,8 @@
         _behind = Updates.BehindCount();
         _repos = await Catalog.GetAsync();
         _dirty = _repos.Count(r => r.AnyDirty);
+        LoadActivity();
+        _onlyCopy = Counts.Safety();
 
         var gh = GitHub.Current;
         _reviews = gh.PullRequests.Where(p => p.ReviewRequested).ToList();

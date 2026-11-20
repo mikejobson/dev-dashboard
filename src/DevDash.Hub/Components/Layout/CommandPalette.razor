@@ -1,0 +1,263 @@
+@* The command palette: Cmd/Ctrl-K anywhere, or the search button in the navigation. What it lists and
+   how it ranks is Palette (Services); the keys, the focus trap and "recently used" are wwwroot/palette.js.
+   Choosing something either follows a link or asks agents to refresh. Anything destructive is a link
+   to the page that confirms it. *@
+@implements IAsyncDisposable
+@inject RepoCatalog Catalog
+@inject GitHubStore GitHub
+@inject SnapshotStore Snapshots
+@inject DashboardNotifier Notifier
+@inject RefreshBoard Refreshes
+@inject SafetyService SafetyRows
+@inject ActionQueue Actions
+@inject AgentUpdates Updates
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<button type="button" id="global-search" class="cmdk-open" aria-haspopup="dialog" aria-keyshortcuts="Meta+K Control+K"
+        title="Search repos, pull requests, machines, pages and actions" @onclick="OpenAsync">
+    <span>Search…</span><kbd class="cmdk-key" aria-hidden="true">⌘K</kbd>
+</button>
+
+@if (_open)
+{
+    <div class="cmdk-backdrop" data-cmdk-backdrop>
+        <div class="cmdk" role="dialog" aria-modal="true" aria-label="Search and commands">
+            <input id="cmdk-input" class="cmdk-input" type="text" role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list"
+                   aria-label="Search repos, pull requests, machines, pages and actions" placeholder="Search, or type a command…"
+                   autocomplete="off" autocapitalize="off" spellcheck="false" @bind="_query" @bind:event="oninput" @bind:after="Search" />
+            <div id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Results">
+                @{ var index = 0; }
+                @foreach (var item in _shown)
+                {
+                    var label = index < _recentShown ? "Recent" : Label(item);
+                    var id = $"cmdk-item-{index++}";
+                    @if (item.Command == PaletteCommand.Refresh)
+                    {
+                        <button type="button" id="@id" class="cmdk-item" role="option" tabindex="-1" data-cmdk-item @onclick="() => RunAsync(item)">
+                            <span class="cmdk-kind">@label</span>
+                            <span class="cmdk-text"><span class="cmdk-title">@item.Title</span><span class="cmdk-detail">@item.Detail</span></span>
+                        </button>
+                    }
+                    else
+                    {
+                        <a id="@id" class="cmdk-item" role="option" tabindex="-1" data-cmdk-item href="@item.Url"
+                           target="@(item.External ? "_blank" : null)" rel="@(item.External ? "noopener" : null)" @onclick="() => Chosen(item)">
+                            <span class="cmdk-kind">@label</span>
+                            <span class="cmdk-text"><span class="cmdk-title">@item.Title</span><span class="cmdk-detail">@item.Detail</span></span>
+                        </a>
+                    }
+                }
+                @if (_shown.Count == 0)
+                {
+                    <div class="cmdk-empty muted small">@(_items is null ? "Loading…" : "Nothing matches.")</div>
+                }
+            </div>
+            <div class="cmdk-foot muted small" aria-live="polite">
+                @if (_message is not null)
+                {
+                    <span class="cmdk-message">@_message</span>
+                }
+                else
+                {
+                    <span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private const int MaxRecent = 8;
+
+    private IJSObjectReference? _module;
+    private DotNetObjectReference<CommandPalette>? _self;
+    private IReadOnlyList<PaletteItem>? _items;
+    private IReadOnlyList<PaletteItem> _shown = [];
+    private List<string> _recent = [];
+    private string _query = "";
+    private string? _message;
+    private int _recentShown;
+    private bool _open, _stale, _justOpened, _justClosed, _resultsChanged;
+
+    protected override void OnInitialized()
+    {
+        Notifier.Changed += OnChanged;
+        Nav.LocationChanged += OnLocationChanged;
+    }
+
+    // The list is built when the palette opens and rebuilt after the data changes, not on every keystroke.
+    private void OnChanged(DashboardChange change) => _stale = true;
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(() => RememberAsync(Palette.IdOf(Nav.ToBaseRelativePath(e.Location))));
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        try
+        {
+            if (firstRender)
+            {
+                _self = DotNetObjectReference.Create(this);
+                _module = await JS.InvokeAsync<IJSObjectReference>("import", "./palette.js");
+                _recent = (await _module.InvokeAsync<string[]>("init", _self) ?? []).Where(id => id is { Length: > 0 and < 300 }).Take(MaxRecent).ToList();
+                await RememberAsync(Palette.IdOf(Nav.ToBaseRelativePath(Nav.Uri)));
+            }
+
+            if (_module is not null && _justClosed && !_open)
+            {
+                _justClosed = false;
+                await _module.InvokeVoidAsync("closed");
+            }
+
+            if (_module is not null && _open && (_justOpened || _resultsChanged))
+            {
+                await _module.InvokeVoidAsync(_justOpened ? "opened" : "sync");
+                _justOpened = _resultsChanged = false;
+            }
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or InvalidOperationException or TaskCanceledException)
+        {
+            // No script (a prerender, a browser that blocked it) or the circuit went away: the button still opens the list.
+        }
+    }
+
+    /// <summary>Cmd/Ctrl-K, from palette.js.</summary>
+    [JSInvokable]
+    public Task OpenFromKey() => OpenAsync();
+
+    /// <summary>Escape, Cmd/Ctrl-K again, or a click outside the dialog, from palette.js.</summary>
+    [JSInvokable]
+    public Task CloseFromKey()
+    {
+        Close();
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private async Task OpenAsync()
+    {
+        _open = _justOpened = true;
+        _query = "";
+        _message = null;
+        if (_items is null || _stale)
+        {
+            _stale = false;
+            var repos = await Catalog.GetAsync();
+            var safe = SafetyView.Removable(SafetyRows.Get())
+                .Count(r => r.Safety.Verdict == SafetyVerdict.Safe && Actions.Availability(r.Machine, AgentActionKind.RemoveProject).Available);
+            _items = Palette.Items(repos, GitHub.Current.PullRequests, Snapshots.Machines, m => Refreshes.For(m).Available, safe, Updates.Updatable().Count);
+        }
+
+        Search();
+        StateHasChanged();
+    }
+
+    private void Close()
+    {
+        if (!_open)
+        {
+            return;
+        }
+
+        _open = false;
+        _justClosed = true; // focus goes back once the dialog has left the page: see OnAfterRenderAsync
+        _query = "";
+        _shown = [];
+    }
+
+    private void Search()
+    {
+        _shown = Palette.Search(_query, _items ?? [], _recent);
+        // With nothing typed the list opens with what was used last; those rows say so.
+        _recentShown = _query.Trim().Length == 0 ? Math.Min(5, _shown.TakeWhile(i => _recent.Contains(i.Id)).Count()) : 0;
+        _message = null;
+        _resultsChanged = true;
+    }
+
+    /// <summary>A link was followed: the browser does the navigating, this only closes the palette and remembers the choice.</summary>
+    private async Task Chosen(PaletteItem item)
+    {
+        Close();
+        if (item.Kind is PaletteKind.PullRequest or PaletteKind.Machine)
+        {
+            await RememberAsync(item.Id);
+        }
+    }
+
+    /// <summary>A refresh: read-only apart from a fetch, so it is asked for at once, exactly as the pages' own Refresh buttons do.</summary>
+    private async Task RunAsync(PaletteItem item)
+    {
+        var able = item.Targets.Where(t => Refreshes.For(t.Machine).Available).ToList();
+        await Refreshes.QueueAsync(able);
+        if (Refreshes.Error is { } error)
+        {
+            _message = "Could not ask for a refresh: " + error;
+            return;
+        }
+
+        if (item.Url is { } url)
+        {
+            // One repo: go and watch it happen on its page.
+            Close();
+            Nav.NavigateTo(url);
+            return;
+        }
+
+        var machines = able.Select(t => t.Machine.Machine.Hostname).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        _message = $"Asked {string.Join(", ", machines)} to refresh {Fmt.Count(able.Count, "repo")}. Each page updates as its repos report.";
+    }
+
+    private async Task RememberAsync(string? id)
+    {
+        if (id is null || (_recent.Count > 0 && _recent[0] == id))
+        {
+            return;
+        }
+
+        _recent.Remove(id);
+        _recent.Insert(0, id);
+        if (_recent.Count > MaxRecent)
+        {
+            _recent.RemoveRange(MaxRecent, _recent.Count - MaxRecent);
+        }
+
+        try
+        {
+            if (_module is not null)
+            {
+                await _module.InvokeVoidAsync("remember", _recent);
+            }
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or InvalidOperationException or TaskCanceledException)
+        {
+        }
+    }
+
+    private static string Label(PaletteItem item) => item.Kind switch
+    {
+        PaletteKind.Page => "Page",
+        PaletteKind.PullRequest => "PR",
+        PaletteKind.Machine => "Machine",
+        PaletteKind.Action => "Action",
+        _ => "Repo",
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        Notifier.Changed -= OnChanged;
+        Nav.LocationChanged -= OnLocationChanged;
+        try
+        {
+            if (_module is not null)
+            {
+                await _module.InvokeVoidAsync("dispose");
+                await _module.DisposeAsync();
+            }
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or InvalidOperationException or TaskCanceledException)
+        {
+        }
+
+        _self?.Dispose();
+    }
+}

@@ -31,6 +31,15 @@ public sealed class AgentOptions
 
     public AutoFetchOptions AutoFetch { get; set; } = new();
 
+    /// <summary>Send commits per day for the last year (one <c>git log</c> per repository, repeated only when its refs move).</summary>
+    public bool Activity { get; set; } = true;
+
+    /// <summary>Which SDKs and runtimes this machine has, and which versions each repo pins.</summary>
+    public Toolchains.ToolchainOptions Toolchains { get; set; } = new();
+
+    /// <summary>Slow, once-a-day checks for vulnerable and outdated packages.</summary>
+    public Dependencies.DependencyOptions Dependencies { get; set; } = new();
+
     /// <summary>Allowlisted fixes queued from the dashboard. Off unless this machine turns them on.</summary>
     public Actions.ActionsOptions Actions { get; set; } = new();
 

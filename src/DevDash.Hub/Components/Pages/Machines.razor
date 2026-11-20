@@ -6,6 +6,8 @@
 @inject AgentUpdates Updates
 @inject ReleaseStore Releases
 @inject ReleasePoller ReleaseChecks
+@inject ActionBoard Board
+@inject TombstoneStore Tombstones
 @inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider Auth
 
 <PageTitle>Machines · DevDash</PageTitle>
@@ -164,6 +166,14 @@ else
                             @if (machine.Machine.ActionsEnabled)
                             {
                                 <span class="chip info" title="This agent runs allowlisted fixes queued from the dashboard, after you confirm each one.">on</span>
+                                @if (!machine.Machine.AcceptsRemoveProject)
+                                {
+                                    <div class="sub" title="@AgentActions.WhyNotAccepted(machine.Machine, AgentActionKind.RemoveProject)">no remove, clean or pull yet</div>
+                                }
+                                @if (_removed.Count(r => string.Equals(r.Tombstone.MachineId, machine.MachineId, StringComparison.OrdinalIgnoreCase)) is > 0 and var gone)
+                                {
+                                    <div class="sub"><a href="machines#removed">@gone removed</a></div>
+                                }
                             }
                             else
                             {
@@ -218,12 +228,90 @@ else
     </div>
 }
 
+@if (_machines.Count > 0)
+{
+    <h2 id="toolchains">Toolchains <span class="muted small">what each machine has installed, and the repos there that pin something else</span></h2>
+    <div class="table-wrap">
+        <table class="stack toolchains-table">
+            <thead><tr><th>Machine</th><th>Installed</th><th>Repos that pin a version</th><th class="right">Checked</th></tr></thead>
+            <tbody>
+                @foreach (var row in _toolchains)
+                {
+                    <tr @key="row.Machine.MachineId">
+                        <td class="cell-main nowrap"><strong>@row.Machine.Machine.Hostname</strong></td>
+                        <td data-label="Installed">
+                            @if (!row.Reported)
+                            {
+                                <span class="sub">@ToolchainView.WhyNotReported(row.Machine.Machine)</span>
+                            }
+                            else if (row.Tools.Count == 0)
+                            {
+                                <span class="sub">None found. The agent looks on its PATH and in the usual install folders.</span>
+                            }
+                            else
+                            {
+                                <div class="tool-list">
+                                    @foreach (var tool in row.Tools)
+                                    {
+                                        <div class="tool" title="@string.Join(", ", tool.Versions)">
+                                            <span class="tool-name">@ToolNames.Display(tool.Tool)</span>
+                                            <span><span class="mono">@ToolchainView.Versions(tool)</span>@if (tool.Managers.Count > 0) { <span class="sub"> · @string.Join(", ", tool.Managers)</span> }</span>
+                                        </div>
+                                    }
+                                </div>
+                            }
+                        </td>
+                        <td data-label="Repos that pin a version" class="@(row.Reported ? "" : "blank")">
+                            @if (row.Reported)
+                            {
+                                <div>
+                                    @if (row.Unmet.Count == 0)
+                                    {
+                                        <span class="chip @(row.Pinned > 0 ? "ok" : "muted")">@(row.Pinned > 0 ? $"all {row.Pinned} satisfied" : "none")</span>
+                                    }
+                                    else
+                                    {
+                                        <a class="chip danger" href="cleanup#toolchain-mismatch" title="Open the Cleanup findings">@Fmt.Count(row.Unmet.Count, "pin") not met</a>
+                                        <span class="sub"> of @Fmt.Count(row.Pinned, "repo") that pin something</span>
+                                        @foreach (var unmet in row.Unmet.Take(UnmetShown))
+                                        {
+                                            <div class="sub"><a href="@Fmt.RepoUrl(unmet.RepoKey)#toolchains">@unmet.Entry.Name</a>: @ToolNames.Display(unmet.Check.Pin.Tool) <span class="mono">@unmet.Check.Pin.Version</span> (@unmet.Check.Pin.Source)</div>
+                                        }
+                                        @if (row.Unmet.Count > UnmetShown)
+                                        {
+                                            <div class="sub"><a href="cleanup#toolchain-mismatch">and @(row.Unmet.Count - UnmetShown) more →</a></div>
+                                        }
+                                    }
+                                </div>
+                            }
+                        </td>
+                        <td data-label="Checked" class="right nowrap sub @(row.Reported ? "" : "blank")" title="@Fmt.Date(row.Machine.Machine.Toolchains?.CollectedAt)">
+                            @(row.Reported ? Fmt.Ago(row.Machine.Machine.Toolchains!.CollectedAt, Now) : "")
+                            @if (row.Machine.Machine.DependencyChecks is { } deps)
+                            {
+                                <div title="@(deps ? "This agent runs dotnet list package and npm audit in each repo about once a day. It never restores or installs." : "Dependency checks are off on this machine (Agent:Dependencies:Enabled).")">dependency checks @(deps ? "on" : "off")</div>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@if (_removed.Count > 0)
+{
+    <h2 id="removed">Removed projects <span class="muted small">@_removed.Count</span></h2>
+    <p class="muted small">Moved to the trash on their machine from the <a href="safety">Safety page</a>. Re-clone puts a fresh clone back in the same folder.</p>
+    <RemovedProjects Items="_removed" Now="Now" />
+}
+
 <h2>Agent actions <span class="muted small">@(_actions.Count > _actionsShown ? $"last {_actionsShown}" : _actions.Count)</span></h2>
 <details class="about small muted">
     <summary>Fixes queued from the dashboard for a machine's own agent to run.</summary>
     <p>
-        Off unless that machine's agent was started with <code>--enable-actions</code>. Only a fixed list of safe git operations exists, each one is
-        confirmed first, and the agent checks it again before running. Agent updates are listed here too; they follow each machine's own update
+        Off unless that machine's agent was started with <code>--enable-actions</code>. Only a fixed list of operations exists, each one is
+        confirmed first, and the agent checks it again before running. A removed project goes to that machine's trash, never deleted. Agent updates are listed here too; they follow each machine's own update
         setting, not <code>--enable-actions</code>. Paths under the machine's home folder are shown as <code>~/…</code>; hover for the full command.
         Refreshes asked for from the Repo and Local pages change nothing, so they are kept out of this list and summarised under it.
     </p>
@@ -388,7 +476,31 @@ else
 @code {
     [Inject] private IOptionsMonitor<HubOptions> Options { get; set; } = default!;
 
-    private const int ActionsPage = 10, ActionsLoaded = 200, RefreshesShown = 20;
+    [Inject] private NavigationManager Navigation { get; set; } = default!;
+
+    /// <summary><c>?ask=update-all</c>, from the command palette: open the Update confirmation for every agent that is behind. It still has to be confirmed.</summary>
+    [SupplyParameterFromQuery] public string? Ask { get; set; }
+
+    // Only once the page is live and loaded, and the address then loses its ?ask so a reload does not ask again.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!Loaded || Ask != Palette.AskUpdateAll)
+        {
+            return;
+        }
+
+        Ask = null;
+        if (_updatable.Count > 0)
+        {
+            await AskAsync(_updatable);
+            StateHasChanged();
+        }
+
+        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("ask", (string?)null), replace: true);
+    }
+
+    private const int ActionsPage = 10, ActionsLoaded = 200, RefreshesShown = 20, UnmetShown = 4;
+    private IReadOnlyList<MachineToolchains> _toolchains = [];
     private const string ReinstallWhy = "This agent predates self-update, so it cannot be updated from here. Run the install one-liner on that machine once; after that it updates itself or on request.";
 
     private int _actionsShown = ActionsPage;
@@ -402,16 +514,20 @@ else
     private IReadOnlyList<ApiKeyEntity> _keys = [];
     private IReadOnlyList<AgentActionEntity> _actions = [];
     private IReadOnlyList<AgentActionEntity> _refreshes = [];
+    private IReadOnlyList<RemovedProjectView> _removed = [];
     private IssuedKey? _issued;
     private string _label = "";
 
     protected override async Task LoadAsync()
     {
         _machines = Snapshots.Machines;
+        _toolchains = ToolchainView.For(_machines);
         _keys = await Keys.ListAsync();
         // Refreshes are read-only and frequent: listing each one with the fixes and updates would bury those.
         _actions = await Actions.RecentAsync(refreshes: false, ActionsLoaded);
         _refreshes = await Actions.RecentAsync(refreshes: true, ActionQueue.KeepRefreshes);
+        await Board.LoadAsync();
+        _removed = await Tombstones.ListAsync();
         _pendingUpdates = await Updates.PendingAsync();
         _updatable = Updates.Updatable().Where(m => !_pendingUpdates.ContainsKey(m.MachineId)).ToList();
     }

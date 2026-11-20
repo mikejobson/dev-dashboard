@@ -17,6 +17,14 @@ public sealed class HubOptions
     public HubActionOptions Actions { get; set; } = new();
 
     public HubUpdateOptions Updates { get; set; } = new();
+
+    /// <summary>
+    /// The address people open the dashboard at, e.g. <c>https://devdash.example.ts.net</c>. Alerts link
+    /// back to it. The hub cannot know it by itself (it sits behind a proxy), so links are left out when this is empty.
+    /// </summary>
+    public string PublicUrl { get; set; } = "";
+
+    public Alerts.AlertOptions Alerts { get; set; } = new();
 }
 
 /// <summary>Agent updates: knowing the latest release, and asking agents to move to it.</summary>
@@ -53,6 +61,9 @@ public sealed class HubActionOptions
 
     /// <summary>A claimed action with no result after this long is recorded as failed. It is not retried.</summary>
     public int LeaseMinutes { get; set; } = 5;
+
+    /// <summary>As <see cref="LeaseMinutes"/>, for a clone: it downloads a whole repository.</summary>
+    public int CloneLeaseMinutes { get; set; } = 20;
 
     /// <summary>How many actions the audit trail keeps.</summary>
     public int KeepLast { get; set; } = 500;

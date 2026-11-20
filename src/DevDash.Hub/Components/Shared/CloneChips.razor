@@ -1,4 +1,5 @@
 @* Status chips for one working tree. *@
+@inject TimeProvider Time
 @if (Clone.Git is { } git)
 {
     <div class="chips">
@@ -8,7 +9,11 @@
         }
         @if (git.IsLinkedWorktree)
         {
-            <span class="chip muted" title="Linked worktree">worktree</span>
+            <span class="chip muted" title="@(Clone.Main is { } main ? $"A linked worktree of {main.Name}" : "Linked worktree")">worktree</span>
+            @if (Clone.Stale is { IsStale: true } stale)
+            {
+                <span class="chip warn" title="This worktree looks finished with. Cleanup has the commands to remove it.">@stale.Label(Time.GetUtcNow())</span>
+            }
         }
         @if (git.Conflicted > 0)
         {
@@ -49,6 +54,10 @@
         @if (git.Stashes.Count > 0)
         {
             <span class="chip muted">@git.Stashes.Count stashed</span>
+        }
+        @if (DependencyView.Chip(Clone.Entry.Dependencies, Time.GetUtcNow()) is { } deps)
+        {
+            <span class="chip @deps.Class" title="@deps.Title">@deps.Text</span>
         }
     </div>
 }

@@ -57,6 +57,9 @@ public sealed record InstallRequest
                 case "--no-watch":
                     settings["Watch"] = "false";
                     break;
+                case "--no-deps":
+                    settings["Dependencies:Enabled"] = "false";
+                    break;
                 case "--enable-actions":
                     settings["Actions:Enabled"] = "true";
                     break;

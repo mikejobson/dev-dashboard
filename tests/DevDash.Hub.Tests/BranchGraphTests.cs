@@ -268,10 +268,241 @@ public class BranchGraphTests
         Assert.True(Row(map, "s2").Refs.Single().Merged);
         Assert.Equal(1, map.MergedBranches);
 
-        // Hiding merged branches takes the name away; the commits stay because the merge still leads to them.
+        // Hiding merged branches takes the branch away, commits and all: the merge is all that is left of it.
         var hidden = BranchGraph.Build([Clone("mac", "t3", commits, [Branch("main", "t3", "origin/main"), Branch("topic", "s2", merged: true)], "origin/main=t3")], [], new BranchMapOptions { HideMerged = true });
-        Assert.Empty(Row(hidden, "s2").Refs);
+        Assert.Equal(["t3", "t2", "t1"], Names(hidden));
+        Assert.Empty(Row(hidden, "t3").Out);
         Assert.Equal(1, hidden.MergedBranches);
+    }
+
+    /// <summary>
+    /// Stacked pull requests, as an agent sends them: main's merge t3 brings in m2, which merged m1, which
+    /// merged the branch tips. Each tip is reachable from main only through second parents.
+    /// </summary>
+    private static GraphCommit[] StackedMerges() =>
+    [
+        C("t3", "t2 m2", pos: 3),
+        C("m2", "a m1", inTrunk: true),
+        C("m1", "b c", inTrunk: true),
+        C("c", "c0", inTrunk: true) with { JoinsTrunkAt = Sha("t3") },
+        C("b", "t1", inTrunk: true) with { JoinsTrunkAt = Sha("t3") },
+        C("a", "t2", inTrunk: true) with { JoinsTrunkAt = Sha("t3") },
+        C("t2", "t1", pos: 2),
+        C("t1", pos: 1),
+    ];
+
+    [Fact]
+    public void A_branch_merged_through_a_chain_of_merges_sits_under_the_merge_that_brought_it_in()
+    {
+        BranchInfo[] branches = [Branch("main", "t3", "origin/main"), Branch("first", "a", merged: true), Branch("second", "b", merged: true), Branch("third", "c", merged: true)];
+        var map = BranchGraph.Build([Clone("mac", "t3", StackedMerges(), branches, "origin/main=t3")], []);
+
+        // Everything t3 merged comes right under it, before the trunk goes on: no merged tip is left for the end.
+        Assert.Equal(["t3", "m2", "m1", "c", "b", "a", "t2", "t1"], Names(map));
+        AssertChildrenFirst(map);
+        Assert.All((string[])["m2", "m1", "a", "b", "c"], n => Assert.True(Row(map, n).Dim));
+        Assert.All((string[])["m2", "m1", "a", "b", "c"], n => Assert.True(Row(map, n).Up || Row(map, n).In.Count > 0 || map.Rows.Any(r => r.Out.Any(l => l.Lane == Row(map, n).Lane)), n + " hangs off something"));
+        Assert.True(Row(map, "c").Stub); // its own history was not sent
+        Assert.All(map.Rows.SelectMany(r => r.Out.Concat(r.In).Concat(r.Through)), l => Assert.Equal(MapLineStyle.Solid, l.Style));
+        Assert.Equal(3, map.MergedBranches);
+    }
+
+    [Fact]
+    public void A_merged_branch_that_forks_lower_down_does_not_pull_the_trunk_up_between_the_merged_commits()
+    {
+        // t3 merges a release branch r3 → r2 → r1 (forked at t2). r3 and r2 each merged a topic that forked at t1.
+        var commits = new[]
+        {
+            C("t3", "t2 r3", pos: 3), C("r3", "r2 x", inTrunk: true), C("r2", "r1 y", inTrunk: true), C("r1", "t2", inTrunk: true),
+            C("x", "t1", inTrunk: true), C("y", "t1", inTrunk: true), C("t2", "t1", pos: 2), C("t1", pos: 1),
+        };
+        var map = BranchGraph.Build([Clone("mac", "t3", commits, [Branch("main", "t3", "origin/main"), Branch("topic-x", "x", merged: true), Branch("topic-y", "y", merged: true)], "origin/main=t3")], []);
+
+        Assert.Equal(["t3", "r3", "x", "r2", "y", "r1", "t2", "t1"], Names(map));
+        AssertChildrenFirst(map);
+    }
+
+    [Fact]
+    public void A_merged_tip_with_no_line_to_the_trunk_is_placed_by_its_date_not_after_the_trunk()
+    {
+        // An older agent sends a merged tip on its own: nothing leads to it. Dates run t4, t3, old, t2, t1.
+        var commits = new[] { C("t4", "t3", pos: 4), C("t3", "t2", pos: 3), C("old", "o0", inTrunk: true), C("t2", "t1", pos: 2), C("t1", pos: 1) };
+        var map = BranchGraph.Build([Clone("mac", "t4", commits, [Branch("main", "t4", "origin/main"), Branch("done", "old", merged: true)], "origin/main=t4")], []);
+
+        Assert.Equal(["t4", "t3", "old", "t2", "t1"], Names(map));
+        AssertChildrenFirst(map);
+        var row = Row(map, "old");
+        Assert.NotEqual(0, row.Lane);
+        Assert.False(row.Up);
+        Assert.True(row.Stub);
+        Assert.Equal([0], row.Through.Select(l => l.Lane)); // the trunk passes it by
+    }
+
+    [Fact]
+    public void A_loose_piece_goes_above_a_gap_it_is_newer_than_and_never_above_its_own_children()
+    {
+        // Dates: t30, t29, old, [t10]: "old" is newer than what lies under the gap.
+        var commits = new[] { C("t30", "t29", pos: 30), C("t29", "t28", pos: 29), C("old", "o0", inTrunk: true), C("t10", "t9", pos: 10) };
+        var map = BranchGraph.Build([Clone("mac", "t30", commits, [Branch("main", "t30", "origin/main"), Branch("done", "old", merged: true), Branch("base", "t10", merged: true)], "origin/main=t30")], []);
+        Assert.Equal(["t30", "t29", "old", "Gap", "t10", "Gap"], Names(map));
+
+        // A side branch s (newest of all) merged a commit q whose own history is unknown and old: q stays below s.
+        var side = new[] { C("s", "t2 q"), C("t2", "t1", pos: 2), C("t1", pos: 1), C("q", "q0") };
+        var merged = BranchGraph.Build([Clone("mac", "s", side, [Branch("main", "t2", "origin/main"), Branch("work", "s")], "origin/main=t2")], []);
+        Assert.Equal(["s", "t2", "q", "t1"], Names(merged));
+        AssertChildrenFirst(merged);
+    }
+
+    [Fact]
+    public void A_merged_tip_that_only_knows_where_it_joined_is_hung_there_with_a_dashed_line()
+    {
+        // The agent found the merge (t4) but the commits between are too many to send. "old" is older than t2.
+        var commits = new[] { C("t4", "t3 zz", pos: 4), C("t3", "t2", pos: 3), C("t2", "t1", pos: 2), C("t1", pos: 1), C("old", "o0", inTrunk: true) with { JoinsTrunkAt = Sha("t4") } };
+        var map = BranchGraph.Build([Clone("mac", "t4", commits, [Branch("main", "t4", "origin/main"), Branch("done", "old", merged: true)], "origin/main=t4")], []);
+
+        Assert.Equal(["t4", "old", "t3", "t2", "t1"], Names(map));
+        var link = Assert.Single(Row(map, "t4").Out);
+        Assert.Equal(MapLineStyle.Dashed, link.Style);
+        Assert.Equal(Row(map, "old").Lane, link.Lane);
+        Assert.True(Row(map, "old").Up);
+        Assert.Equal(MapPresence.Local, Row(map, "old").Presence[0]);
+
+        // A join that is not in the map (a hub that only has an older agent's trunk) falls back to the date.
+        var lost = commits.Select(c => c.Sha == Sha("old") ? c with { JoinsTrunkAt = Sha("nowhere") } : c);
+        var loose = BranchGraph.Build([Clone("mac", "t4", lost, [Branch("main", "t4", "origin/main"), Branch("done", "old", merged: true)], "origin/main=t4")], []);
+        Assert.Equal(["t4", "t3", "t2", "t1", "old"], Names(loose));
+        Assert.Empty(Row(loose, "t4").Out);
+    }
+
+    [Fact]
+    public void A_join_deep_in_the_trunk_is_shown_so_the_merged_tip_has_somewhere_to_hang()
+    {
+        // t10 is only in the snapshot because "old" joined there; nothing else leads to it.
+        var commits = Trunk(28, 30).Concat([C("t10", "t9 zz", pos: 10), C("old", "o0", inTrunk: true) with { JoinsTrunkAt = Sha("t10") }]);
+        var map = BranchGraph.Build([Clone("mac", "t30", commits, [Branch("main", "t30", "origin/main"), Branch("done", "old", merged: true)], "origin/main=t30")], []);
+
+        Assert.Equal(["t30", "t29", "t28", "Gap", "t10", "old", "Gap"], Names(map));
+        Assert.Equal(17, map.Rows[3].Hidden);
+        Assert.Equal(MapLineStyle.Dashed, Assert.Single(Row(map, "t10").Out).Style);
+    }
+
+    [Fact]
+    public void With_merged_branches_hidden_only_the_merged_history_something_still_needs_is_kept()
+    {
+        // As above, plus an open branch "work" that forks from the merged tip b, and the upstreams of the merged branches.
+        var commits = StackedMerges().Append(C("w", "b"));
+        BranchInfo[] branches =
+        [
+            Branch("main", "t3", "origin/main"), Branch("first", "a", "origin/first", merged: true), Branch("second", "b", "origin/second", merged: true),
+            Branch("third", "c", merged: true), Branch("work", "w"),
+        ];
+        var options = new BranchMapOptions { HideMerged = true };
+        var map = BranchGraph.Build([Clone("mac", "t3", commits, branches, "origin/main=t3 origin/first=a origin/second=b")], [], options);
+
+        // b stays because "work" forks from it, with its way up to main (m1, m2). a and c go, and so do the upstream names.
+        Assert.Equal(["t3", "m2", "m1", "w", "b", "t2", "t1"], Names(map));
+        AssertChildrenFirst(map);
+        Assert.Empty(Row(map, "b").Refs);
+        Assert.Equal("work", Row(map, "w").Refs.Single().Name);
+        Assert.Equal(3, map.MergedBranches);
+
+        // An upstream that has moved on to commits that are not merged is not hidden with its branch.
+        var ahead = commits.Append(C("n", "a"));
+        var moved = BranchGraph.Build([Clone("mac", "t3", ahead, branches, "origin/main=t3 origin/first=n origin/second=b")], [], options);
+        Assert.Equal("origin/first", Row(moved, "n").Refs.Single().Name);
+        Assert.Contains("a", Names(moved));
+    }
+
+    private static CloneView OnDevelop(CloneView clone) => clone with
+    {
+        Entry = clone.Entry with { Git = clone.Entry.Git! with { Graph = clone.Entry.Git.Graph! with { TrunkRef = "origin/develop" } } },
+    };
+
+    [Fact]
+    public void In_a_git_flow_repository_merged_means_merged_into_develop()
+    {
+        // The map is drawn along develop. "done" is merged into develop but not into main, the default branch.
+        var commits = new[] { C("t3", "t2 s1", pos: 3), C("s1", "t1", inTrunk: true), C("t2", "t1", pos: 2), C("t1", pos: 1) };
+        BranchInfo[] branches =
+        [
+            Branch("develop", "t3", "origin/develop") with { MergedIntoDefault = false, MergedIntoTrunk = true },
+            Branch("main", "t1", "origin/main") with { MergedIntoDefault = true, MergedIntoTrunk = true },
+            Branch("done", "s1") with { MergedIntoDefault = false, MergedIntoTrunk = true },
+            Branch("released", "t1") with { MergedIntoDefault = true, MergedIntoTrunk = true },
+        ];
+        var clone = OnDevelop(Clone("mac", "t3", commits, branches, "origin/develop=t3 origin/main=t1", onBranch: "develop"));
+
+        var map = BranchGraph.Build([clone], []);
+        Assert.Equal("develop", map.TrunkName);
+        Assert.Equal(2, map.MergedBranches); // done and released: never develop or main themselves
+        Assert.True(Row(map, "s1").Refs.Single().Merged);
+        Assert.True(Row(map, "s1").Dim);
+        Assert.False(Row(map, "t3").Refs.Single(r => r.Name == "develop").Merged);
+        Assert.False(Row(map, "t1").Refs.Single(r => r.Name == "main").Merged);
+
+        var hidden = BranchGraph.Build([clone], [], new BranchMapOptions { HideMerged = true });
+        Assert.Equal(["t3", "t2", "t1"], Names(hidden));
+        Assert.Equal(["main", "origin/main"], Row(hidden, "t1").Refs.Select(r => r.Name));
+    }
+
+    [Fact]
+    public void A_branch_merged_into_main_but_not_develop_is_not_merged_on_a_develop_map_and_older_agents_fall_back()
+    {
+        var commits = new[] { C("t2", "t1", pos: 2), C("t1", pos: 1), C("h1", "t1") };
+
+        // A hotfix that went to main only: cleanup calls it merged, the map along develop does not.
+        var hotfix = OnDevelop(Clone("mac", "t2", commits, [Branch("develop", "t2", "origin/develop"), Branch("hotfix", "h1") with { MergedIntoDefault = true, MergedIntoTrunk = false }], "origin/develop=t2", onBranch: "develop"));
+        Assert.Equal(0, BranchGraph.Build([hotfix], []).MergedBranches);
+        Assert.False(Row(BranchGraph.Build([hotfix], []), "h1").Refs.Single().Merged);
+
+        // An agent that does not report it: merged into the default branch is all there is to go by.
+        var old = OnDevelop(Clone("mac", "t2", commits, [Branch("develop", "t2", "origin/develop"), Branch("hotfix", "h1", merged: true)], "origin/develop=t2", onBranch: "develop"));
+        Assert.Equal(1, BranchGraph.Build([old], []).MergedBranches);
+    }
+
+    [Fact]
+    public void How_far_ahead_a_device_is_comes_from_gits_own_count_when_a_device_has_one()
+    {
+        // The trunk between the two is mostly not sent, and what it merged is not on the first-parent line at all:
+        // the map sees 4 commits between t2 and t6, git counted 36.
+        var behind = Clone("laptop", "t2", Trunk(1, 2).Concat(Trunk(6, 6)), [Branch("main", "t2", "origin/main") with { Behind = 36 }], "origin/main=t6");
+        var current = Clone("studio", "t6", Trunk(1, 2).Concat(Trunk(6, 6)), [Branch("main", "t6", "origin/main")], "origin/main=t6");
+
+        var warning = Assert.Single(BranchGraph.Build([behind, current], []).Warnings);
+        Assert.False(warning.Diverged);
+        Assert.Equal("studio is 36 commits ahead of laptop.", warning.Text);
+
+        // The same from the other side: a device that is ahead of an upstream which is where the other device is.
+        var ahead = Clone("studio", "t6", Trunk(1, 2).Concat(Trunk(6, 6)), [Branch("main", "t6", "origin/main", ahead: 36)], "origin/main=t2");
+        var stale = Clone("laptop", "t2", Trunk(1, 2).Concat(Trunk(6, 6)), [Branch("main", "t2")], "");
+        Assert.Equal("studio is 36 commits ahead of laptop.", Assert.Single(BranchGraph.Build([stale, ahead], []).Warnings).Text);
+
+        // Git's count also settles a divergence the map cannot see whole.
+        var mine = Clone("laptop", "a1", Trunk(1, 2).Concat([C("a1", "a0"), C("b1", "b0")]), [Branch("main", "t2", "origin/main"), Branch("fix", "a1", "origin/fix", ahead: 3) with { Behind = 5 }], "origin/main=t2 origin/fix=b1");
+        var theirs = Clone("studio", "b1", Trunk(1, 2).Concat([C("b1", "b0")]), [Branch("main", "t2", "origin/main"), Branch("fix", "b1", "origin/fix")], "origin/main=t2 origin/fix=b1");
+        var diverged = Assert.Single(BranchGraph.Build([mine, theirs], []).Warnings);
+        Assert.True(diverged.Diverged);
+        Assert.Equal("has diverged: laptop has 3 commits that studio does not, and studio has 5 commits of its own.", diverged.Text);
+    }
+
+    [Fact]
+    public void Without_gits_count_the_map_says_at_least_unless_it_holds_every_commit_between()
+    {
+        // No upstream to compare with, and a gap between the two tips.
+        var behind = Clone("laptop", "t2", Trunk(1, 2).Concat(Trunk(6, 6)), [Branch("main", "t2")], "");
+        var current = Clone("studio", "t6", Trunk(1, 2).Concat(Trunk(6, 6)), [Branch("main", "t6", "origin/main")], "origin/main=t6");
+        Assert.Equal("studio is at least 4 commits ahead of laptop.", Assert.Single(BranchGraph.Build([behind, current], []).Warnings).Text);
+
+        // Every commit between them is in the map: the count is exact.
+        var near = Clone("laptop", "t2", Trunk(1, 4), [Branch("main", "t2")], "");
+        var far = Clone("studio", "t4", Trunk(1, 4), [Branch("main", "t4", "origin/main")], "origin/main=t4");
+        Assert.Equal("studio is 2 commits ahead of laptop.", Assert.Single(BranchGraph.Build([near, far], []).Warnings).Text);
+
+        // A merge whose other parent was not sent hides commits: at least.
+        var merge = new[] { C("t3", "t2 zz", pos: 3), C("t2", "t1", pos: 2), C("t1", pos: 1) };
+        var low = Clone("laptop", "t2", merge, [Branch("main", "t2")], "");
+        var high = Clone("studio", "t3", merge, [Branch("main", "t3", "origin/main")], "origin/main=t3");
+        Assert.Equal("studio is at least 1 commit ahead of laptop.", Assert.Single(BranchGraph.Build([low, high], []).Warnings).Text);
     }
 
     [Fact]
@@ -411,6 +642,30 @@ public class BranchGraphTests
         Assert.Empty(Row(map, "f2").PullRequests);
         Assert.Equal(2, Row(map, "g1").PullRequests.Single().Number);
         Assert.Equal([3, 4], map.UnplacedPullRequests.Select(p => p.Number));
+    }
+
+    [Fact]
+    public void A_pull_request_with_a_known_head_commit_sits_on_that_commit()
+    {
+        static PullRequestInfo Pr(int number, string head, string? at, bool fork = false) =>
+            new() { Repo = "acme/widget", Number = number, HeadRef = head, HeadSha = at is null ? null : Sha(at), IsCrossRepository = fork, Url = $"https://github.com/acme/widget/pull/{number}" };
+        var commits = Trunk(1, 2).Concat([C("f2", "f1"), C("f1", "t2"), C("w1", "t2"), C("k1", "t2")]);
+        var map = BranchGraph.Build(
+            [Clone("mac", "f2", commits, [Branch("main", "t2", "origin/main"), Branch("feature", "f2", "origin/feature"), Branch("wip", "w1"), Branch("patch-1", "k1")], "origin/main=t2 origin/feature=f1")],
+            [
+                Pr(1, "feature", "f2"),          // GitHub is at f2; this device's origin/feature is a fetch behind
+                Pr(2, "renamed-on-github", "w1"), // found by its commit although no branch here has that name
+                Pr(3, "patch-1", "zz", fork: true), // a fork's patch-1 is not this repository's patch-1
+                Pr(4, "main", "k1", fork: true),  // a fork's branch, placed because the commit is here
+                Pr(5, "feature", "gone"),         // a commit no device has: falls back to the branch name
+            ]);
+
+        Assert.Equal([1], Row(map, "f2").PullRequests.Select(p => p.Number));
+        Assert.Equal([5], Row(map, "f1").PullRequests.Select(p => p.Number));
+        Assert.Equal([2], Row(map, "w1").PullRequests.Select(p => p.Number));
+        Assert.Equal([4], Row(map, "k1").PullRequests.Select(p => p.Number));
+        Assert.Empty(Row(map, "t2").PullRequests);
+        Assert.Equal([3], map.UnplacedPullRequests.Select(p => p.Number));
     }
 
     [Fact]

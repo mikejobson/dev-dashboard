@@ -19,15 +19,31 @@
             <span class="nav-count danger" title="@Fmt.Count(_cleanup, "high-severity finding")">@_cleanup</span>
         }
     </NavLink>
+    <NavLink href="safety">
+        Safety
+        @if (_safety > 0)
+        {
+            <span class="nav-count danger" title="@Fmt.Count(_safety, "repo") with commits that are on no remote">@_safety</span>
+        }
+    </NavLink>
+    <NavLink href="alerts">
+        Alerts
+        @if (_alerts > 0)
+        {
+            <span class="nav-count" title="@Fmt.Count(_alerts, "alert") open now">@_alerts</span>
+        }
+    </NavLink>
     <NavLink href="machines">Machines</NavLink>
 </nav>
 
 @code {
-    private int _github, _cleanup;
+    private int _github, _cleanup, _safety, _alerts;
 
     protected override async Task LoadAsync()
     {
         _github = Counts.GitHub();
+        _safety = Counts.Safety();
+        _alerts = await Counts.AlertsAsync();
         try
         {
             _cleanup = await Counts.CleanupAsync();

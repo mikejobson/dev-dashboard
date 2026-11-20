@@ -1,6 +1,7 @@
 using System.Text.Json;
 using DevDash.Agent;
 using DevDash.Agent.Actions;
+using DevDash.Agent.Dependencies;
 using DevDash.Agent.Git;
 using DevDash.Agent.Logging;
 using DevDash.Agent.Scanning;
@@ -83,6 +84,7 @@ builder.Services.AddSingleton<GitRunner>(_ => new GitRunner());
 builder.Services.AddSingleton<FetchService>();
 builder.Services.AddSingleton<RepoScanner>();
 builder.Services.AddSingleton<SizeCache>(_ => new SizeCache());
+builder.Services.AddToolchains(); // what is installed, what each repo pins, and the last dependency results
 builder.Services.AddSingleton<MachineScanner>();
 builder.Services.AddHttpClient<HubClient>(c => c.Timeout = TimeSpan.FromSeconds(60));
 
@@ -115,6 +117,7 @@ if (cli.Command == "run")
 
     builder.Services.AddAgentUpdates(updateContext, guard, runningAsService);
     builder.Services.AddAgentActions(); // polls only if Agent:Actions:Enabled, or updates are notify/auto
+    builder.Services.AddDependencyChecks(); // slow, in the background, and only if Agent:Dependencies:Enabled
     builder.Services.AddHostedService<AgentWorker>();
     var runHost = builder.Build();
     var restart = runHost.Services.GetRequiredService<RestartSignal>();
@@ -175,6 +178,8 @@ switch (cli.Command)
         Console.Out.WriteLine($"roots      {string.Join(", ", options.ResolveRoots())}");
         Console.Out.WriteLine($"scan       every {options.ScanIntervalMinutes} min, sizes every {options.SizeScanIntervalHours} h, watch {(options.Watch ? "on" : "off")}");
         Console.Out.WriteLine($"auto-fetch {(options.AutoFetch.Enabled ? $"every {options.AutoFetch.IntervalHours} h" : "off")}");
+        Console.Out.WriteLine($"toolchains {(options.Toolchains.Enabled ? $"reported, checked every {options.Toolchains.IntervalHours} h" : "off")}");
+        Console.Out.WriteLine($"deps       {(options.Dependencies.Enabled ? $"dotnet list package and npm audit, each repo every {options.Dependencies.IntervalHours} h (never restores or installs)" : "off")}");
         Console.Out.WriteLine($"actions    {(options.Actions.Enabled ? "on (allowlisted fixes queued from the dashboard)" : "off (report only)")}");
         Console.Out.WriteLine($"updates    {UpdateCli.DescribeMode(options.Updates, updateContext)}");
         Console.Out.WriteLine($"release key {updateContext.Trust.Describe()}");

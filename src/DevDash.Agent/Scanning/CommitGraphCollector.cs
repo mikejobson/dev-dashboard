@@ -27,7 +27,9 @@ public sealed record GraphRequest
 /// <list type="number">
 /// <item>every commit reachable from a local branch, its upstream or a HEAD, but not from the default branch (newest first, capped);</item>
 /// <item>the newest commits on the default branch's first-parent line, for context;</item>
-/// <item>the commits those hang off (fork points, merged branch tips), without walking further.</item>
+/// <item>the commits those hang off (fork points, merged branch tips), without walking further;</item>
+/// <item>for each of those that was merged a while ago, the commits that lead from it up to the merge on
+/// the default branch that brought it in, so a merged branch is drawn where it joined and not adrift.</item>
 /// </list>
 /// The result is cached per repository against a hash of its refs, so a repository where nothing moved
 /// costs one <c>for-each-ref</c>.
@@ -42,6 +44,18 @@ public sealed class CommitGraphCollector(GitRunner git)
 
     /// <summary>How far down the default branch a fork point's position is still worked out.</summary>
     public const int TrunkDepth = 2000;
+
+    /// <summary>How far down the default branch's first-parent line merges are looked at to connect merged tips.</summary>
+    public const int JoinDepth = 500;
+
+    /// <summary>Most commits of the default branch's history read to find those connections.</summary>
+    public const int JoinWindow = 6000;
+
+    /// <summary>Longest run of commits sent to connect one merged tip to its merge. Past it, only <see cref="GraphCommit.JoinsTrunkAt"/> is sent.</summary>
+    public const int MaxJoinPath = 40;
+
+    /// <summary>Most connecting commits sent for one repository.</summary>
+    public const int MaxJoinCommits = 200;
 
     private const int MaxExtraCommits = 400;
     private const int ShasPerCall = 300;
@@ -164,6 +178,7 @@ public sealed class CommitGraphCollector(GitRunner git)
         //    that two machines which fetched at different times agree.
         var trunkPos = new Dictionary<string, int>(StringComparer.Ordinal);
         var trunkTop = new List<string>();
+        IReadOnlyList<string> trunkChain = [];
         if (trunkSha is not null)
         {
             var line = await Run(["log", "--first-parent", "--format=%H", "-n", TrunkDepth.ToString(CultureInfo.InvariantCulture), trunkSha]).ConfigureAwait(false);
@@ -184,16 +199,30 @@ public sealed class CommitGraphCollector(GitRunner git)
             }
 
             trunkTop = chain.Take(TrunkContext).ToList();
+            trunkChain = chain;
         }
 
         // 3. The commits the rest hangs off: default-branch context, branch tips that are already merged,
         //    and the parents side commits fork from. Read one by one, never walked.
-        var wanted = trunkTop
-            .Concat(tips)
+        var hangers = tips
             .Concat(commits.Values.SelectMany(c => c.Parents))
             .Where(sha => !commits.ContainsKey(sha))
             .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        // 3b. A merged tip is not on the first-parent line, so nothing sent so far leads to it. Find the
+        //     merge that brought each one in and the commits in between.
+        var joins = trunkSha is null
+            ? JoinPaths.None
+            : await JoinsAsync(Run, trunkSha, trunkChain, hangers.Where(sha => !trunkPos.ContainsKey(sha)).ToList()).ConfigureAwait(false);
+
+        var wanted = trunkTop
+            .Concat(hangers)
+            .Distinct(StringComparer.Ordinal)
             .Take(MaxExtraCommits)
+            .Concat(joins.Commits)
+            .Where(sha => !commits.ContainsKey(sha))
+            .Distinct(StringComparer.Ordinal)
             .ToList();
         foreach (var chunk in wanted.Chunk(ShasPerCall))
         {
@@ -225,8 +254,9 @@ public sealed class CommitGraphCollector(GitRunner git)
             {
                 TrunkPos = trunkPos.TryGetValue(c.Sha, out var pos) ? pos : null,
                 // Whatever is not off the default branch is on it. With a cut-off list that is no longer certain.
-                InTrunk = trunkSha is not null && !truncated && !side.Contains(c.Sha) && !trunkPos.ContainsKey(c.Sha),
+                InTrunk = trunkSha is not null && !trunkPos.ContainsKey(c.Sha) && ((!truncated && !side.Contains(c.Sha)) || joins.Merged.Contains(c.Sha)),
                 Unpushed = unpushed.Contains(c.Sha),
+                JoinsTrunkAt = joins.JoinOf.GetValueOrDefault(c.Sha),
             })
             .ToList();
 
@@ -238,6 +268,116 @@ public sealed class CommitGraphCollector(GitRunner git)
             Truncated = truncated,
             SideCommitCount = sideCount,
         });
+    }
+
+    /// <summary>What <see cref="JoinsAsync"/> found.</summary>
+    /// <param name="JoinOf">Merged commit to the first-parent commit of the default branch that first contains it.</param>
+    /// <param name="Commits">Commits to send besides: those merges, and the commits between a merged commit and its merge.</param>
+    /// <param name="Merged">Every commit seen that is in the default branch's history without being on its first-parent line.</param>
+    private sealed record JoinPaths(IReadOnlyDictionary<string, string> JoinOf, IReadOnlyList<string> Commits, IReadOnlySet<string> Merged)
+    {
+        public static readonly JoinPaths None = new(new Dictionary<string, string>(), [], new HashSet<string>());
+    }
+
+    /// <summary>
+    /// Reads the recent history of the default branch (all parents, shas only) and works out, for each
+    /// of <paramref name="merged"/>, the oldest commit of the first-parent line that contains it and the
+    /// shortest way up to it. One <c>git log</c>, and none when there is nothing to connect.
+    /// </summary>
+    private static async Task<JoinPaths> JoinsAsync(Func<IReadOnlyList<string>, Task<GitResult>> run, string trunkSha, IReadOnlyList<string> chain, IReadOnlyList<string> merged)
+    {
+        if (merged.Count == 0 || chain.Count == 0)
+        {
+            return JoinPaths.None;
+        }
+
+        // Only what the newest JoinDepth commits of the line brought in: older merges stay out of the walk.
+        string[] bound = chain.Count > JoinDepth ? ["--not", chain[JoinDepth]] : [];
+        var log = await run(["log", "--date-order", "--format=%H%x1f%P", "-n", JoinWindow.ToString(CultureInfo.InvariantCulture), trunkSha, .. bound]).ConfigureAwait(false);
+        if (!log.Ok)
+        {
+            return JoinPaths.None;
+        }
+
+        var line = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < Math.Min(chain.Count, JoinDepth); i++)
+        {
+            line[chain[i]] = i;
+        }
+
+        // Children come before their parents in the log, so by the time a commit is read every way up
+        // from it is known: the oldest commit of the line it leads to (highest index), by the fewest steps.
+        var best = new Dictionary<string, (int Line, int Steps, string Via)>(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in log.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var f = row.TrimEnd('\r').Split(Sep);
+            if (f.Length != 2 || !CommitLogParser.IsSha(f[0]))
+            {
+                continue;
+            }
+
+            var sha = f[0];
+            (int Line, int Steps) here;
+            if (line.TryGetValue(sha, out var index))
+            {
+                here = (index, 0);
+            }
+            else if (best.TryGetValue(sha, out var found))
+            {
+                here = (found.Line, found.Steps);
+                seen.Add(sha);
+            }
+            else
+            {
+                continue;
+            }
+
+            foreach (var parent in f[1].Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!line.ContainsKey(parent)
+                    && (!best.TryGetValue(parent, out var known) || here.Line > known.Line || (here.Line == known.Line && here.Steps + 1 < known.Steps)))
+                {
+                    best[parent] = (here.Line, here.Steps + 1, sha);
+                }
+            }
+        }
+
+        var joinOf = new Dictionary<string, string>(StringComparer.Ordinal);
+        var send = new List<string>();
+        var between = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var sha in merged)
+        {
+            // Only a commit the log reached has all of its children read.
+            if (!seen.Contains(sha) || !best.TryGetValue(sha, out var way))
+            {
+                continue;
+            }
+
+            var join = chain[way.Line];
+            joinOf[sha] = join;
+            send.Add(join);
+
+            if (way.Steps - 1 > MaxJoinPath)
+            {
+                continue;
+            }
+
+            var path = new List<string>();
+            for (var at = way.Via; !line.ContainsKey(at); at = best[at].Via)
+            {
+                path.Add(at);
+            }
+
+            var fresh = path.Count(p => !between.Contains(p));
+            if (between.Count + fresh <= MaxJoinCommits)
+            {
+                between.UnionWith(path);
+            }
+        }
+
+        send.AddRange(between);
+        return new JoinPaths(joinOf, send.Distinct(StringComparer.Ordinal).ToList(), seen);
     }
 
     private CommitGraph Remember(string commonDir, string key, CommitGraph graph)

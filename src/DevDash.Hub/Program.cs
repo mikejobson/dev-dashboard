@@ -1,6 +1,7 @@
 using DevDash.Contracts;
 using DevDash.Core.Cleanup;
 using DevDash.Hub;
+using DevDash.Hub.Alerts;
 using DevDash.Hub.Api;
 using DevDash.Hub.Auth;
 using DevDash.Hub.Components;
@@ -79,8 +80,11 @@ builder.Services.AddSingleton<ActionSignals>();
 builder.Services.AddSingleton<ActionQueue>();
 builder.Services.AddSingleton<RefreshService>();
 builder.Services.AddScoped<RefreshBoard>();
+builder.Services.AddSingleton<TombstoneStore>();
+builder.Services.AddScoped<ActionBoard>();
 builder.Services.AddHostedService<ActionExpiryService>();
 builder.Services.AddSingleton<FindingsService>();
+builder.Services.AddSingleton<SafetyService>();
 builder.Services.AddSingleton<NavCounts>();
 
 // ---- GitHub -------------------------------------------------------------------------------------
@@ -89,6 +93,13 @@ builder.Services.AddHttpClient<GitHubClient>(c => c.Timeout = TimeSpan.FromSecon
 builder.Services.AddSingleton<GitHubStore>();
 builder.Services.AddSingleton<GitHubPoller>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<GitHubPoller>());
+
+// ---- alerts --------------------------------------------------------------------------------------
+// No request logging for this client: the addresses it posts to are secrets (a webhook id, an ntfy topic).
+builder.Services.AddHttpClient<AlertSender>(c => c.Timeout = TimeSpan.FromSeconds(30)).RemoveAllLoggers();
+builder.Services.AddSingleton<AlertSettings>();
+builder.Services.AddSingleton<AlertService>();
+builder.Services.AddHostedService<AlertWorker>();
 
 // ---- agent releases and updates -----------------------------------------------------------------
 builder.Services.AddHttpClient<ReleaseClient>(c => c.Timeout = TimeSpan.FromSeconds(30));

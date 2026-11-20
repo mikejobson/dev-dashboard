@@ -108,6 +108,97 @@ public sealed class AgentLoopTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Remove and re-clone end to end: the hub's verdict and fingerprint come from the snapshot, the agent's
+    /// from its own fetch and scan, and they have to agree for anything to move. Then the tombstone's
+    /// clone action brings the project back, and the tombstone goes.
+    /// </summary>
+    [Fact]
+    public async Task Remove_to_the_trash_then_clone_back()
+    {
+        var origin = Path.Combine(_root, "origin", "gadget.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(origin)!);
+        Git(_root, "clone", "-q", "--bare", Path.Combine(_dev, "widget"), origin);
+        Git(_dev, "clone", "-q", origin, "gadget");
+        var gadget = Path.Combine(_dev, "gadget");
+        var trash = Path.Combine(_root, "trash");
+
+        using var factory = new HubFactory();
+        var options = new StaticOptions(new AgentOptions
+        {
+            Roots = [_dev],
+            MachineId = "loop-box",
+            HubUrl = "http://localhost/",
+            ApiKey = await factory.IssueKeyAsync("loop"),
+            Actions = new ActionsOptions { Enabled = true },
+        });
+        var git = new GitRunner();
+        var scanner = new MachineScanner(
+            new RepoScanner(git, new FetchService(git, options, NullLogger<FetchService>.Instance), options),
+            new SizeCache(Path.Combine(_root, "sizes.json")), options, NullLogger<MachineScanner>.Instance);
+        var agentHttp = factory.CreateClient();
+        var known = new KnownRemotes();
+        var removals = new RemovalLog(Path.Combine(_root, "removed.json"));
+
+        async Task PushSnapshotAsync()
+        {
+            var snapshot = await scanner.ScanAsync(new ScanRequest(AllowFetch: true, SizeMode.Force), CancellationToken.None);
+            known.Update(snapshot);
+            await new HubClient(agentHttp, options).PushAsync(snapshot, CancellationToken.None);
+        }
+
+        var validator = new ActionValidator(git, options, removals, known);
+        var rescans = new RescanRequests(options);
+        var worker = new ActionWorker(
+            new ActionsClient(agentHttp, options),
+            new ActionExecutor(git, validator, options, NullLogger<ActionExecutor>.Instance,
+                projects: new ProjectActions(git, validator, options, NullLogger<ProjectActions>.Instance, scanner, new FolderTrash(trash), removals)),
+            rescans, options, NullLogger<ActionWorker>.Instance);
+
+        await PushSnapshotAsync();
+        var queue = factory.Services.GetRequiredService<ActionQueue>();
+        var tombstones = factory.Services.GetRequiredService<TombstoneStore>();
+
+        // The dashboard: gadget is plainly safe (cloned, nothing added); widget has no remote and is not.
+        var rows = factory.Services.GetRequiredService<SafetyService>().Get();
+        var row = rows.Single(r => r.Entry.Name == "gadget");
+        Assert.Equal(DevDash.Core.Safety.SafetyVerdict.Safe, row.Safety.Verdict);
+        Assert.True(rows.Single(r => r.Entry.Name == "widget").Safety.IsAtRisk);
+        Assert.True(queue.Availability(row.Machine, AgentActionKind.RemoveProject).Available);
+
+        var queued = await queue.QueueAsync("loop-box", AgentAction.RemoveProject(row.Entry.Path, row.Safety.Fingerprint), "me@example.com");
+        Assert.True(queued.Ok, queued.Error);
+        Assert.Equal(1, await worker.PollOnceAsync(CancellationToken.None));
+
+        var removal = (await queue.RecentAsync()).Single(a => a.Kind == AgentActionKind.RemoveProject);
+        Assert.True(removal.Status == AgentActionStatus.Succeeded, removal.Output);
+        Assert.False(Directory.Exists(gadget));
+        Assert.True(File.Exists(Path.Combine(trash, "gadget", "README.md")));
+
+        await PushSnapshotAsync(); // what the scan loop does when asked to rescan
+        var tombstone = Assert.Single(await tombstones.ListAsync());
+        Assert.Equal(row.Entry.Path, tombstone.Tombstone.Path);
+        Assert.True(tombstone.Tombstone.SizeBytes > 0);
+        Assert.DoesNotContain(factory.Services.GetRequiredService<SafetyService>().Get(), r => r.Entry.Name == "gadget");
+
+        // Back again, from the tombstone's own clone action.
+        var clone = await queue.QueueAsync("loop-box", tombstone.CloneAction!, "me@example.com");
+        Assert.True(clone.Ok, clone.Error);
+        Assert.Equal(1, await worker.PollOnceAsync(CancellationToken.None));
+
+        var cloned = (await queue.RecentAsync()).Single(a => a.Kind == AgentActionKind.Clone);
+        Assert.True(cloned.Status == AgentActionStatus.Succeeded, cloned.Output);
+        Assert.True(File.Exists(Path.Combine(gadget, "README.md")));
+        Assert.Empty(await tombstones.ListAsync());
+        Assert.True(Directory.Exists(Path.Combine(trash, "gadget"))); // the trashed copy is left alone
+
+        // The agent would not have cloned anything else into that folder, whatever the hub said.
+        var arbitrary = await new ActionExecutor(git, validator, options, NullLogger<ActionExecutor>.Instance)
+            .ExecuteAsync(AgentAction.CloneInto(Path.Combine(_dev, "evil"), "https://example.invalid/evil.git"), CancellationToken.None);
+        Assert.True(arbitrary.Refused);
+        Assert.False(Directory.Exists(Path.Combine(_dev, "evil")));
+    }
+
     private static string Git(string workingDirectory, params string[] args)
     {
         var psi = new ProcessStartInfo("git") { WorkingDirectory = workingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };

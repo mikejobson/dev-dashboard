@@ -387,6 +387,149 @@ public sealed class ScannerTests : IDisposable
         Assert.Equal("main", git.DefaultBranch); // the default branch itself is unchanged
     }
 
+    [Fact]
+    public async Task A_branch_merged_into_develop_only_is_merged_for_the_map_and_not_for_cleanup()
+    {
+        // git-flow: main is the default branch, develop is where the work is merged.
+        Git(Widget, "checkout", "-q", "-b", "develop");
+        Git(Widget, "checkout", "-q", "-b", "feature/done");
+        GitAt("2030-01-01T00:00:00Z", Widget, "commit", "-q", "--allow-empty", "-m", "feature work");
+        Git(Widget, "checkout", "-q", "develop");
+        GitAt("2030-01-02T00:00:00Z", Widget, "merge", "-q", "--no-ff", "feature/done", "-m", "Merge feature/done");
+        Git(Widget, "push", "-q", "-u", "origin", "develop");
+        Git(Widget, "checkout", "-q", "-b", "feature/open");
+        GitAt("2030-01-03T00:00:00Z", Widget, "commit", "-q", "--allow-empty", "-m", "open work");
+
+        var git = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!;
+        BranchInfo Branch(string name) => git.Branches.Single(b => b.Name == name);
+
+        Assert.Equal("origin/develop", git.Graph!.TrunkRef);
+        Assert.False(Branch("feature/done").MergedIntoDefault); // cleanup still asks about main
+        Assert.True(Branch("feature/done").MergedIntoTrunk);
+        Assert.False(Branch("feature/open").MergedIntoTrunk);
+        Assert.True(Branch("main").MergedIntoTrunk);
+
+        // An optional field: absent when the map is drawn along the default branch, and old snapshots read fine.
+        var json = System.Text.Json.JsonSerializer.Serialize(git, SnapshotSchema.JsonOptions);
+        Assert.Contains("\"mergedIntoTrunk\":true", json);
+        Assert.Null(System.Text.Json.JsonSerializer.Deserialize<BranchInfo>("{\"name\":\"x\",\"mergedIntoDefault\":true}", SnapshotSchema.JsonOptions)!.MergedIntoTrunk);
+    }
+
+    [Fact]
+    public async Task Without_a_separate_trunk_merged_into_trunk_is_not_reported()
+    {
+        Git(Widget, "branch", "merged-branch");
+
+        var git = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!;
+
+        Assert.All(git.Branches, b => Assert.Null(b.MergedIntoTrunk));
+        Assert.DoesNotContain("mergedIntoTrunk", System.Text.Json.JsonSerializer.Serialize(git, SnapshotSchema.JsonOptions));
+    }
+
+    [Fact]
+    public async Task A_branch_merged_through_a_chain_of_pull_requests_is_sent_with_its_way_up_to_the_trunk()
+    {
+        string Commit(string subject)
+        {
+            Git(Widget, "commit", "-q", "--allow-empty", "-m", subject);
+            return Git(Widget, "rev-parse", "HEAD");
+        }
+
+        string Merge(string other, string subject)
+        {
+            Git(Widget, "merge", "-q", "--no-ff", other, "-m", subject);
+            return Git(Widget, "rev-parse", "HEAD");
+        }
+
+        // Stacked pull requests: "first" has "second" merged into it after its own last commit, "second"
+        // has "third" merged into it, and only then does "first" land on main. The local branches still
+        // point at the commits made before those merges, so each tip is reachable from main only
+        // through second parents and merges that no branch points at.
+        Git(Widget, "checkout", "-q", "-b", "first");
+        var first = Commit("first work");
+        Git(Widget, "checkout", "-q", "-b", "second");
+        Commit("second work 1");
+        var second = Commit("second work 2");
+        Git(Widget, "checkout", "-q", "-b", "third");
+        var third = Commit("third work");
+        Git(Widget, "checkout", "-q", "--detach", second);
+        var secondMerged = Merge("third", "Merge pull request #3 from third");
+        Git(Widget, "checkout", "-q", "--detach", first);
+        var firstMerged = Merge(secondMerged, "Merge pull request #2 from second");
+        Git(Widget, "checkout", "-q", "main");
+        Commit("main moves on");
+        var landed = Merge(firstMerged, "Merge pull request #1 from first");
+        for (var i = 0; i < 3; i++)
+        {
+            Commit($"later {i}");
+        }
+
+        Git(Widget, "push", "-q", "origin", "main");
+
+        var git = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!;
+        var commits = git.Graph!.Commits.ToDictionary(c => c.Sha);
+
+        // The merges in between are sent, so every merged tip has an unbroken line of children up to main.
+        Assert.Contains(firstMerged, commits.Keys);
+        Assert.Contains(secondMerged, commits.Keys);
+        Assert.Equal([first, secondMerged], commits[firstMerged].Parents);
+        Assert.Equal([second, third], commits[secondMerged].Parents);
+        Assert.Contains(firstMerged, commits[landed].Parents);
+        Assert.All((string[])[firstMerged, secondMerged, first, second, third], sha =>
+        {
+            Assert.True(commits[sha].InTrunk);
+            Assert.Null(commits[sha].TrunkPos);
+        });
+
+        // Each tip names the commit of main's first-parent line that brought it in.
+        Assert.NotNull(commits[landed].TrunkPos);
+        Assert.All((string[])[first, second, third], sha => Assert.Equal(landed, commits[sha].JoinsTrunkAt));
+        Assert.Null(commits[landed].JoinsTrunkAt);
+        Assert.All(git.Branches.Where(b => b.Name != "main"), b => Assert.True(b.MergedIntoDefault));
+
+        // Optional on the wire: nothing for commits without one, and a snapshot from an older agent reads as before.
+        var json = System.Text.Json.JsonSerializer.Serialize(git.Graph, SnapshotSchema.JsonOptions);
+        Assert.DoesNotContain("\"joinsTrunkAt\":null", json);
+        Assert.Null(System.Text.Json.JsonSerializer.Deserialize<GraphCommit>($"{{\"sha\":\"{first}\"}}", SnapshotSchema.JsonOptions)!.JoinsTrunkAt);
+    }
+
+    [Fact]
+    public async Task A_merged_tip_far_below_its_merge_is_sent_with_where_it_joins_instead_of_every_commit_between()
+    {
+        Git(Widget, "checkout", "-q", "-b", "long");
+        Git(Widget, "commit", "-q", "--allow-empty", "-m", "early work");
+        var early = Git(Widget, "rev-parse", "HEAD");
+        Git(Widget, "branch", "early");
+        for (var i = 0; i < CommitGraphCollector.MaxJoinPath + 5; i++)
+        {
+            Git(Widget, "commit", "-q", "--allow-empty", "-m", $"more {i}");
+        }
+
+        var tip = Git(Widget, "rev-parse", "HEAD");
+        Git(Widget, "checkout", "-q", "main");
+        Git(Widget, "merge", "-q", "--no-ff", "long", "-m", "Merge long");
+        var landed = Git(Widget, "rev-parse", "HEAD");
+        for (var i = 0; i < CommitGraphCollector.TrunkContext + 2; i++)
+        {
+            Git(Widget, "commit", "-q", "--allow-empty", "-m", $"later {i}");
+        }
+
+        Git(Widget, "push", "-q", "origin", "main");
+
+        var graph = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!.Graph!;
+        var commits = graph.Commits.ToDictionary(c => c.Sha);
+
+        // Both tips know the merge, and the merge is sent although it is below the context of main.
+        Assert.Equal(landed, commits[early].JoinsTrunkAt);
+        Assert.Equal(landed, commits[tip].JoinsTrunkAt);
+        Assert.NotNull(commits[landed].TrunkPos);
+        Assert.Contains(tip, commits[landed].Parents); // "long" itself is a parent of the merge: connected
+
+        // The run between "early" and the tip is too long to send.
+        Assert.DoesNotContain(graph.Commits, c => c.Subject.StartsWith("more ", StringComparison.Ordinal) && c.Sha != tip);
+        Assert.False(graph.Truncated);
+    }
+
     private MachineScanner CreateScanner(bool autoFetch)
     {
         var options = new StaticOptions(new AgentOptions

@@ -1,0 +1,53 @@
+@* Projects the dashboard had an agent move to the trash, with a way to clone each back into its folder. *@
+@inject TombstoneStore Tombstones
+@if (Items.Count > 0)
+{
+    <div class="table-wrap">
+        <table class="stack removed-table">
+            <thead>
+                <tr><th>Project</th><th>Clones from</th><th class="right">Removed</th><th class="right">Size</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var item in Items)
+                {
+                    var t = item.Tombstone;
+                    <tr @key="t.Id">
+                        <td class="cell-main">
+                            <strong>@t.Name</strong> <span class="owner muted small">@t.MachineName</span>
+                            <div class="sub mono path" title="@t.Path">@Fmt.Tilde(t.Path, item.Machine is null ? null : Fmt.HomeOf(item.Machine.Snapshot.Roots))</div>
+                        </td>
+                        <td data-label="Clones from" class="@(item.Remote is null ? "blank" : "")">
+                            @if (item.Remote is { } remote)
+                            {
+                                <span class="mono path">@remote.Url</span>
+                                <div class="sub">@(t.DefaultBranch is null ? "" : $"default {t.DefaultBranch}")@(t.Branch is not null && t.Branch != t.DefaultBranch ? $" · was on {t.Branch}" : "")@(t.HeadSha is null ? "" : $" at {Fmt.Sha(t.HeadSha)}")</div>
+                            }
+                        </td>
+                        <td data-label="Removed" class="cell-when right nowrap sub" title="@Fmt.Date(t.RemovedAt) by @t.RemovedBy">@Fmt.Ago(t.RemovedAt, Now)</td>
+                        <td data-label="Size" class="right nowrap sub @(t.SizeBytes is null ? "blank" : "")">@Fmt.Size(t.SizeBytes)</td>
+                        <td class="right cell-buttons">
+                            @if (item.CloneAction is { } clone && item.Machine is { } machine)
+                            {
+                                <ActionButton Machine="machine" Action="clone" Label="Re-clone" Ask="@($"Clone {t.Name} back on {machine.Machine.Hostname}?")" Confirm="@($"Clone on {machine.Machine.Hostname}")"
+                                              What="@($"Clone {t.Name} back into {t.Path} on {machine.Machine.Hostname}")">
+                                    <p>This is a fresh clone of the default branch. The copy in the trash on @machine.Machine.Hostname is not touched.</p>
+                                </ActionButton>
+                            }
+                            else if (item.CloneAction is not null)
+                            {
+                                <span class="muted small">machine not reporting</span>
+                            }
+                            <button type="button" title="Stop listing this. Nothing on the machine changes." @onclick="() => Tombstones.ForgetAsync(t.Id)">Forget</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<RemovedProjectView> Items { get; set; } = [];
+
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+}

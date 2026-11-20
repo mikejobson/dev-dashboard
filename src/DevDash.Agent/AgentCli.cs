@@ -34,6 +34,7 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
           --no-fetch          Do not run `git fetch --prune --quiet`
           --sizes             Measure folder sizes now instead of when they are due
           --no-watch          Do not watch for file changes between scans
+          --no-deps           Do not run `dotnet list package` / `npm audit` in the background (on by default, once a day per repo)
           --enable-actions    Let the dashboard queue allowlisted git fixes for this machine (off by default)
           --updates <mode>    Self-update: off, notify (default: when asked from the dashboard) or auto
 
@@ -79,6 +80,9 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
                     break;
                 case "--no-watch":
                     overrides["Agent:Watch"] = "false";
+                    break;
+                case "--no-deps":
+                    overrides["Agent:Dependencies:Enabled"] = "false";
                     break;
                 case "--enable-actions":
                     overrides["Agent:Actions:Enabled"] = "true";

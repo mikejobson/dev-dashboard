@@ -28,7 +28,13 @@ public static class MachineInfoProvider
             AgentVersion = AgentVersion,
             ActionsEnabled = options.Actions.Enabled,
             AcceptsRefresh = Actions.ActionWorker.ShouldPoll(options),
+            // One switch for all of them today; separate flags so the hub never has to guess from a version number.
+            AcceptsRemoveProject = options.Actions.Enabled,
+            AcceptsClone = options.Actions.Enabled,
+            AcceptsCleanBuildDirs = options.Actions.Enabled,
+            AcceptsPull = options.Actions.Enabled,
             UpdateMode = ReportedUpdateMode(options, UpdateInstallation.Current, ReleaseSigning.Embedded),
+            DependencyChecks = options.Dependencies.Enabled,
             LastUpdate = UpdateInstallation.Current is { } installation ? new UpdateStateStore(installation.StateFile).Read().Last : null,
         };
     }

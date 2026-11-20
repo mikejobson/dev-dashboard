@@ -18,7 +18,7 @@ public class GitHubClientTests
     private static string Pr(int number, string state, bool draft = false) => $$"""
         { "number": {{number}}, "title": "PR {{number}}", "url": "https://github.com/acme/widget/pull/{{number}}", "isDraft": {{(draft ? "true" : "false")}},
           "createdAt": "2026-11-01T00:00:00Z", "updatedAt": "2026-11-10T00:00:00Z", "reviewDecision": "REVIEW_REQUIRED", "mergeable": "MERGEABLE",
-          "headRefName": "feature", "baseRefName": "main", "author": { "login": "me" }, "repository": { "nameWithOwner": "acme/widget" },
+          "headRefName": "feature", "headRefOid": "abc{{number}}def", "isCrossRepository": {{(number == 4 ? "true" : "false")}}, "baseRefName": "main", "author": { "login": "me" }, "repository": { "nameWithOwner": "acme/widget" },
           "commits": { "nodes": [ { "commit": { "statusCheckRollup": {{(state == "null" ? "null" : $"{{ \"state\": \"{state}\" }}")}} } } ] } }
         """;
 
@@ -123,6 +123,9 @@ public class GitHubClientTests
 
         Assert.Equal([1, 2, 3, 4], snapshot.PullRequests.Select(p => p.Number).Order());
         var one = snapshot.PullRequests.Single(p => p.Number == 1);
+        Assert.Equal("abc1def", one.HeadSha); // the commit CI ran on, so a branch can be matched by it
+        Assert.False(one.IsCrossRepository);
+        Assert.True(snapshot.PullRequests.Single(p => p.Number == 4).IsCrossRepository);
         Assert.True(one is { Authored: true, Assigned: true, ReviewRequested: false, Ci: CiState.Failure, ReviewDecision: "REVIEW_REQUIRED" });
         Assert.True(snapshot.PullRequests.Single(p => p.Number == 2) is { IsDraft: true, Ci: CiState.Success });
         Assert.True(snapshot.PullRequests.Single(p => p.Number == 3) is { ReviewRequested: true, Authored: false, Ci: CiState.Pending });

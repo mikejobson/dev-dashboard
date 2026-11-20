@@ -11,7 +11,8 @@ public sealed record GitResult(int ExitCode, string StdOut, string StdErr, bool 
 /// <summary>
 /// The only place the agent starts git. Arguments go to the process as a list (never through a shell),
 /// credential prompts are disabled, and every call has a timeout. Scanning can only run an allowlist of
-/// read-only commands plus <c>fetch --prune --quiet</c>. The separate, opt-in agent actions
+/// read-only commands plus <c>fetch --prune --quiet</c> and <c>ls-remote --tags</c>, which reads the
+/// remote and changes nothing locally. The separate, opt-in agent actions
 /// (<c>Actions/ActionExecutor</c>) run their own fixed commands through <see cref="ExecuteAsync"/>.
 /// </summary>
 public sealed class GitRunner
@@ -46,6 +47,13 @@ public sealed class GitRunner
     public Task<GitResult> FetchAsync(string workingDirectory, TimeSpan timeout, CancellationToken ct = default) =>
         ExecuteAsync(workingDirectory, ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.fsmonitor=false", .. FetchArgs], timeout, ct);
 
+    /// <summary>
+    /// Runs <c>git ls-remote --tags --refs -- &lt;remote&gt;</c>: lists the tags a remote has, to tell which
+    /// local tags exist nowhere else. It talks to the remote, like a fetch, and writes nothing.
+    /// </summary>
+    public Task<GitResult> ListRemoteTagsAsync(string workingDirectory, string remote, TimeSpan timeout, CancellationToken ct = default) =>
+        ExecuteAsync(workingDirectory, ["-c", "core.fsmonitor=false", "ls-remote", "--tags", "--refs", "--", remote], timeout, ct);
+
     /// <summary>Throws unless <paramref name="args"/> is one of the read-only commands the scanner uses.</summary>
     public static void EnsureReadOnly(IReadOnlyList<string> args)
     {
@@ -65,6 +73,9 @@ public sealed class GitRunner
             "remote" => args.Count == 2 && args[1] == "-v",
             "worktree" => args.Count >= 2 && args[1] == "list",
             "stash" => args.Count >= 2 && args[1] == "list",
+            "ls-files" => args.Count == 3 && args[1] == "--", // lists what git tracks under one path
+            "config" => args.Count == 3 && args[1] == "--get" && args[2] == "user.email", // reads one value; compared locally, never sent
+            "submodule" => args.Count == 3 && args[1] == "status" && args[2] == "--recursive", // lists them, nothing else
             _ => false,
         };
 

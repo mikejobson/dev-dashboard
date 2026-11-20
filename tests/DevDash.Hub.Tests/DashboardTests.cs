@@ -52,6 +52,7 @@ public class DashboardTests
     [InlineData("/cleanup?open=all", "Not a git repo: Reference Docs", "widget: uncommitted changes for 40 days", "acme/widget#7: CI failing", "data-copy=", "Snooze 7d",
         "List the folder", "ls -la '/dev/Reference Docs'", "Move it to Documents", "code '/dev/widget'", "Copy the fixes as a script for", "# DevDash cleanup: Non-git folders in Developer on mac-host, generated ")]
     [InlineData("/cleanup", "Non-git folders in Developer", "Expand all")]
+    [InlineData("/safety", "Safety", "At risk", "2 commits on feature/login not on any remote", "3 uncommitted changes, last edited 40 days ago", "Safe to remove", "Nothing is known to be safe to remove.", "Update on the Machines page")]
     [InlineData("/machines", "mac-host", "online", "Agent API keys", "first-run", "Agent actions", "No actions have been queued.", "2 entries in 123 ms", "reinstall needed")]
     [InlineData("/repo?key=github.com%2Facme%2Fwidget", "Widgets, from GitHub.", "/dev/widget", "Open pull requests", "Add login form", "Open issues", "Login is slow", "old-fix", "merged", "Open on GitHub",
         "data-copy=\"cd '/dev/widget'\"", "data-copy=\"code '/dev/widget'\"")]

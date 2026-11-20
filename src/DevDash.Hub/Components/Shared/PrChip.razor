@@ -1,0 +1,63 @@
+@* An open pull request as a small link to GitHub: CI state as a dot, the number, and its draft or review state. *@
+<a class="pr-chip @Tone" href="@PullRequest.Url" target="_blank" rel="noopener" title="@Tooltip" @onclick:stopPropagation="true">
+    <span class="dot @CiClass" role="img" aria-label="@(CiText ?? "no CI")"></span>
+    <span class="pr-chip-n">#@PullRequest.Number</span>
+    @if (ShowTitle && PullRequest.Title.Length > 0) { <span class="pr-chip-title">@PullRequest.Title</span> }
+    @if (ShowBranch && PullRequest.HeadRef is not null) { <span class="pr-chip-s mono">@PullRequest.HeadRef</span> }
+    @if (PullRequest.IsDraft) { <span class="pr-chip-s">draft</span> }
+    else if (PullRequest.ReviewDecision == "APPROVED") { <span class="pr-chip-s ok">approved</span> }
+    else if (PullRequest.ReviewDecision == "CHANGES_REQUESTED") { <span class="pr-chip-s danger">changes</span> }
+    else if (PullRequest.ReviewDecision == "REVIEW_REQUIRED") { <span class="pr-chip-s">in review</span> }
+    @if (PullRequest.Ci == CiState.Failure) { <span class="pr-chip-s danger">CI failing</span> }
+    @if (PullRequest.Mergeable == "CONFLICTING") { <span class="pr-chip-s danger">conflicts</span> }
+    @if (AtHead == false) { <span class="pr-chip-s" aria-label="not at this commit">≠</span> }
+</a>
+
+@code {
+    [Parameter, EditorRequired] public PullRequestInfo PullRequest { get; set; } = default!;
+
+    /// <summary>Show the title after the number, cut short. Off where space is tight.</summary>
+    [Parameter] public bool ShowTitle { get; set; }
+
+    /// <summary>Name the head branch: for a pull request shown away from its branch.</summary>
+    [Parameter] public bool ShowBranch { get; set; }
+
+    /// <summary>False when the commit or branch this sits on is not the one the pull request is at on GitHub.</summary>
+    [Parameter] public bool? AtHead { get; set; }
+
+    private string Tone => PullRequest.Ci == CiState.Failure ? "failing" : "";
+
+    private string CiClass => PullRequest.Ci switch
+    {
+        CiState.Success => "ok",
+        CiState.Failure => "danger",
+        CiState.Pending => "warn",
+        _ => "",
+    };
+
+    private string? CiText => PullRequest.Ci switch
+    {
+        CiState.Success => "CI passing",
+        CiState.Failure => "CI failing",
+        CiState.Pending => "CI running",
+        _ => null,
+    };
+
+    private string Tooltip
+    {
+        get
+        {
+            string?[] parts =
+            [
+                $"#{PullRequest.Number} {PullRequest.Title}",
+                PullRequest.IsDraft ? "draft" : null,
+                CiText,
+                PullRequest.ReviewDecision?.Replace('_', ' ').ToLowerInvariant(),
+                PullRequest.Mergeable == "CONFLICTING" ? "conflicts" : null,
+                AtHead == false && PullRequest.HeadSha is not null ? $"on GitHub it is at {Fmt.Sha(PullRequest.HeadSha)}, not this commit" : null,
+                "open on GitHub",
+            ];
+            return string.Join(" · ", parts.Where(p => p is not null));
+        }
+    }
+}

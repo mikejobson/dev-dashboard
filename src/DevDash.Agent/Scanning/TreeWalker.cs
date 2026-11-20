@@ -10,8 +10,6 @@ public sealed record TreeStats(DateTimeOffset? LastModified, SizeInfo? Size);
 /// </summary>
 public static class TreeWalker
 {
-    private static readonly HashSet<string> NoiseFiles = new(StringComparer.OrdinalIgnoreCase) { ".DS_Store", "Thumbs.db", "desktop.ini" };
-
     private const int Source = -1;
     private const int InsideGit = -2;
 
@@ -70,7 +68,7 @@ public static class TreeWalker
                         }
                     }
 
-                    if (source && !NoiseFiles.Contains(file.Name))
+                    if (source && !DevDash.Core.BuildOutput.IsNoiseFile(file.Name))
                     {
                         var time = file.LastWriteTimeUtc;
                         if (newest is null || time > newest)
@@ -125,29 +123,6 @@ public static class TreeWalker
         return new TreeStats(newest is null ? null : new DateTimeOffset(newest.Value, TimeSpan.Zero), size);
     }
 
-    /// <summary>
-    /// Build and dependency folders. Ambiguous names only count next to the manifest that produces them,
-    /// so a tracked <c>bin/</c> of scripts or a hand-written <c>dist/</c> is left alone.
-    /// </summary>
-    internal static bool IsReclaimable(string name, IReadOnlySet<string> siblings)
-    {
-        switch (name.ToLowerInvariant())
-        {
-            case "node_modules":
-            case ".venv":
-            case ".next":
-                return true;
-            case "bin":
-            case "obj":
-                return siblings.Any(s => s.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
-                    || s.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase)
-                    || s.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase));
-            case "target":
-                return siblings.Contains("Cargo.toml") || siblings.Contains("pom.xml");
-            case "dist":
-                return siblings.Contains("package.json") || siblings.Contains("pyproject.toml") || siblings.Contains("setup.py");
-            default:
-                return false;
-        }
-    }
+    /// <summary>Build and dependency folders: see <see cref="DevDash.Core.BuildOutput.IsReclaimable(string, IReadOnlySet{string})"/>.</summary>
+    internal static bool IsReclaimable(string name, IReadOnlySet<string> siblings) => DevDash.Core.BuildOutput.IsReclaimable(name, siblings);
 }

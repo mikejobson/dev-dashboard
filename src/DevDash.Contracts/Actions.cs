@@ -6,12 +6,16 @@ namespace DevDash.Contracts;
 /// <summary>
 /// The complete list of things the hub may ask an agent to do. There is deliberately no "run this
 /// command" kind: an agent builds the git arguments itself from these typed fields, and nothing here
-/// can discard work (no force, no <c>-D</c>, no reset, no rebase, no pull).
+/// can discard work (no force, no <c>-D</c>, no reset, no rebase, and the only pull is a fast-forward).
 /// <para>
-/// Every kind but <see cref="UpdateAgent"/> and <see cref="Refresh"/> is a git action on one repository,
-/// and only runs on a machine that turned on <c>Agent:Actions:Enabled</c>. <see cref="UpdateAgent"/>
+/// Every kind but <see cref="UpdateAgent"/> and <see cref="Refresh"/> changes something under the scan
+/// roots, and only runs on a machine that turned on <c>Agent:Actions:Enabled</c>. <see cref="UpdateAgent"/>
 /// touches no repository and is gated by the machine's own <c>Agent:Updates:Mode</c> instead.
 /// <see cref="Refresh"/> only asks for a scan the agent would do anyway, sooner, so it needs neither.
+/// </para>
+/// <para>
+/// New kinds go at the end, and the hub hands one out only to an agent that says it knows it
+/// (<see cref="AgentActions.Accepts"/>): an agent cannot read a claim that names a kind it has never heard of.
 /// </para>
 /// </summary>
 public enum AgentActionKind
@@ -47,6 +51,34 @@ public enum AgentActionKind
     /// already opted into), and re-measures the entry's size. It runs no other command.
     /// </summary>
     Refresh,
+
+    /// <summary>
+    /// Remove a whole project folder: into the operating system's trash, never deleted. The agent
+    /// fetches, scans the folder again and judges it with the same safety rules as the hub; it refuses
+    /// unless that verdict is "safe" (or "safe with caveats", each one acknowledged) and matches the
+    /// fingerprint the user was shown. A linked worktree goes through <c>git worktree remove</c> instead.
+    /// </summary>
+    RemoveProject,
+
+    /// <summary>
+    /// <c>git clone</c> into a folder a project was removed from. Only into a scan root, only when the
+    /// folder does not exist, and only from a URL the agent itself knows as a remote of that project.
+    /// </summary>
+    Clone,
+
+    /// <summary>
+    /// Delete build output inside one repository (<c>node_modules</c>, <c>bin</c>/<c>obj</c>…). A real
+    /// delete, not the trash: a build recreates it. Only folders with a known build-output name that
+    /// git tracks nothing in, and never through a link.
+    /// </summary>
+    CleanBuildDirs,
+
+    /// <summary>
+    /// Bring one branch up to its remote branch of the same name, as a fast-forward only: fetch, then
+    /// <c>git merge --ff-only @{u}</c> where the branch is checked out (and that working tree has no
+    /// uncommitted changes), or <c>git fetch remote branch:branch</c> where it is not.
+    /// </summary>
+    PullFastForward,
 }
 
 /// <summary>One allowlisted action. Fields that a kind does not use must be null.</summary>
@@ -57,6 +89,7 @@ public sealed record AgentAction
     /// <summary>
     /// Git actions: absolute path of the working tree to run in, as the agent reported it.
     /// <see cref="AgentActionKind.Refresh"/>: the path of an entry (or of anything inside one), as the agent reported it.
+    /// <see cref="AgentActionKind.RemoveProject"/>: the folder to remove. <see cref="AgentActionKind.Clone"/>: the folder to create.
     /// Null for <see cref="AgentActionKind.UpdateAgent"/>, which is not about a repository.
     /// </summary>
     public string? RepoPath { get; init; }
@@ -70,10 +103,16 @@ public sealed record AgentAction
     /// <summary><see cref="AgentActionKind.RemoveWorktree"/>: the linked worktree's path.</summary>
     public string? WorktreePath { get; init; }
 
-    /// <summary><see cref="AgentActionKind.Push"/>: remote name.</summary>
+    /// <summary>
+    /// <see cref="AgentActionKind.Push"/> and <see cref="AgentActionKind.PullFastForward"/>: remote name.
+    /// <see cref="AgentActionKind.Clone"/>: the name to give the remote, when it is not <c>origin</c>.
+    /// </summary>
     public string? Remote { get; init; }
 
-    /// <summary><see cref="AgentActionKind.Push"/>: local branch, pushed to the same name on the remote.</summary>
+    /// <summary>
+    /// <see cref="AgentActionKind.Push"/>: local branch, pushed to the same name on the remote.
+    /// <see cref="AgentActionKind.PullFastForward"/>: local branch, fast-forwarded to the same name on the remote.
+    /// </summary>
     public string? Branch { get; init; }
 
     /// <summary><see cref="AgentActionKind.Push"/>: also record the remote branch as upstream (<c>--set-upstream</c>).</summary>
@@ -84,6 +123,24 @@ public sealed record AgentAction
 
     /// <summary><see cref="AgentActionKind.DropStash"/>: the stash commit the user was shown. The agent refuses if it no longer matches.</summary>
     public string? ExpectedSha { get; init; }
+
+    /// <summary>
+    /// <see cref="AgentActionKind.RemoveProject"/>: the fingerprint of the safety assessment the user was
+    /// shown (<c>SafetyAssessment.Fingerprint</c>). The agent assesses again and refuses if it differs.
+    /// </summary>
+    public string? ExpectedFingerprint { get; init; }
+
+    /// <summary>
+    /// <see cref="AgentActionKind.RemoveProject"/>: the ignored files and folders the user ticked as "fine to
+    /// lose". Null when there were none. The agent refuses if it finds one that is not listed here.
+    /// </summary>
+    public IReadOnlyList<string>? AcknowledgedCaveats { get; init; }
+
+    /// <summary><see cref="AgentActionKind.Clone"/>: the URL to clone from. The agent only accepts one it knows itself.</summary>
+    public string? Url { get; init; }
+
+    /// <summary><see cref="AgentActionKind.CleanBuildDirs"/>: absolute paths of the build folders to delete, each inside <see cref="RepoPath"/>.</summary>
+    public IReadOnlyList<string>? BuildDirs { get; init; }
 
     public static AgentAction DeleteBranches(string repoPath, IEnumerable<string> branches) =>
         new() { Kind = AgentActionKind.DeleteBranches, RepoPath = repoPath, Branches = branches.ToList() };
@@ -108,6 +165,25 @@ public sealed record AgentAction
 
     public static AgentAction Refresh(string entryPath) =>
         new() { Kind = AgentActionKind.Refresh, RepoPath = entryPath };
+
+    /// <param name="acknowledgedCaveats">The caveat names the user ticked. None for a project that is plainly safe.</param>
+    public static AgentAction RemoveProject(string path, string expectedFingerprint, IEnumerable<string>? acknowledgedCaveats = null) =>
+        new()
+        {
+            Kind = AgentActionKind.RemoveProject,
+            RepoPath = path,
+            ExpectedFingerprint = expectedFingerprint,
+            AcknowledgedCaveats = acknowledgedCaveats?.ToList() is { Count: > 0 } list ? list : null,
+        };
+
+    public static AgentAction CloneInto(string path, string url, string? remote = null) =>
+        new() { Kind = AgentActionKind.Clone, RepoPath = path, Url = url, Remote = remote is null or "origin" ? null : remote };
+
+    public static AgentAction CleanBuildDirs(string repoPath, IEnumerable<string> buildDirs) =>
+        new() { Kind = AgentActionKind.CleanBuildDirs, RepoPath = repoPath, BuildDirs = buildDirs.ToList() };
+
+    public static AgentAction PullFastForward(string repoPath, string remote, string branch) =>
+        new() { Kind = AgentActionKind.PullFastForward, RepoPath = repoPath, Remote = remote, Branch = branch };
 }
 
 /// <summary>
@@ -130,14 +206,67 @@ public static partial class AgentActions
     /// <summary>The first agent release that knows <see cref="AgentActionKind.Refresh"/> and long-polls for requests.</summary>
     public const string RefreshMinAgentVersion = "0.5.0";
 
+    /// <summary>The first agent release that knows the removal, clone, build-output and fast-forward actions.</summary>
+    public const string RemovalMinAgentVersion = "0.6.0";
+
+    /// <summary>Most build folders one <see cref="AgentActionKind.CleanBuildDirs"/> may name: as many as a scan reports.</summary>
+    public const int MaxBuildDirs = 25;
+
+    /// <summary>Most caveats one <see cref="AgentActionKind.RemoveProject"/> may acknowledge: as many names as a scan sends.</summary>
+    public const int MaxCaveats = SafetyFacts.MaxNames;
+
+    [GeneratedRegex(@"^[0-9a-f]{24}$")]
+    private static partial Regex Fingerprint();
+
     /// <summary>The longest an agent may ask the hub to hold its poll for work open (<c>?wait=</c> on the claim endpoint).</summary>
     public const int MaxClaimWaitSeconds = 60;
 
     /// <summary>
-    /// True for the kinds that run git in a repository, which need <c>Agent:Actions:Enabled</c>. False for
+    /// True for the kinds that change something under the scan roots, which need <c>Agent:Actions:Enabled</c>. False for
     /// <see cref="AgentActionKind.UpdateAgent"/> and <see cref="AgentActionKind.Refresh"/>, which change no repository.
     /// </summary>
     public static bool IsRepoAction(AgentActionKind kind) => kind is not (AgentActionKind.UpdateAgent or AgentActionKind.Refresh);
+
+    /// <summary>
+    /// Whether the agent that sent this <see cref="MachineInfo"/> takes actions of a kind at all: its own
+    /// switch for that kind is on, and it is new enough to know the kind. The hub offers, queues and hands
+    /// out nothing else. An agent that predates a kind never set that kind's flag, so it reads as false.
+    /// </summary>
+    public static bool Accepts(MachineInfo machine, AgentActionKind kind) => kind switch
+    {
+        AgentActionKind.UpdateAgent => AgentUpdateModes.AcceptsRequests(machine.UpdateMode),
+        AgentActionKind.Refresh => machine.AcceptsRefresh,
+        AgentActionKind.RemoveProject => machine.ActionsEnabled && machine.AcceptsRemoveProject,
+        AgentActionKind.Clone => machine.ActionsEnabled && machine.AcceptsClone,
+        AgentActionKind.CleanBuildDirs => machine.ActionsEnabled && machine.AcceptsCleanBuildDirs,
+        AgentActionKind.PullFastForward => machine.ActionsEnabled && machine.AcceptsPull,
+        _ => machine.ActionsEnabled,
+    };
+
+    /// <summary>
+    /// Why the agent on a machine cannot take a kind of action, in words for a tooltip, or null when it can.
+    /// Tells "the agent is too old" from "actions are off there", because the fix is different.
+    /// </summary>
+    public static string? WhyNotAccepted(MachineInfo machine, AgentActionKind kind)
+    {
+        if (Accepts(machine, kind))
+        {
+            return null;
+        }
+
+        if (kind is AgentActionKind.UpdateAgent or AgentActionKind.Refresh)
+        {
+            return $"The agent on {machine.Hostname} does not take this.";
+        }
+
+        if (!machine.ActionsEnabled)
+        {
+            return $"Agent actions are off on {machine.Hostname}. Start its agent with --enable-actions to allow this.";
+        }
+
+        var on = string.IsNullOrWhiteSpace(machine.AgentVersion) ? "" : $" (it is on {machine.AgentVersion})";
+        return $"Update the agent on {machine.Hostname} to {RemovalMinAgentVersion} or newer to do this from here{on}.";
+    }
 
     /// <summary>True for the kinds that name a path on the machine: everything but <see cref="AgentActionKind.UpdateAgent"/>.</summary>
     public static bool TakesPath(AgentActionKind kind) => kind != AgentActionKind.UpdateAgent;
@@ -168,7 +297,14 @@ public static partial class AgentActions
         var kind = action.Kind;
         if (TakesPath(kind))
         {
-            if (PathProblem(action.RepoPath, kind == AgentActionKind.Refresh ? "Entry path" : "Repository path") is { } repoProblem)
+            var what = kind switch
+            {
+                AgentActionKind.Refresh => "Entry path",
+                AgentActionKind.RemoveProject => "Project path",
+                AgentActionKind.Clone => "Clone path",
+                _ => "Repository path",
+            };
+            if (PathProblem(action.RepoPath, what) is { } repoProblem)
             {
                 return repoProblem;
             }
@@ -181,11 +317,16 @@ public static partial class AgentActions
         if ((action.Version is not null) != (kind == AgentActionKind.UpdateAgent)
             || (action.Branches is not null) != (kind == AgentActionKind.DeleteBranches)
             || (action.WorktreePath is not null) != (kind == AgentActionKind.RemoveWorktree)
-            || (action.Remote is not null) != (kind == AgentActionKind.Push)
-            || (action.Branch is not null) != (kind == AgentActionKind.Push)
+            // A clone may name its remote or leave it as origin.
+            || (kind != AgentActionKind.Clone && (action.Remote is not null) != (kind is AgentActionKind.Push or AgentActionKind.PullFastForward))
+            || (action.Branch is not null) != (kind is AgentActionKind.Push or AgentActionKind.PullFastForward)
             || (action.SetUpstream && kind != AgentActionKind.Push)
             || (action.StashIndex is not null) != (kind == AgentActionKind.DropStash)
-            || (action.ExpectedSha is not null) != (kind == AgentActionKind.DropStash))
+            || (action.ExpectedSha is not null) != (kind == AgentActionKind.DropStash)
+            || (action.ExpectedFingerprint is not null) != (kind == AgentActionKind.RemoveProject)
+            || (action.AcknowledgedCaveats is not null && kind != AgentActionKind.RemoveProject)
+            || (action.Url is not null) != (kind == AgentActionKind.Clone)
+            || (action.BuildDirs is not null) != (kind == AgentActionKind.CleanBuildDirs))
         {
             return $"The fields do not match a {kind} action.";
         }
@@ -209,6 +350,7 @@ public static partial class AgentActions
                 return PathProblem(action.WorktreePath, "Worktree path");
 
             case AgentActionKind.Push:
+            case AgentActionKind.PullFastForward:
                 if (!RemoteName().IsMatch(action.Remote!))
                 {
                     return "The remote name is not valid.";
@@ -227,6 +369,41 @@ public static partial class AgentActions
             case AgentActionKind.UpdateAgent:
                 return SemVer.IsValid(action.Version) ? null : "The version is not a strict MAJOR.MINOR.PATCH[-prerelease] version.";
 
+            case AgentActionKind.RemoveProject:
+                if (!Fingerprint().IsMatch(action.ExpectedFingerprint!))
+                {
+                    return "The expected fingerprint is not a safety fingerprint.";
+                }
+
+                if (action.AcknowledgedCaveats is { } caveats
+                    && (caveats.Count is 0 or > MaxCaveats || caveats.Any(c => string.IsNullOrEmpty(c) || c.Length > 1024 || c.Any(char.IsControl))))
+                {
+                    return "The acknowledged caveats are not a list of file names.";
+                }
+
+                return null;
+
+            case AgentActionKind.Clone:
+                if (action.Remote is not null && !RemoteName().IsMatch(action.Remote))
+                {
+                    return "The remote name is not valid.";
+                }
+
+                return UrlProblem(action.Url!);
+
+            case AgentActionKind.CleanBuildDirs:
+                if (action.BuildDirs!.Count is 0 or > MaxBuildDirs)
+                {
+                    return $"Between 1 and {MaxBuildDirs} build folders can be deleted at once.";
+                }
+
+                if (action.BuildDirs.Distinct(StringComparer.Ordinal).Count() != action.BuildDirs.Count)
+                {
+                    return "A build folder is listed twice.";
+                }
+
+                return action.BuildDirs.Select(d => PathProblem(d, "Build folder path")).FirstOrDefault(p => p is not null);
+
             default:
                 return null;
         }
@@ -234,7 +411,8 @@ public static partial class AgentActions
 
     /// <summary>
     /// The arguments the agent passes to git (as a list, never through a shell), run inside <see cref="AgentAction.RepoPath"/>.
-    /// Throws for <see cref="AgentActionKind.UpdateAgent"/> and <see cref="AgentActionKind.Refresh"/>, which are not git commands.
+    /// Throws for the kinds that are not one fixed git command: <see cref="AgentActionKind.UpdateAgent"/>,
+    /// <see cref="AgentActionKind.Refresh"/>, and the kinds from 0.6.0, whose steps depend on what the agent finds.
     /// </summary>
     public static IReadOnlyList<string> GitArgs(AgentAction action)
     {
@@ -256,6 +434,20 @@ public static partial class AgentActions
             return $"refresh {ShellQuote(action.RepoPath ?? "")}";
         }
 
+        // What these come to, as a person would type it. The agent does the same thing step by step,
+        // with its own checks in between, so these are for reading and for the audit trail.
+        switch (action.Kind)
+        {
+            case AgentActionKind.RemoveProject:
+                return $"trash {ShellQuote(action.RepoPath ?? "")}";
+            case AgentActionKind.Clone:
+                return string.Join(' ', ["git", "clone", .. action.Remote is null ? Array.Empty<string>() : ["--origin", ShellQuote(action.Remote)], "--", ShellQuote(action.Url ?? ""), ShellQuote(action.RepoPath ?? "")]);
+            case AgentActionKind.CleanBuildDirs:
+                return "rm -rf " + string.Join(' ', (action.BuildDirs ?? []).Select(ShellQuote));
+            case AgentActionKind.PullFastForward:
+                return $"git -C {ShellQuote(action.RepoPath ?? "")} pull --ff-only {ShellQuote(action.Remote ?? "")} {ShellQuote(action.Branch ?? "")}";
+        }
+
         var (verb, values) = Parts(action);
         return string.Join(' ', ["git", "-C", ShellQuote(action.RepoPath ?? ""), .. verb, .. values.Select(ShellQuote)]);
     }
@@ -271,6 +463,10 @@ public static partial class AgentActions
         AgentActionKind.DropStash => "The stash is deleted for good. The agent first checks it is still the stash shown here, and refuses if not.",
         AgentActionKind.UpdateAgent => "The agent downloads the release from GitHub itself, checks its signature and checksum, and goes back to the previous version if the new one does not report in.",
         AgentActionKind.Refresh => "Read-only: the agent rescans this one entry and reports. It fetches only if that machine has auto-fetch on.",
+        AgentActionKind.RemoveProject => "Moved to the trash, never deleted. The agent fetches and checks the project again first, and refuses if anything has changed since this was shown or it is no longer safe to remove. A linked worktree is removed with git worktree remove (no --force) instead.",
+        AgentActionKind.Clone => "Only into the folder the project was removed from, only if that folder does not exist, and only from a URL the agent itself knows as a remote of this project.",
+        AgentActionKind.CleanBuildDirs => "Deleted for good, not moved to the trash: a build or install recreates it. The agent refuses a folder that is not known build output, that git tracks files in, or that is reached through a link.",
+        AgentActionKind.PullFastForward => "Fast-forward only: no merge commit, no rebase, no reset. The agent fetches first. A checked-out branch only moves when its working tree has no uncommitted changes; any other branch is moved with git fetch, which refuses anything but a fast-forward.",
         _ => "",
     };
 
@@ -285,6 +481,10 @@ public static partial class AgentActions
         AgentActionKind.DropStash => $"Drop stash@{{{action.StashIndex}}}",
         AgentActionKind.UpdateAgent => $"Update the agent to {action.Version}",
         AgentActionKind.Refresh => $"Refresh {action.RepoPath}",
+        AgentActionKind.RemoveProject => $"Remove {action.RepoPath}",
+        AgentActionKind.Clone => $"Clone {action.Url} into {action.RepoPath}",
+        AgentActionKind.CleanBuildDirs => action.BuildDirs is { Count: 1 } ? $"Delete build output {action.BuildDirs[0]}" : $"Delete {action.BuildDirs?.Count} build folders",
+        AgentActionKind.PullFastForward => $"Fast-forward {action.Branch} from {action.Remote}",
         _ => action.Kind.ToString(),
     };
 
@@ -324,6 +524,34 @@ public static partial class AgentActions
             || (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/');
         return rooted ? null : $"{what} must be absolute.";
     }
+
+    /// <summary>
+    /// A clone URL has to look like one: a scheme git speaks, or the <c>user@host:path</c> form, or an
+    /// absolute path (a remote on a local disk). Nothing that could be read as an option, and no
+    /// <c>transport::address</c> form, which has git run a helper program. Which URLs an agent will
+    /// actually clone is decided by the agent, from what it knows itself; this only rejects nonsense.
+    /// </summary>
+    private static string? UrlProblem(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || url.Length > 2048)
+        {
+            return "The clone URL is missing or too long.";
+        }
+
+        if (url.Any(c => char.IsControl(c) || char.IsWhiteSpace(c)) || url[0] == '-' || url.Contains("::", StringComparison.Ordinal))
+        {
+            return "The clone URL is not a plain URL.";
+        }
+
+        string[] schemes = ["https://", "http://", "ssh://", "git://", "file://"];
+        var known = schemes.Any(s => url.StartsWith(s, StringComparison.OrdinalIgnoreCase))
+            || ScpLike().IsMatch(url)
+            || PathProblem(url, "url") is null;
+        return known ? null : "The clone URL is not a kind of URL the agent clones from.";
+    }
+
+    [GeneratedRegex(@"^[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^:]+$")]
+    private static partial Regex ScpLike();
 
     /// <summary>A conservative subset of <c>git check-ref-format</c>; the agent also asks git itself.</summary>
     private static string? BranchProblem(string name)

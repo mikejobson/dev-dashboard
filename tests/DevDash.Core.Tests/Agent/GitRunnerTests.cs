@@ -14,6 +14,8 @@ public class GitRunnerTests
     [InlineData("rev-parse", "--git-common-dir")]
     [InlineData("log", "-1", "--format=%H")]
     [InlineData("rev-list", "--count", "--first-parent", "origin/main")]
+    [InlineData("status", "--porcelain=v2", "--branch", "--ignored")]
+    [InlineData("submodule", "status", "--recursive")]
     public void Allows_the_read_only_commands_the_scanner_uses(params string[] args) =>
         GitRunner.EnsureReadOnly(args);
 
@@ -32,6 +34,9 @@ public class GitRunnerTests
     [InlineData("remote", "remove", "origin")]
     [InlineData("remote", "set-url", "origin", "x")]
     [InlineData("symbolic-ref", "HEAD", "refs/heads/x")]
+    [InlineData("submodule", "update", "--init")]
+    [InlineData("submodule", "foreach", "--recursive", "git clean -fdx")]
+    [InlineData("ls-remote", "--tags", "origin")] // only through ListRemoteTagsAsync, with fixed arguments
     [InlineData("gc")]
     [InlineData("rev-list", "--all")] // only the counting form
     [InlineData("rev-list", "--count")]

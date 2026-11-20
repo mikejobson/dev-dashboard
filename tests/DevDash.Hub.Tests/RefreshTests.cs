@@ -416,7 +416,7 @@ public class RefreshTests
         Assert.Contains("Rescan this repo on mac-host now", repo);
         Assert.Contains("Rescan widget on mac-host now", repo); // and the one on the machine's row
         Assert.Contains("aria-disabled=\"false\"", repo);
-        Assert.DoesNotContain("is-disabled", repo);
+        Assert.DoesNotContain("refresh-btn is-disabled", repo); // (the push button is disabled: this machine has actions off)
 
         var local = WebUtility.HtmlDecode(await factory.CreateClient().GetStringAsync("/local"));
         Assert.Contains("Rescan widget on mac-host now", local);
@@ -427,14 +427,14 @@ public class RefreshTests
         await Queue(factory).QueueAsync("mac", RefreshWidget, "me");
         repo = WebUtility.HtmlDecode(await factory.CreateClient().GetStringAsync(RepoPage));
         Assert.Contains("Refreshing on mac-host…", repo);
-        Assert.Contains("is-disabled", repo);
+        Assert.Contains("refresh-btn is-disabled", repo);
         Assert.Contains("aria-busy=\"true\"", repo);
 
         var claimed = Assert.Single(await Queue(factory).ClaimAsync("mac"));
         await Queue(factory).CompleteAsync("mac", claimed.Id, new ActionResultRequest { Succeeded = true, ExitCode = 0, Output = "Rescanned widget in 12 ms" });
         repo = WebUtility.HtmlDecode(await factory.CreateClient().GetStringAsync(RepoPage));
         Assert.Matches("Refreshed (just now|\\d+ s ago)", repo);
-        Assert.DoesNotContain("is-disabled", repo);
+        Assert.DoesNotContain("refresh-btn is-disabled", repo);
     }
 
     [Theory]

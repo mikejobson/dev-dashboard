@@ -21,7 +21,8 @@ public sealed record ActionOutcome(bool Succeeded, int? ExitCode, string Output,
 
 /// <summary>
 /// Runs one allowlisted action. The only commands that can leave here are the fixed ones in
-/// <see cref="AgentActions.GitArgs"/>: there is no path by which text from the hub becomes a command.
+/// <see cref="AgentActions.GitArgs"/> and <see cref="ProjectActions"/>: there is no path by which text
+/// from the hub becomes a command.
 /// Git is started through <see cref="GitRunner"/>, so arguments go as a list (no shell), credential
 /// prompts are off and every call has a timeout.
 /// <para>
@@ -38,13 +39,17 @@ public sealed class ActionExecutor(
     ILogger<ActionExecutor> logger,
     AgentGate? gate = null,
     AgentUpdater? updater = null,
-    RescanRequests? rescans = null)
+    RescanRequests? rescans = null,
+    ProjectActions? projects = null)
 {
     /// <summary>No background maintenance and no fsmonitor daemon as a side effect of an action.</summary>
     private static readonly string[] Prefix = ["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
 
     // Shared with auto-update, so an update never starts while an action is running, and the reverse.
     private readonly AgentGate _gate = gate ?? new AgentGate();
+
+    // Without a scanner and a trash (an agent built by hand in a test), removal is refused; the rest works.
+    private readonly ProjectActions _projects = projects ?? new ProjectActions(git, validator, options, Microsoft.Extensions.Logging.Abstractions.NullLogger<ProjectActions>.Instance);
 
     /// <summary>
     /// Refreshes: each path's top-level entry is rescanned by the scan loop (forced sizes, and a fetch
@@ -164,6 +169,22 @@ public sealed class ActionExecutor(
             {
                 logger.LogWarning("Refused push of {Branch} in {Repo}: {Reason}", action.Branch, repo, behind);
                 return Refuse(behind);
+            }
+
+            // The kinds that are more than one fixed git command: remove, clone, build output, fast-forward.
+            if (action.Kind is AgentActionKind.RemoveProject or AgentActionKind.Clone or AgentActionKind.CleanBuildDirs or AgentActionKind.PullFastForward)
+            {
+                var outcome = await _projects.RunAsync(action, stopwatch, ct).ConfigureAwait(false);
+                if (outcome.Refused)
+                {
+                    logger.LogWarning("Refused action {Kind} in {Repo}: {Reason}", action.Kind, repo, outcome.Output);
+                }
+                else
+                {
+                    logger.LogInformation("Action {Kind} in {Repo} {Outcome}", action.Kind, repo, outcome.Succeeded ? "succeeded" : "failed");
+                }
+
+                return outcome;
             }
 
             logger.LogInformation("Running action: {Command}", AgentActions.CommandLine(action));

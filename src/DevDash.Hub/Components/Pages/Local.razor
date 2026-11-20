@@ -179,11 +179,12 @@ else
                                     @foreach (var clone in clones)
                                     {
                                         var target = RefreshTargets.For(clone);
-                                        <div class="clone with-refresh" title="@clone.Entry.Path">
+                                        @* A linked worktree is listed under its main working tree, not as a repo of its own. *@
+                                        <div class="clone with-refresh @(clone.IsLinkedWorktree ? "worktree-child" : "")" title="@clone.Entry.Path">
                                             <div class="clone-state">
                                                 @if (clones.Count > 1 || clone.DisplayName != row.Name)
                                                 {
-                                                    <div class="sub mono">@clone.DisplayName</div>
+                                                    <div class="sub mono">@(clone.IsLinkedWorktree ? "↳ " : "")@clone.DisplayName</div>
                                                 }
                                                 <CloneChips Clone="clone" />
                                             </div>

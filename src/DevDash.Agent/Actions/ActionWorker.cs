@@ -192,7 +192,11 @@ public static class ActionServices
     public static IServiceCollection AddAgentActions(this IServiceCollection services)
     {
         services.AddSingleton<RescanRequests>();
+        services.AddSingleton<RemovalLog>(_ => new RemovalLog());
+        services.AddSingleton<KnownRemotes>();
+        services.AddSingleton<ITrash>(sp => Trash.ForThisMachine(sp.GetRequiredService<IOptionsMonitor<AgentOptions>>().CurrentValue.Actions));
         services.AddSingleton<ActionValidator>();
+        services.AddSingleton<ProjectActions>();
         services.AddSingleton<ActionExecutor>();
         // No client-wide timeout: a poll is held open by the hub, and ActionsClient gives every call its own deadline.
         services.AddHttpClient<ActionsClient>(c => c.Timeout = Timeout.InfiniteTimeSpan);

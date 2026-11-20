@@ -598,7 +598,7 @@ public class CleanupEngineTests
     {
         var engine = new CleanupEngine();
 
-        Assert.Equal(14, engine.Rules.Count);
+        Assert.Equal(17, engine.Rules.Count);
         Assert.Equal(engine.Rules.Count, engine.Rules.Select(r => r.Id).Distinct().Count());
         Assert.All(engine.Rules, r => Assert.False(string.IsNullOrWhiteSpace(r.Title)));
     }

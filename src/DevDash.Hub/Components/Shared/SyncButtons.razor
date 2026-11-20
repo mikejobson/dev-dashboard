@@ -1,0 +1,15 @@
+@* "Push from <machine>" and "Pull on <machine>" for the branches that are plainly ahead or behind their remote branch. *@
+@foreach (var offer in Offers)
+{
+    <ActionButton @key="(offer.Machine.MachineId, offer.RepoPath, offer.Branch, offer.Kind)" Machine="offer.Machine" Action="offer.Action"
+                  Label="@(Short ? ShortLabel(offer) : offer.Label)" What="@offer.What" BlockedBy="@offer.Blocked" Confirm="@offer.Label" />
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<SyncOffer> Offers { get; set; } = [];
+
+    /// <summary>For a row that already names the branch and the machine: just "Push ↑2" or "Pull ↓3".</summary>
+    [Parameter] public bool Short { get; set; }
+
+    private static string ShortLabel(SyncOffer offer) => offer.Kind == SyncKind.Push ? $"Push ↑{offer.Count}" : $"Pull ↓{offer.Count}";
+}

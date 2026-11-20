@@ -18,7 +18,14 @@ public enum SizeMode
 }
 
 /// <param name="ForcedFetch">Set for a refresh asked for from the dashboard: fetch now instead of when due. Needs <paramref name="AllowFetch"/>.</param>
-public sealed record ScanRequest(bool AllowFetch, SizeMode Sizes, Git.ForcedFetch? ForcedFetch = null);
+public sealed record ScanRequest(bool AllowFetch, SizeMode Sizes, Git.ForcedFetch? ForcedFetch = null)
+{
+    /// <summary>
+    /// Set by an action that has just fetched the repository itself: the scan does not fetch again, and
+    /// lists the remote's tags afresh whatever the auto-fetch setting, so the result is as current as it can be.
+    /// </summary>
+    public bool JustFetched { get; init; }
+}
 
 /// <summary>Scans the configured roots into a <see cref="MachineSnapshot"/>. Reads only, apart from optional fetches.</summary>
 public sealed class MachineScanner
@@ -28,9 +35,17 @@ public sealed class MachineScanner
     private readonly IOptionsMonitor<AgentOptions> _options;
     private readonly ILogger<MachineScanner> _logger;
     private readonly TimeProvider _time;
+    private readonly Toolchains.ToolchainService? _toolchains;
+    private readonly Dependencies.DependencyCache? _dependencies;
+    private readonly Dependencies.DependencyTargets? _dependencyTargets;
 
-    public MachineScanner(RepoScanner repos, SizeCache sizes, IOptionsMonitor<AgentOptions> options, ILogger<MachineScanner> logger, TimeProvider? time = null)
+    public MachineScanner(
+        RepoScanner repos, SizeCache sizes, IOptionsMonitor<AgentOptions> options, ILogger<MachineScanner> logger, TimeProvider? time = null,
+        Toolchains.ToolchainService? toolchains = null, Dependencies.DependencyCache? dependencies = null, Dependencies.DependencyTargets? dependencyTargets = null)
     {
+        _toolchains = toolchains;
+        _dependencies = dependencies;
+        _dependencyTargets = dependencyTargets;
         _repos = repos;
         _sizes = sizes;
         _options = options;
@@ -44,6 +59,11 @@ public sealed class MachineScanner
         var stopwatch = Stopwatch.StartNew();
         var roots = options.ResolveRoots();
         var machine = await MachineInfoProvider.GetAsync(options, ct).ConfigureAwait(false);
+        if (_toolchains is not null)
+        {
+            // Collected for the first scan after the agent starts, then reused for hours: not a cost of every scan.
+            machine = machine with { Toolchains = await _toolchains.GetAsync(ct).ConfigureAwait(false) };
+        }
 
         var targets = new List<(string Root, string Path)>();
         foreach (var root in roots)
@@ -69,6 +89,9 @@ public sealed class MachineScanner
             _sizes.Save();
         }
 
+        // The background dependency checks work through whatever the latest full scan found.
+        _dependencyTargets?.Offer(DevDash.Core.RepoIdentity.Flatten(entries).Where(e => e.Kind == EntryKind.GitRepo).Select(e => e.Path));
+
         return new MachineSnapshot
         {
             Machine = machine,
@@ -87,6 +110,7 @@ public sealed class MachineScanner
     public static IReadOnlyList<DevEntry> WithOneGraphPerRepository(IReadOnlyList<DevEntry> entries)
     {
         var carried = new HashSet<string>(StringComparer.Ordinal);
+        var carriedActivity = new HashSet<string>(StringComparer.Ordinal);
         void Collect(IEnumerable<DevEntry> list)
         {
             foreach (var entry in list)
@@ -94,6 +118,11 @@ public sealed class MachineScanner
                 if (entry.Git is { IsLinkedWorktree: false, Graph: not null, CommonDir: { } dir })
                 {
                     carried.Add(dir);
+                }
+
+                if (entry.Git is { IsLinkedWorktree: false, Activity: not null, CommonDir: { } activityDir })
+                {
+                    carriedActivity.Add(activityDir);
                 }
 
                 Collect(entry.Children);
@@ -107,6 +136,12 @@ public sealed class MachineScanner
             if (git is { IsLinkedWorktree: true, Graph: not null, CommonDir: { } dir } && !carried.Add(dir))
             {
                 git = git with { Graph = null };
+            }
+
+            // The same goes for the commits-per-day counts: one history, sent once.
+            if (git is { IsLinkedWorktree: true, Activity: not null, CommonDir: { } shared } && !carriedActivity.Add(shared))
+            {
+                git = git with { Activity = null };
             }
 
             return ReferenceEquals(git, entry.Git) && ReferenceEquals(children, entry.Children) ? entry : entry with { Git = git, Children = children };
@@ -133,6 +168,14 @@ public sealed class MachineScanner
 
         return entry;
     }
+
+    /// <summary>
+    /// Scans one folder as an entry of its own, wherever it sits under <paramref name="root"/>: a top-level
+    /// repository, or a working tree inside a worktree folder. Used to look at a project once more
+    /// before it is removed. It is not put into any snapshot.
+    /// </summary>
+    public Task<DevEntry> ScanRepoAsync(string root, string path, ScanRequest request, CancellationToken ct) =>
+        ScanEntryAsync(root, path, request, containerDepth: 0, ct);
 
     private static IEnumerable<string> TopLevel(string dir)
     {
@@ -170,7 +213,7 @@ public sealed class MachineScanner
         {
             try
             {
-                var git = await _repos.ScanAsync(path, request.AllowFetch, ct, request.ForcedFetch).ConfigureAwait(false);
+                var git = await _repos.ScanAsync(path, request.AllowFetch, ct, request.ForcedFetch, request.JustFetched).ConfigureAwait(false);
                 var stats = Walk(path, request);
                 return new DevEntry
                 {
@@ -182,6 +225,8 @@ public sealed class MachineScanner
                     Description = DescriptionReader.Read(path),
                     LastModified = stats.LastModified,
                     Size = stats.Size,
+                    Pins = _options.CurrentValue.Toolchains.Enabled ? Toolchains.PinReader.Read(path) : null,
+                    Dependencies = _options.CurrentValue.Dependencies.Enabled ? _dependencies?.HealthOf(path) : null,
                 };
             }
             catch (GitScanException ex)

@@ -1,3 +1,4 @@
+using DevDash.Contracts;
 using DevDash.Core.GitHub;
 
 namespace DevDash.Hub.Services;
@@ -89,6 +90,90 @@ public static class PrTriage
             Mine = snapshot.PullRequests.Where(p => p.Authored && !p.ReviewRequested).ToList(),
             Assigned = snapshot.PullRequests.Where(p => p.Assigned && !p.Authored && !p.ReviewRequested).ToList(),
         };
+    }
+}
+
+/// <summary>An open pull request that belongs to a branch.</summary>
+/// <param name="AtHead">
+/// True when the branch is at the very commit the pull request is at on GitHub, false when it is at
+/// another one (unpushed commits here, or newer ones there that were not fetched), null when GitHub's
+/// commit is not known.
+/// </param>
+public sealed record BranchPullRequest(PullRequestInfo PullRequest, bool? AtHead);
+
+/// <summary>
+/// Which open pull request belongs to which branch. Pure. The caller has already narrowed the pull
+/// requests to one repository (<see cref="PullRequestInfo.RepoKey"/>, as <see cref="RepoCatalog"/> does),
+/// so this only has to tell branches apart:
+/// <list type="bullet">
+/// <item>by commit: the branch is at the pull request's head commit, whatever either is called. This is
+/// the only way a pull request from a fork matches, because its branch name belongs to the fork.</item>
+/// <item>by name: the pull request's head branch is the branch's name on the remote, which is what it
+/// tracks when it tracks anything (<c>wip</c> tracking <c>origin/feature/x</c> is <c>feature/x</c>).</item>
+/// </list>
+/// </summary>
+public static class BranchPullRequests
+{
+    /// <summary>The pull requests for a local branch, the one at the same commit first.</summary>
+    /// <param name="remotes">The repository's remote names, to take <c>origin/</c> off the upstream.</param>
+    public static IReadOnlyList<BranchPullRequest> For(IEnumerable<PullRequestInfo> pullRequests, BranchInfo branch, IEnumerable<string> remotes) =>
+        For(pullRequests, RemoteName(branch, remotes), branch.Sha);
+
+    /// <summary>The pull requests for a branch known by its name on the remote and, when known, its commit.</summary>
+    public static IReadOnlyList<BranchPullRequest> For(IEnumerable<PullRequestInfo> pullRequests, string? remoteBranch, string? sha) =>
+        pullRequests
+            .Select(pr => Match(pr, remoteBranch, sha))
+            .Where(m => m is not null)
+            .Select(m => m!)
+            .OrderByDescending(m => m.AtHead == true)
+            .ThenBy(m => m.PullRequest.Number)
+            .ToList();
+
+    public static BranchPullRequest? Match(PullRequestInfo pr, string? remoteBranch, string? sha)
+    {
+        var sameCommit = SameCommit(pr.HeadSha, sha);
+        if (sameCommit == true)
+        {
+            return new BranchPullRequest(pr, true);
+        }
+
+        var sameName = !pr.IsCrossRepository && pr.HeadRef is { Length: > 0 } head && string.Equals(head, remoteBranch, StringComparison.Ordinal);
+        return sameName ? new BranchPullRequest(pr, sameCommit) : null;
+    }
+
+    /// <summary>What the branch is called on its remote: the branch it tracks, else its own name.</summary>
+    public static string RemoteName(BranchInfo branch, IEnumerable<string> remotes)
+    {
+        if (branch.Upstream is { Length: > 0 } upstream)
+        {
+            foreach (var remote in remotes.Distinct(StringComparer.Ordinal).OrderByDescending(r => r.Length))
+            {
+                if (upstream.Length > remote.Length + 1 && upstream.StartsWith(remote + "/", StringComparison.Ordinal))
+                {
+                    return upstream[(remote.Length + 1)..];
+                }
+            }
+        }
+
+        return branch.Name;
+    }
+
+    /// <summary>Null when either commit is unknown. An abbreviated id matches the full one it starts.</summary>
+    public static bool? SameCommit(string? a, string? b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+        {
+            return null;
+        }
+
+        if (a.Length == b.Length || a.Length < 7 || b.Length < 7)
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return a.Length < b.Length
+            ? b.StartsWith(a, StringComparison.OrdinalIgnoreCase)
+            : a.StartsWith(b, StringComparison.OrdinalIgnoreCase);
     }
 }
 

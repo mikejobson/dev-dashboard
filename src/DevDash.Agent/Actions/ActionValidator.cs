@@ -10,7 +10,7 @@ namespace DevDash.Agent.Actions;
 /// the repository must be one this agent scans, and every name and path in the action is checked
 /// against the repository as it is right now. All of the checks are read-only.
 /// </summary>
-public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions> options)
+public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions> options, RemovalLog? removals = null, KnownRemotes? knownRemotes = null)
 {
     private static readonly string[] ConventionalDefaults = ["main", "master", "develop", "trunk"];
 
@@ -30,6 +30,12 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return "Not a repository action.";
         }
 
+        // A clone is the one action whose path must not exist yet, so it has checks of its own.
+        if (action.Kind == AgentActionKind.Clone)
+        {
+            return CloneRefusal(action);
+        }
+
         if (await RepoRefusalAsync(repoPath, ct).ConfigureAwait(false) is { } repo)
         {
             return repo;
@@ -42,6 +48,9 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             AgentActionKind.Push => await PushRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.DropStash => await DropStashRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.PruneWorktrees or AgentActionKind.Fetch => null,
+            AgentActionKind.RemoveProject => RemoveProjectRefusal(action),
+            AgentActionKind.CleanBuildDirs => await CleanBuildDirsRefusalAsync(action, ct).ConfigureAwait(false),
+            AgentActionKind.PullFastForward => await PullRefusalAsync(action, ct).ConfigureAwait(false),
             _ => "Unknown action kind.",
         };
     }
@@ -80,7 +89,7 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
     /// The path must be the top of a git working tree, inside a configured scan root, at a depth the
     /// scanner looks at (a top-level entry, or a child of a worktree folder).
     /// </summary>
-    private async Task<string?> RepoRefusalAsync(string repoPath, CancellationToken ct)
+    internal async Task<string?> RepoRefusalAsync(string repoPath, CancellationToken ct)
     {
         if (!Path.IsPathFullyQualified(repoPath) || PathSafety.HasDotSegments(repoPath))
         {
@@ -189,6 +198,176 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
         }
 
         return await BranchRefusalAsync(action.RepoPath!, action.Branch!, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What can be said before looking inside: the folder itself must be a real folder, not a link to
+    /// one. Whether it is safe to remove is decided afterwards, from a fresh scan (<see cref="ProjectActions"/>).
+    /// </summary>
+    private static string? RemoveProjectRefusal(AgentAction action)
+    {
+        var info = new DirectoryInfo(action.RepoPath!);
+        return (info.Attributes & FileAttributes.ReparsePoint) != 0 || info.LinkTarget is not null
+            ? $"{action.RepoPath} is a link to a folder, not a folder."
+            : null;
+    }
+
+    /// <summary>
+    /// A clone goes into a folder that does not exist, straight under a scan root (or inside a worktree
+    /// folder there), and comes from a URL this agent knows itself: one a project it removed from that
+    /// very folder had, or one a repository in its last scan has. The hub cannot name any other.
+    /// </summary>
+    private string? CloneRefusal(AgentAction action)
+    {
+        var path = action.RepoPath!;
+        if (!Path.IsPathFullyQualified(path) || PathSafety.HasDotSegments(path))
+        {
+            return "The clone path is not a plain absolute path.";
+        }
+
+        var current = options.CurrentValue;
+        var parent = Path.GetDirectoryName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
+        {
+            return $"The folder {path} would go in does not exist.";
+        }
+
+        var resolved = PathSafety.Resolve(path);
+        var root = current.ResolveRoots().Select(PathSafety.Resolve).FirstOrDefault(r => PathSafety.IsInside(r, resolved));
+        if (root is null)
+        {
+            return $"{path} is outside this agent's scan roots.";
+        }
+
+        var below = PathSafety.SegmentsBelow(root, resolved);
+        if (below.Length > 1 + Math.Max(0, current.WorktreeContainerDepth) || below.Any(s => s.StartsWith('.')))
+        {
+            return $"{path} is not where this agent scans for repositories.";
+        }
+
+        // Exists covers files and folders; the link check covers a link that points nowhere.
+        if (Path.Exists(path) || new FileInfo(path).LinkTarget is not null)
+        {
+            return $"{path} already exists. The agent only clones into a folder that is not there.";
+        }
+
+        if (Directory.Exists(Path.Combine(parent, ".git")) || File.Exists(Path.Combine(parent, ".git")))
+        {
+            return $"{parent} is itself a repository; the agent does not clone inside one.";
+        }
+
+        var url = action.Url!;
+        return removals?.Allows(path, url) == true || knownRemotes?.Contains(url) == true
+            ? null
+            : "This agent does not know that URL: it is not a remote of a project it removed from that folder, nor of a repository it scans. Clone it by hand.";
+    }
+
+    /// <summary>
+    /// Every folder must be build output by the scanner's own rule (its name, and for the ambiguous names
+    /// the manifest beside it), really inside the repository with no link anywhere on the way, and hold
+    /// nothing git tracks.
+    /// </summary>
+    private async Task<string?> CleanBuildDirsRefusalAsync(AgentAction action, CancellationToken ct)
+    {
+        var repo = Path.GetFullPath(action.RepoPath!);
+        var resolvedRepo = PathSafety.Resolve(repo);
+        var roots = options.CurrentValue.ResolveRoots().Select(PathSafety.Resolve).ToList();
+        foreach (var dir in action.BuildDirs!)
+        {
+            if (!Path.IsPathFullyQualified(dir) || PathSafety.HasDotSegments(dir))
+            {
+                return $"{dir} is not a plain absolute path.";
+            }
+
+            var full = Path.GetFullPath(dir);
+            if (!PathSafety.IsInside(repo, full))
+            {
+                return $"{dir} is not inside {action.RepoPath}.";
+            }
+
+            var segments = PathSafety.SegmentsBelow(repo, full);
+            if (segments.Any(s => s.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+            {
+                return $"{dir} is inside git's own folder.";
+            }
+
+            // Every step from the repository down to the folder must be a real folder. A link could lead anywhere.
+            var step = repo;
+            foreach (var segment in segments)
+            {
+                step = Path.Combine(step, segment);
+                var info = new DirectoryInfo(step);
+                if (!info.Exists)
+                {
+                    return $"{dir} does not exist (it may already have been deleted).";
+                }
+
+                if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.LinkTarget is not null)
+                {
+                    return $"{dir} is reached through a link ({step}), so the agent leaves it alone.";
+                }
+            }
+
+            var resolved = PathSafety.Resolve(full);
+            if (!PathSafety.IsInside(resolvedRepo, resolved) || !roots.Any(r => PathSafety.IsInside(r, resolved)))
+            {
+                return $"{dir} is not really inside {action.RepoPath}.";
+            }
+
+            var parent = Path.GetDirectoryName(full)!;
+            var name = segments[^1];
+            HashSet<string> siblings;
+            try
+            {
+                siblings = Directory.EnumerateFileSystemEntries(parent).Select(e => Path.GetFileName(e)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return $"Could not read {parent}: {ex.Message}";
+            }
+
+            if (!DevDash.Core.BuildOutput.IsReclaimable(name, siblings))
+            {
+                return $"{dir} is not a build folder the agent knows (node_modules, .venv, a framework cache such as .next or .angular, or bin/obj/target/dist beside the project file that produces them).";
+            }
+
+            // Asked from the folder's parent, so a folder inside a submodule is checked against the submodule.
+            var tracked = await git.RunAsync(parent, ["ls-files", "--", name], Timeout, ct).ConfigureAwait(false);
+            if (!tracked.Ok)
+            {
+                return $"Could not ask git what it tracks in {dir}: {tracked.StdErr.Trim()}";
+            }
+
+            if (tracked.StdOut.Trim().Length > 0)
+            {
+                return $"git tracks files in {dir}, so it is not just build output.";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The branch must exist and track the branch of the same name on the named remote. Whether moving
+    /// it would be a fast-forward is checked after the fetch (<see cref="ProjectActions"/>).
+    /// </summary>
+    private async Task<string?> PullRefusalAsync(AgentAction action, CancellationToken ct)
+    {
+        if (await PushRefusalAsync(action, ct).ConfigureAwait(false) is { } problem)
+        {
+            return problem;
+        }
+
+        var upstream = await git.RunAsync(action.RepoPath!, ["for-each-ref", "--format=%(upstream:short)", $"refs/heads/{action.Branch}"], Timeout, ct).ConfigureAwait(false);
+        var tracks = upstream.StdOut.Trim();
+        if (!upstream.Ok || tracks.Length == 0)
+        {
+            return $"{action.Branch} has no upstream to pull from.";
+        }
+
+        return tracks == $"{action.Remote}/{action.Branch}"
+            ? null
+            : $"{action.Branch} tracks {tracks}, not {action.Remote}/{action.Branch}. The agent only fast-forwards a branch from the branch of the same name.";
     }
 
     private async Task<string?> DropStashRefusalAsync(AgentAction action, CancellationToken ct)

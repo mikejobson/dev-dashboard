@@ -41,6 +41,7 @@ services:
       Auth__AllowedUsers: ${DEVDASH_ALLOWED_USERS:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GitHub__Enabled: ${GITHUB_ENABLED:-true}
+      Hub__PublicUrl: ${DEVDASH_PUBLIC_URL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       TZ: ${TZ:-UTC}
     volumes:

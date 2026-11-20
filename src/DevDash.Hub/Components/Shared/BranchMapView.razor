@@ -12,7 +12,7 @@
                 @if (_map.MergedBranches > 0)
                 {
                     <button type="button" class="toggle @(_hideMerged ? "on" : "")" aria-pressed="@(_hideMerged ? "true" : "false")" @onclick="ToggleMerged"
-                            title="Branches already merged into the default branch">@(_hideMerged ? "Show" : "Hide") @Fmt.Count(_map.MergedBranches, "merged branch", "merged branches")</button>
+                            title="Branches already merged into @(_map.TrunkName ?? "the default branch")">@(_hideMerged ? "Show" : "Hide") @Fmt.Count(_map.MergedBranches, "merged branch", "merged branches")</button>
                 }
                 @if (_map.HasFolds)
                 {
@@ -38,6 +38,14 @@
             <div class="bm-warning @(warning.Diverged ? "diverged" : "")">
                 <span class="bm-warning-mark">@(warning.Diverged ? "⚠" : "↕")</span>
                 <span><span class="mono">@warning.Branch</span> @(warning.Diverged ? warning.Text : "is not at the same commit everywhere: " + warning.Text)</span>
+            </div>
+        }
+
+        @if (_sync.Count > 0)
+        {
+            <div class="bm-sync" role="group" aria-label="Sync">
+                <span class="muted small">Sync</span>
+                <SyncButtons Offers="_sync" />
             </div>
         }
 
@@ -102,12 +110,7 @@
                                         }
                                         @foreach (var pr in row.PullRequests)
                                         {
-                                            <a class="bm-ref pr" href="@pr.Url" target="_blank" rel="noopener" title="@PrTitle(pr)" @onclick:stopPropagation="true">
-                                                <span class="dot @CiClass(pr)"></span>#@pr.Number
-                                                @if (pr.IsDraft) { <span class="bm-ref-n">draft</span> }
-                                                else if (pr.ReviewDecision == "APPROVED") { <span class="bm-ref-n ok">approved</span> }
-                                                else if (pr.ReviewDecision == "CHANGES_REQUESTED") { <span class="bm-ref-n gone">changes</span> }
-                                            </a>
+                                            <PrChip PullRequest="pr" ShowTitle="true" AtHead="BranchPullRequests.SameCommit(pr.HeadSha, row.Commit!.Sha)" />
                                         }
                                         @foreach (var group in row.Stashes.GroupBy(s => s.Source))
                                         {
@@ -215,6 +218,14 @@
                 <span><svg viewBox="0 0 20 20"><circle class="head c0" cx="10" cy="10" r="8" /><circle class="n c0" cx="10" cy="10" r="4.5" /></svg>checked out</span>
                 <span><svg viewBox="0 0 14 14"><circle class="n c0 ghost" cx="7" cy="7" r="4.5" /></svg>uncommitted changes</span>
                 <span class="bm-p"><i class="c0 local"></i>local <i class="c0 fetched"></i>fetched only</span>
+                @if (_map.HasJoinLinks)
+                {
+                    <span><svg viewBox="0 0 14 14"><path class="l cs dash" d="M1 7H13" /></svg>merged there, through commits not shown</span>
+                }
+                @if (PullRequests.Count > 0)
+                {
+                    <span><span class="dot ok"></span><span class="dot warn"></span><span class="dot danger"></span>pull request: CI passing, running, failing</span>
+                }
             </div>
         }
 
@@ -240,7 +251,7 @@
                 Not on any device:
                 @foreach (var pr in _map.UnplacedPullRequests.Take(8))
                 {
-                    <a class="bm-ref pr" href="@pr.Url" target="_blank" rel="noopener" title="@PrTitle(pr)"><span class="dot @CiClass(pr)"></span>#@pr.Number <span class="bm-ref-n mono">@pr.HeadRef</span></a>
+                    <PrChip PullRequest="pr" ShowBranch="true" />
                 }
                 @if (_map.UnplacedPullRequests.Count > 8) { <span>and @(_map.UnplacedPullRequests.Count - 8) more</span> }
             </p>
@@ -279,6 +290,9 @@
     [Parameter] public string? Name { get; set; }
 
     private BranchMap _map = new();
+
+    /// <summary>Where a push or a fast-forward pull would bring a device level with the remote.</summary>
+    private IReadOnlyList<SyncOffer> _sync = [];
     private readonly HashSet<string> _hidden = [];
     private readonly HashSet<string> _expanded = [];
     private bool? _hideMergedChoice;
@@ -289,7 +303,11 @@
 
     private int GraphWidth => Pad * 2 + Math.Max(0, _map.LaneCount - 1) * LaneWidth;
 
-    protected override void OnParametersSet() => Rebuild();
+    protected override void OnParametersSet()
+    {
+        _sync = SyncOffers.For(Clones);
+        Rebuild();
+    }
 
     private void Rebuild()
     {
@@ -475,21 +493,6 @@
         }
 
         return text;
-    }
-
-    private static string CiClass(PullRequestInfo pr) => pr.Ci switch
-    {
-        CiState.Success => "ok",
-        CiState.Failure => "danger",
-        CiState.Pending => "warn",
-        _ => "",
-    };
-
-    private static string PrTitle(PullRequestInfo pr)
-    {
-        var state = pr.Ci switch { CiState.Success => "CI passing", CiState.Failure => "CI failing", CiState.Pending => "CI running", _ => null };
-        string?[] parts = [$"#{pr.Number} {pr.Title}", pr.IsDraft ? "draft" : null, state, pr.ReviewDecision?.Replace('_', ' ').ToLowerInvariant(), pr.Mergeable == "CONFLICTING" ? "conflicts" : null];
-        return string.Join(" · ", parts.Where(p => p is not null));
     }
 
     private string StashTitle(IGrouping<int, MapStash> group) =>

@@ -2,12 +2,16 @@ using System.Text.Json;
 using DevDash.Contracts;
 using DevDash.Core;
 using DevDash.Core.Cleanup;
+using DevDash.Core.Safety;
 using DevDash.Hub.Data;
 using DevDash.Hub.Updates;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace DevDash.Hub.Services;
+
+/// <summary>Whether an action can be offered for a machine, and the hint to show on a disabled button when it cannot.</summary>
+public sealed record ActionAvailability(bool Available, string? WhyNot);
 
 public sealed record QueueOutcome(AgentActionEntity? Action, string? Error)
 {
@@ -29,6 +33,13 @@ public sealed record QueueOutcome(AgentActionEntity? Action, string? Error)
 /// reported update mode is notify or auto. Neither set of switches affects the other kind.
 /// A refresh (<see cref="AgentActionKind.Refresh"/>) is a third kind with no switch: it is read-only,
 /// so it only needs an agent that says it takes them (<see cref="RefreshGate"/>).
+/// </para>
+/// <para>
+/// The kinds added in 0.6.0 (remove a project, clone it back, delete build output, fast-forward) are
+/// git actions with one more condition: the agent must say it knows the kind
+/// (<see cref="AgentActions.Accepts"/>). The hub also checks each against its own snapshot before
+/// queueing (<see cref="RemoveRefusal"/>, <see cref="CloneRefusalAsync"/>), and settles the
+/// removed-projects list when a removal or a clone finishes.
 /// </para>
 /// </summary>
 public sealed class ActionQueue(
@@ -61,7 +72,8 @@ public sealed class ActionQueue(
     {
         AgentActionKind.UpdateAgent => UpdateOptions.Enabled && AgentUpdateModes.AcceptsRequests(machine.Machine.UpdateMode),
         AgentActionKind.Refresh => RefreshGate.WhyUnsupported(machine.Machine) is null,
-        _ => Options.Enabled && machine.Machine.ActionsEnabled,
+        // Includes "new enough to know the kind": an older agent could not even read a claim that names it.
+        _ => Options.Enabled && AgentActions.Accepts(machine.Machine, kind),
     };
 
     /// <summary>
@@ -73,6 +85,31 @@ public sealed class ActionQueue(
         && machineId is not null
         && snapshots.Get(machineId) is { Machine.ActionsEnabled: true } machine
         && snapshots.IsOnline(machine);
+
+    /// <summary>As <see cref="CanRun(string?)"/>, for one kind of action: the machine's agent must also know that kind.</summary>
+    public bool CanRun(string? machineId, AgentActionKind kind) =>
+        CanRun(machineId) && snapshots.Get(machineId!) is { } machine && Allows(machine, kind);
+
+    /// <summary>
+    /// Whether an action of a kind can be offered for a machine right now, and what to say when it cannot:
+    /// the hub's switch, the agent's switch, the agent's version, or the machine being offline.
+    /// </summary>
+    public ActionAvailability Availability(MachineView machine, AgentActionKind kind)
+    {
+        if (!Options.Enabled)
+        {
+            return new ActionAvailability(false, "Agent actions are switched off on this hub.");
+        }
+
+        if (AgentActions.WhyNotAccepted(machine.Machine, kind) is { } why)
+        {
+            return new ActionAvailability(false, why);
+        }
+
+        return snapshots.IsOnline(machine)
+            ? new ActionAvailability(true, null)
+            : new ActionAvailability(false, $"{machine.Machine.Hostname} is offline.");
+    }
 
     public IReadOnlySet<string> RunnableMachines() =>
         snapshots.Machines.Where(m => CanRun(m.MachineId)).Select(m => m.MachineId).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -126,6 +163,12 @@ public sealed class ActionQueue(
             return new QueueOutcome(null, problem);
         }
 
+        // An agent from before the kind existed could not read the request, so it is never sent one.
+        if (!isUpdate && !isRefresh && AgentActions.WhyNotAccepted(machine.Machine, action!.Kind) is { } tooOld)
+        {
+            return new QueueOutcome(null, tooOld);
+        }
+
         if (isUpdate)
         {
             // The hub only ever asks for the release it currently sees as latest, and only as a step forward.
@@ -152,12 +195,40 @@ public sealed class ActionQueue(
                 return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports anything at {action!.RepoPath}.");
             }
         }
-        else if (!ReportedRepoPaths(machine.Snapshot).Contains(action!.RepoPath!))
+        else if (action!.Kind == AgentActionKind.Clone)
+        {
+            // The agent decides for itself which URLs it will clone. This is the hub's own, separate, check.
+            if (await CloneRefusalAsync(machine, action, ct) is { } noClone)
+            {
+                return new QueueOutcome(null, noClone);
+            }
+        }
+        else if (!ReportedRepoPaths(machine.Snapshot).Contains(action.RepoPath!))
         {
             return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports a repository at {action.RepoPath}.");
         }
 
         var now = time.GetUtcNow();
+        CloneSafety? removing = null;
+        if (action.Kind == AgentActionKind.RemoveProject)
+        {
+            // Assessed again here, from the snapshot as it is now: a page that has been open a while cannot remove something that has changed.
+            removing = RepoSafety.AssessAll(machine.Snapshot, now).FirstOrDefault(c => c.Entry.Path == action.RepoPath);
+            if (RemoveRefusal(machine, action, removing) is { } noRemove)
+            {
+                return new QueueOutcome(null, noRemove);
+            }
+        }
+        else if (action.Kind == AgentActionKind.CleanBuildDirs)
+        {
+            var known = RepoIdentity.Flatten(machine.Snapshot.Entries)
+                .FirstOrDefault(e => e.Path == action.RepoPath && e.Kind == EntryKind.GitRepo)?.Size?.ReclaimableDirs.Select(d => d.Path).ToHashSet(StringComparer.Ordinal);
+            if (known is null || action.BuildDirs!.Any(d => !known.Contains(d)))
+            {
+                return new QueueOutcome(null, $"{machine.Machine.Hostname} does not report that build output in {action.RepoPath} any more.");
+            }
+        }
+
         var json = AgentActions.Key(action);
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
@@ -187,6 +258,29 @@ public sealed class ActionQueue(
         };
         db.AgentActions.Add(entity);
         await db.SaveChangesAsync(ct);
+
+        // The tombstone is written now, while the snapshot still knows the project's remotes, and
+        // confirmed when the agent reports it done. A linked worktree gets none: it is not cloned back.
+        if (removing is { Safety.IsLinkedWorktree: false, Entry.Git: { } git })
+        {
+            db.RemovedProjects.Add(new RemovedProjectEntity
+            {
+                MachineId = machine.MachineId,
+                MachineName = machine.Machine.Hostname,
+                Path = removing.Entry.Path,
+                Name = removing.Entry.Name,
+                RepoKey = removing.RepoKey,
+                RemotesJson = JsonSerializer.Serialize(git.Remotes, SnapshotSchema.JsonOptions),
+                DefaultBranch = git.DefaultBranch,
+                Branch = git.Branch,
+                HeadSha = git.HeadSha,
+                SizeBytes = removing.Safety.FreedBytes,
+                ActionId = entity.Id,
+                RemovedBy = entity.QueuedBy,
+                QueuedAt = now,
+            });
+            await db.SaveChangesAsync(ct);
+        }
 
         // Refreshes are trimmed on their own, shorter, leash: clicking Refresh a lot must not push
         // the record of a deleted branch or an agent update out of the audit trail.
@@ -328,6 +422,7 @@ public sealed class ActionQueue(
             return false;
         }
 
+        await SettleTombstonesAsync(db, id, result.Succeeded, now, ct);
         logger.LogInformation("Action {Id} on {Machine} {Status} (exit {Exit})", id, owner, status, result.ExitCode);
         notifier.Notify(DashboardChange.Actions);
         return true;
@@ -337,8 +432,13 @@ public sealed class ActionQueue(
     public async Task<int> ExpireStaleAsync(CancellationToken ct = default)
     {
         var now = time.GetUtcNow();
-        var gitLease = TimeSpan.FromMinutes(Math.Max(1, Options.LeaseMinutes));
-        var updateLease = TimeSpan.FromMinutes(Math.Max(1, UpdateOptions.LeaseMinutes));
+        var failed = new List<int>();
+        TimeSpan LeaseOf(AgentActionKind kind) => TimeSpan.FromMinutes(Math.Max(1, kind switch
+        {
+            AgentActionKind.UpdateAgent => UpdateOptions.LeaseMinutes,
+            AgentActionKind.Clone => Math.Max(Options.CloneLeaseMinutes, Options.LeaseMinutes),
+            _ => Options.LeaseMinutes,
+        }));
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var open = await db.AgentActions.AsNoTracking()
@@ -350,6 +450,7 @@ public sealed class ActionQueue(
         {
             if (row.Status == AgentActionStatus.Queued && row.ExpiresAt <= now)
             {
+                failed.Add(row.Id);
                 changed += await db.AgentActions
                     .Where(a => a.Id == row.Id && a.Status == AgentActionStatus.Queued)
                     .ExecuteUpdateAsync(s => s
@@ -357,8 +458,9 @@ public sealed class ActionQueue(
                         .SetProperty(a => a.CompletedAt, now)
                         .SetProperty(a => a.Output, "The agent did not pick this up in time, so it was not run."), ct);
             }
-            else if (row.Status == AgentActionStatus.Claimed && row.ClaimedAt + (row.Kind == AgentActionKind.UpdateAgent ? updateLease : gitLease) <= now)
+            else if (row.Status == AgentActionStatus.Claimed && row.ClaimedAt + LeaseOf(row.Kind) <= now)
             {
+                failed.Add(row.Id);
                 changed += await db.AgentActions
                     .Where(a => a.Id == row.Id && a.Status == AgentActionStatus.Claimed)
                     .ExecuteUpdateAsync(s => s
@@ -366,6 +468,12 @@ public sealed class ActionQueue(
                         .SetProperty(a => a.CompletedAt, now)
                         .SetProperty(a => a.Output, "The agent took this action but never reported a result. It may or may not have run; it will not be retried."), ct);
             }
+        }
+
+        // A removal that expired, or whose result never came, leaves no tombstone: nothing says it happened.
+        if (failed.Count > 0)
+        {
+            await db.RemovedProjects.Where(r => failed.Contains(r.ActionId) && r.RemovedAt == null).ExecuteDeleteAsync(ct);
         }
 
         if (changed > 0)
@@ -429,6 +537,91 @@ public sealed class ActionQueue(
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// What a finished action means for the removed-projects list: a removal that worked confirms its
+    /// tombstone, one that did not drops it, and a clone that worked ends the tombstone for that folder.
+    /// </summary>
+    private static async Task SettleTombstonesAsync(DevDashDbContext db, int actionId, bool succeeded, DateTimeOffset now, CancellationToken ct)
+    {
+        if (await db.AgentActions.AsNoTracking().FirstOrDefaultAsync(a => a.Id == actionId, ct) is not { } row)
+        {
+            return;
+        }
+
+        if (row.Kind == AgentActionKind.RemoveProject)
+        {
+            if (succeeded)
+            {
+                // An older tombstone for the same folder is replaced by this one.
+                await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.Path == row.RepoPath && r.ActionId != actionId).ExecuteDeleteAsync(ct);
+                await db.RemovedProjects.Where(r => r.ActionId == actionId).ExecuteUpdateAsync(s => s.SetProperty(r => r.RemovedAt, now), ct);
+            }
+            else
+            {
+                await db.RemovedProjects.Where(r => r.ActionId == actionId).ExecuteDeleteAsync(ct);
+            }
+        }
+        else if (row.Kind == AgentActionKind.Clone && succeeded)
+        {
+            await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.Path == row.RepoPath).ExecuteDeleteAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Why the hub will not ask for this removal, or null. The same rule the agent applies again after
+    /// its own fetch and scan: safe, or safe with every caveat acknowledged, and unchanged since it was shown.
+    /// </summary>
+    private static string? RemoveRefusal(MachineView machine, AgentAction action, CloneSafety? assessed)
+    {
+        if (assessed is null)
+        {
+            return $"{machine.Machine.Hostname} no longer reports a repository at {action.RepoPath}.";
+        }
+
+        var safety = assessed.Safety;
+        if (!safety.IsRemovable)
+        {
+            return $"{action.RepoPath} is not safe to remove: {string.Join("; ", safety.Reasons.Select(r => r.Text))}.";
+        }
+
+        if (safety.Fingerprint != action.ExpectedFingerprint)
+        {
+            return $"{action.RepoPath} has changed since this page was drawn. Look at it again before removing it.";
+        }
+
+        var acknowledged = (action.AcknowledgedCaveats ?? []).ToHashSet(StringComparer.Ordinal);
+        return safety.Caveats.SelectMany(c => c.Names).Any(n => !acknowledged.Contains(n))
+            ? $"{action.RepoPath} has ignored files that have not been acknowledged."
+            : null;
+    }
+
+    /// <summary>
+    /// Why the hub will not ask for this clone, or null. It must put back a project this hub saw removed
+    /// from that folder on that machine, the folder must be free, and the URL must be one of that
+    /// project's remotes: recorded with the removal, or reported now by a machine that still has the repo.
+    /// </summary>
+    private async Task<string?> CloneRefusalAsync(MachineView machine, AgentAction action, CancellationToken ct)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var tombstone = await db.RemovedProjects.AsNoTracking()
+            .Where(r => r.MachineId == machine.MachineId && r.Path == action.RepoPath && r.RemovedAt != null)
+            .OrderByDescending(r => r.Id)
+            .FirstOrDefaultAsync(ct);
+        if (tombstone is null)
+        {
+            return $"Nothing was removed from {action.RepoPath} on {machine.Machine.Hostname}, so there is nothing to clone back.";
+        }
+
+        if (RepoIdentity.Flatten(machine.Snapshot.Entries).Any(e => e.Path == action.RepoPath))
+        {
+            return $"{machine.Machine.Hostname} reports something at {action.RepoPath} again.";
+        }
+
+        return TombstoneStore.AllowedUrls(tombstone, snapshots.Machines).Contains(action.Url!, StringComparer.Ordinal)
+            ? null
+            : "That URL is not a remote of the project that was removed.";
     }
 
     public static string Wire(int id) => id.ToString(System.Globalization.CultureInfo.InvariantCulture);

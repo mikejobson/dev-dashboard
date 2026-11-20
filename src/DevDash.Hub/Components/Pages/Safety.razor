@@ -1,0 +1,542 @@
+@page "/safety"
+@inherits LivePage
+@inject SafetyService SafetyRows
+@inject SnapshotStore Snapshots
+@inject NavigationManager Nav
+@inject ActionBoard Actions
+@inject TombstoneStore Tombstones
+@inject IOptionsMonitor<HubOptions> Options
+
+<PageTitle>Safety · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Safety</h1>
+        <p>What exists only on one machine, and what could be deleted without losing anything.</p>
+    </div>
+    <span class="muted small">@Fmt.Count(_rows.Count, "working tree") on @Fmt.Count(_machines, "machine")</span>
+</div>
+
+@if (_machines == 0)
+{
+    <div class="card empty">No machine has reported yet.</div>
+}
+else
+{
+    @if (_oldAgents.Count > 0)
+    {
+        <div class="banner info">
+            @string.Join(", ", _oldAgents) @(_oldAgents.Count == 1 ? "runs" : "run") an agent that does not report tags, ignored files or submodules yet,
+            so nothing there is listed as safe to remove. <a href="machines">Update on the Machines page →</a>
+        </div>
+    }
+
+    <h2 id="at-risk">At risk <span class="muted small">@_atRisk.Count</span></h2>
+    <div class="toolbar">
+        <span class="muted small">Work that exists only on one machine: a lost or wiped disk loses it.</span>
+        <span class="seg safety-seg" role="group" aria-label="Group by">
+            <a class="seg-btn @(Grouping == SafetyGrouping.Machine ? "on" : "")" href="@Url(SafetyGrouping.Machine, Sorting)">By machine</a>
+            <a class="seg-btn @(Grouping == SafetyGrouping.Repo ? "on" : "")" href="@Url(SafetyGrouping.Repo, Sorting)">By repo</a>
+        </span>
+        <span class="seg" role="group" aria-label="Sort by">
+            <a class="seg-btn @(Sorting == SafetySort.Age ? "on" : "")" href="@Url(Grouping, SafetySort.Age)" title="The work that has been unpushed longest first">Oldest first</a>
+            <a class="seg-btn @(Sorting == SafetySort.Severity ? "on" : "")" href="@Url(Grouping, SafetySort.Severity)" title="Commits on no remote, then uncommitted changes and stashes, then untracked files">Most severe first</a>
+        </span>
+    </div>
+
+    @if (_atRisk.Count == 0)
+    {
+        <div class="card empty">Nothing is at risk: every commit, change and stash is somewhere else too.</div>
+    }
+    else
+    {
+        @foreach (var group in SafetyView.Group(_atRisk, Grouping))
+        {
+            <section class="safety-group" @key="group.Key">
+                <h3>
+                    @if (Grouping == SafetyGrouping.Repo)
+                    {
+                        <a class="title-link mono" href="@Fmt.RepoUrl(group.Key)">@group.Title</a>
+                    }
+                    else
+                    {
+                        <span>@group.Title</span>
+                    }
+                    <span class="muted small">@Fmt.Count(group.Rows.Count, "working tree")</span>
+                </h3>
+                <div class="table-wrap">
+                    <table class="stack safety-table">
+                        <thead>
+                            <tr><th>@(Grouping == SafetyGrouping.Repo ? "Machine" : "Repo")</th><th>Only here</th><th class="right">Oldest</th><th class="right">Last touched</th><th class="right">Size</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in group.Rows)
+                            {
+                                <tr @key="(row.Machine.MachineId, row.Entry.Path)">
+                                    @Where(row, Grouping == SafetyGrouping.Repo)
+                                    <td data-label="Only here">@Reasons(row.Safety.Reasons)</td>
+                                    <td data-label="Oldest" class="right nowrap sub @(row.Safety.OldestRiskAt is null ? "blank" : "")" title="@Fmt.Date(row.Safety.OldestRiskAt)">@(row.Safety.OldestRiskAt is { } oldest ? RepoSafety.Age(Now, oldest) : "")</td>
+                                    <td data-label="Last touched" class="cell-when right nowrap sub" title="@Fmt.Date(row.Safety.LastTouchedAt)">@Fmt.Ago(row.Safety.LastTouchedAt, Now)</td>
+                                    <td data-label="Size" class="right nowrap sub @(row.Safety.TotalBytes is null ? "blank" : "")">@Fmt.Size(row.Safety.TotalBytes)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    }
+
+    <h2 id="safe">Safe to remove <span class="muted small">@_removable.Count</span></h2>
+    <div class="toolbar">
+        <span class="muted small">
+            Clean, and everything in them is on a remote or can be rebuilt. The longest untouched come first.
+            @if (_removable.Count > 0)
+            {
+                <span>Removing all @_removable.Count would free <strong>@Fmt.Size(_removable.Sum(r => r.FreedBytes))</strong>.</span>
+            }
+        </span>
+        @* Only the plainly safe ones: a project with caveats is removed on its own, with each caveat ticked. *@
+        <span class="safety-actions">
+            @if (_bulk.Count > 0)
+            {
+                <button type="button" class="danger" title="Move every project that is plainly safe to the trash on its machine. You see the list and confirm first." @onclick="() => AskAsync(_bulk)">Remove @Fmt.Count(_bulk.Count, "safe project")</button>
+            }
+            else if (_removable.Count > 0)
+            {
+                <span class="muted small" title="@BulkWhyNot">Nothing can be removed from here right now.</span>
+            }
+        </span>
+    </div>
+
+    @if (_removable.Count == 0)
+    {
+        <div class="card empty">Nothing is known to be safe to remove.</div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="stack safety-table">
+                <thead>
+                    <tr><th>Repo</th><th>State</th><th class="right">Last touched</th><th class="right">Frees</th><th></th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in _removable)
+                    {
+                        <tr @key="(row.Machine.MachineId, row.Entry.Path)">
+                            @Where(row, false, showMachine: true)
+                            <td data-label="State">
+                                <div>
+                                    <SafetyBadge Safety="row.Safety" />
+                                    @if (row.Safety.Verdict == SafetyVerdict.SafeWithCaveats)
+                                    {
+                                        @Reasons(row.Safety.Reasons)
+                                        <div class="sub">Deleted with the folder, so it needs a look first.</div>
+                                    }
+                                </div>
+                            </td>
+                            <td data-label="Last touched" class="cell-when right nowrap sub" title="@Fmt.Date(row.Safety.LastTouchedAt)">@Fmt.Ago(row.Safety.LastTouchedAt, Now)</td>
+                            <td data-label="Frees" class="right nowrap @(row.Safety.FreedBytes is null ? "sub" : "")">
+                                @(row.Safety.FreedBytes is { } freed ? Fmt.Size(freed) : "not measured")
+                                @if (row.Safety.ReclaimableBytes is > 0 and var build)
+                                {
+                                    <div class="sub" title="Build output that can be regenerated">@Fmt.Size(build) build output</div>
+                                }
+                            </td>
+                            <td class="right cell-buttons safety-actions">
+                                @{
+                                    var can = Actions.For(row.Machine, AgentActionKind.RemoveProject);
+                                    var status = StatusOf(row);
+                                }
+                                @if (!status.InFlight)
+                                {
+                                    <button type="button" class="danger @(can.Available ? "" : "is-disabled")" aria-disabled="@(can.Available ? "false" : "true")"
+                                            title="@(can.WhyNot ?? RemoveTitle(row))" @onclick="() => AskAsync([row])">Remove</button>
+                                }
+                                @if (status.Row is { } action)
+                                {
+                                    <span class="chip @status.Class" title="@(status.Failed && !string.IsNullOrWhiteSpace(action.Output) ? action.Output : $"Queued by {action.QueuedBy} at {Fmt.Date(action.QueuedAt)}")">@(action.Status == AgentActionStatus.Succeeded ? "removed, waiting for its rescan" : status.Text)</span>
+                                    @if (status.Failed && !string.IsNullOrWhiteSpace(action.Output))
+                                    {
+                                        <div class="sub safety-refusal">@action.Output</div>
+                                    }
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+                <tfoot>
+                    <tr>
+                        <td colspan="3" class="right muted">Total</td>
+                        <td class="right nowrap"><strong>@Fmt.Size(_removable.Sum(r => r.FreedBytes))</strong></td>
+                        <td></td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    }
+
+    @if (_removed.Count > 0)
+    {
+        <h2 id="removed">Removed <span class="muted small">@_removed.Count</span></h2>
+        <div class="toolbar">
+            <span class="muted small">Moved to the trash from here. Each can be cloned back into the folder it was in; the copy in the trash stays there until that machine's trash is emptied.</span>
+        </div>
+        <RemovedProjects Items="_removed" Now="Now" />
+    }
+
+    @if (_unclear.Count > 0)
+    {
+        <details class="fold" id="not-sure">
+            <summary><strong>@Fmt.Count(_unclear.Count, "working tree") not sure about</strong> <span class="muted small">nothing known to be lost, but not safe to remove either</span></summary>
+            <div class="table-wrap">
+                <table class="stack safety-table">
+                    <thead>
+                        <tr><th>Repo</th><th>Why</th><th class="right">Last touched</th><th class="right">Size</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in _unclear)
+                        {
+                            <tr @key="(row.Machine.MachineId, row.Entry.Path)">
+                                @Where(row, false, showMachine: true)
+                                <td data-label="Why">@Reasons(row.Safety.Reasons)</td>
+                                <td data-label="Last touched" class="cell-when right nowrap sub" title="@Fmt.Date(row.Safety.LastTouchedAt)">@Fmt.Ago(row.Safety.LastTouchedAt, Now)</td>
+                                <td data-label="Size" class="right nowrap sub @(row.Safety.TotalBytes is null ? "blank" : "")">@Fmt.Size(row.Safety.TotalBytes)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </details>
+    }
+}
+
+@if (_asking.Count > 0)
+{
+    var single = _asking.Count == 1 ? _asking[0] : null;
+    <div class="modal-backdrop" @onclick="Cancel">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="remove-projects" @onclick:stopPropagation="true">
+            <h3 id="remove-projects">@(single is not null ? $"Remove {single.RepoName} from {single.Machine.Machine.Hostname}?" : $"Remove {Fmt.Count(_asking.Count, "safe project")}?")</h3>
+            @if (single is not null)
+            {
+                <dl class="kv">
+                    <dt>Machine</dt>
+                    <dd>@single.Machine.Machine.Hostname <span class="muted mono">@single.Machine.MachineId</span></dd>
+                    <dt>Folder</dt>
+                    <dd class="mono">@single.Entry.Path</dd>
+                    <dt>Frees</dt>
+                    <dd>@(single.Safety.FreedBytes is { } freed ? Fmt.Size(freed) : "not measured yet")</dd>
+                    <dt>Last touched</dt>
+                    <dd>@Fmt.Ago(single.Safety.LastTouchedAt, Now)</dd>
+                </dl>
+                <p><strong>Why it is safe.</strong> @(single.Safety.IsLinkedWorktree ? WorktreeWhy : single.Safety.Reasons.Count == 0 ? SafeWhy : CaveatsWhy)</p>
+                @if (single.Safety.Reasons.Count > 0)
+                {
+                    @Reasons(single.Safety.Reasons)
+                }
+                @if (Caveats(single) is { Count: > 0 } caveats)
+                {
+                    <p>Those are not build output, and they go with the folder. Tick each one to say it can go:</p>
+                    <ul class="caveats">
+                        @foreach (var caveat in caveats)
+                        {
+                            <li>
+                                <label><input type="checkbox" checked="@_ticked.Contains(caveat)" @onchange="e => Tick(caveat, e.Value is true)" /> <span class="mono">@caveat</span></label>
+                            </li>
+                        }
+                        @if (single.Safety.Caveats.Sum(c => c.Count ?? 0) - caveats.Count is > 0 and var more)
+                        {
+                            <li>
+                                <label><input type="checkbox" checked="@_tickedRest" @onchange="e => _tickedRest = e.Value is true" /> and @more more that the agent did not list</label>
+                            </li>
+                        }
+                    </ul>
+                }
+            }
+            else
+            {
+                <div class="table-wrap remove-list">
+                    <table>
+                        <tbody>
+                            @foreach (var row in _asking)
+                            {
+                                <tr @key="(row.Machine.MachineId, row.Entry.Path)">
+                                    <td><strong>@row.RepoName</strong> <span class="muted small">@row.Machine.Machine.Hostname</span><div class="sub mono path">@row.Entry.Path</div></td>
+                                    <td class="right nowrap sub">@(row.Safety.FreedBytes is { } freed ? Fmt.Size(freed) : "not measured")</td>
+                                </tr>
+                            }
+                        </tbody>
+                        <tfoot>
+                            <tr><td class="right muted">Total</td><td class="right nowrap"><strong>@Fmt.Size(_asking.Sum(r => r.FreedBytes))</strong></td></tr>
+                        </tfoot>
+                    </table>
+                </div>
+                <p><strong>Why they are safe.</strong> @SafeWhy</p>
+            }
+            <p>
+                @if (single is { Safety.IsLinkedWorktree: true })
+                {
+                    <span>This is a linked worktree, so the agent removes it with <code>git worktree remove</code> (no <code>--force</code>). That deletes the folder; it does not go to the trash. Its branch stays in the main repo.</span>
+                }
+                else
+                {
+                    <span>
+                        @(single is null ? "Each agent" : "The agent") fetches and checks the project again first, and refuses if anything has changed since this page was drawn.
+                        Then the folder is <strong>moved to the trash</strong> on that machine (Trash, Recycle Bin or the Linux trash). Nothing is deleted: it can be dragged back out, or cloned again from the Removed list.
+                    </span>
+                }
+            </p>
+            <p>It is recorded as queued by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and never runs.</p>
+            @if (_error is not null)
+            {
+                <div class="banner danger">@_error</div>
+            }
+            <div class="modal-actions">
+                <button type="button" @onclick="Cancel">Cancel</button>
+                <button type="button" class="primary" disabled="@(_busy || !AllTicked)" title="@(AllTicked ? null : "Tick every file first")" @onclick="ConfirmAsync">
+                    @(single is { Safety.IsLinkedWorktree: true } ? "Remove worktree" : single is not null ? $"Move to trash on {single.Machine.Machine.Hostname}" : $"Move {_asking.Count} to trash")
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private const string SafeWhy = "Every commit, branch and tag is on a remote, there are no uncommitted changes, stashes or untracked files, and what is ignored is build output that can be rebuilt.";
+    private const string CaveatsWhy = "Every commit, branch and tag is on a remote, and there are no uncommitted changes, stashes or untracked files. What is left is ignored by git:";
+    private const string WorktreeWhy = "This working tree has no uncommitted or untracked files, and its commits are on a branch the main repo keeps.";
+
+    /// <summary>Reasons shown per row before "N more"; the rest are in the tooltip.</summary>
+    private const int ReasonRows = 4;
+
+    /// <summary><c>?group=machine|repo</c>: how the at-risk rows are grouped. By machine is the default.</summary>
+    [SupplyParameterFromQuery] public string? Group { get; set; }
+
+    /// <summary><c>?sort=age|severity</c>. Oldest first is the default.</summary>
+    [SupplyParameterFromQuery] public string? Sort { get; set; }
+
+    /// <summary><c>?ask=remove-safe</c>, from the command palette: open the "Remove N safe projects" confirmation. It still has to be confirmed.</summary>
+    [SupplyParameterFromQuery] public string? Ask { get; set; }
+
+    private IReadOnlyList<SafetyRow> _rows = [];
+    private List<SafetyRow> _atRisk = [];
+    private List<SafetyRow> _removable = [];
+    private List<SafetyRow> _unclear = [];
+    private List<string> _oldAgents = [];
+    private int _machines;
+    private IReadOnlyList<RemovedProjectView> _removed = [];
+
+    /// <summary>What the "Remove N safe projects" button would remove: plainly safe, on a machine that can be asked, not already on its way.</summary>
+    private List<SafetyRow> _bulk = [];
+
+    /// <summary>The rows in the confirmation dialog. One for a row's own button, several for the bulk button.</summary>
+    private IReadOnlyList<SafetyRow> _asking = [];
+    private readonly HashSet<string> _ticked = new(StringComparer.Ordinal);
+    private bool _tickedRest;
+    private string _login = "";
+    private string? _error;
+    private bool _busy;
+
+    private SafetyGrouping Grouping => SafetyView.ParseGrouping(Group);
+
+    private SafetySort Sorting => SafetyView.ParseSort(Sort);
+
+    protected override void OnParametersSet()
+    {
+        if (Loaded)
+        {
+            Arrange();
+        }
+    }
+
+    // Only once the page is live and loaded: the dialog is opened for the person looking at it, and the
+    // address loses its ?ask so that a reload does not open it again.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!Loaded || Ask != Palette.AskRemoveSafe)
+        {
+            return;
+        }
+
+        Ask = null;
+        await AskAsync(_bulk);
+        StateHasChanged();
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("ask", (string?)null), replace: true);
+    }
+
+    protected override async Task LoadAsync()
+    {
+        await Actions.LoadAsync();
+        _removed = await Tombstones.ListAsync();
+        _machines = Snapshots.Machines.Count;
+        _rows = SafetyRows.Get();
+        _oldAgents = _rows
+            .Where(r => r.Safety.Reasons.Any(reason => reason.Kind == SafetyReasonKind.OldAgent))
+            .Select(r => r.Machine.Machine.Hostname)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        Arrange();
+    }
+
+    private void Arrange()
+    {
+        _atRisk = SafetyView.AtRisk(_rows, Sorting);
+        _removable = SafetyView.Removable(_rows);
+        _unclear = SafetyView.Unclear(_rows);
+        _bulk = _removable
+            .Where(r => r.Safety.Verdict == SafetyVerdict.Safe && Actions.For(r.Machine, AgentActionKind.RemoveProject).Available && !StatusOf(r).InFlight)
+            .ToList();
+    }
+
+    /// <summary>
+    /// The row's removal, while it matters: on its way, refused, or done and waiting for the rescan that
+    /// drops the row. A removal that finished before the machine's current scan is history: the folder
+    /// listed now is one that came back since (cloned again).
+    /// </summary>
+    private ActionStatus StatusOf(SafetyRow row)
+    {
+        var status = Actions.StatusOf(row.Machine.MachineId, AgentActionKind.RemoveProject, row.Entry.Path);
+        return status.Row is { Status: AgentActionStatus.Succeeded, CompletedAt: { } done } && done < row.Machine.Snapshot.ScannedAt ? ActionStatus.None : status;
+    }
+
+    /// <summary>Why the bulk button has nothing to offer: the first reason a machine gives, or that every row has caveats.</summary>
+    private string BulkWhyNot =>
+        _removable.Where(r => r.Safety.Verdict == SafetyVerdict.Safe).Select(r => Actions.For(r.Machine, AgentActionKind.RemoveProject).WhyNot).FirstOrDefault(w => w is not null)
+        ?? "Every project here has ignored files to look at first. Remove those one at a time.";
+
+    private static string RemoveTitle(SafetyRow row) => row.Safety.IsLinkedWorktree
+        ? $"Remove this worktree with git worktree remove on {row.Machine.Machine.Hostname}. You confirm first."
+        : $"Move {row.RepoName} to the trash on {row.Machine.Machine.Hostname}. You confirm first.";
+
+    /// <summary>The names to tick for one row: every ignored file or folder the agent listed.</summary>
+    private static List<string> Caveats(SafetyRow row) => row.Safety.Caveats.SelectMany(c => c.Names).Distinct(StringComparer.Ordinal).ToList();
+
+    private bool AllTicked =>
+        _asking is not [var single] || (Caveats(single).All(_ticked.Contains) && (_tickedRest || single.Safety.Caveats.Sum(c => c.Count ?? 0) <= Caveats(single).Count));
+
+    private void Tick(string caveat, bool on)
+    {
+        if (on)
+        {
+            _ticked.Add(caveat);
+        }
+        else
+        {
+            _ticked.Remove(caveat);
+        }
+    }
+
+    private async Task AskAsync(IReadOnlyList<SafetyRow> rows)
+    {
+        if (rows.Count == 0 || rows.Any(r => !Actions.For(r.Machine, AgentActionKind.RemoveProject).Available))
+        {
+            return;
+        }
+
+        _login = await Actions.LoginAsync();
+        _error = null;
+        _ticked.Clear();
+        _tickedRest = false;
+        _asking = rows;
+    }
+
+    private void Cancel()
+    {
+        _asking = [];
+        _error = null;
+    }
+
+    // One typed RemoveProject action per project: its path, the fingerprint of what this page showed, and the caveats ticked.
+    private async Task ConfirmAsync()
+    {
+        if (_busy || _asking.Count == 0 || !AllTicked)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var errors = new List<string>();
+            foreach (var row in _asking)
+            {
+                var action = AgentAction.RemoveProject(row.Entry.Path, row.Safety.Fingerprint, _asking.Count == 1 ? Caveats(row) : null);
+                if (await Actions.QueueAsync(row.Machine.MachineId, action) is { } error)
+                {
+                    errors.Add(_asking.Count == 1 ? error : $"{row.RepoName} on {row.Machine.Machine.Hostname}: {error}");
+                }
+            }
+
+            if (errors.Count == 0)
+            {
+                _asking = [];
+            }
+            else
+            {
+                _error = string.Join(" ", errors);
+            }
+
+            await LoadAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private string Url(SafetyGrouping grouping, SafetySort sort) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("safety").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    {
+        ["group"] = grouping == SafetyGrouping.Machine ? null : "repo",
+        ["sort"] = sort == SafetySort.Age ? null : "severity",
+    });
+
+    /// <summary>The first cell: the repo (linked to its page) with its path, or the machine when the group already names the repo.</summary>
+    private RenderFragment Where(SafetyRow row, bool machineFirst, bool showMachine = false) => __builder =>
+    {
+        var path = Fmt.Tilde(row.Entry.Path, Fmt.HomeOf(row.Machine.Snapshot.Roots));
+        <td class="cell-main">
+            @if (machineFirst)
+            {
+                <a class="title-link" href="machines#machine-@row.Machine.MachineId">@row.Machine.Machine.Hostname</a>
+            }
+            else
+            {
+                <a class="title-link" href="@Fmt.RepoUrl(row.RepoKey)"><strong>@row.RepoName</strong></a>
+                @if (showMachine)
+                {
+                    <span class="owner muted small">@row.Machine.Machine.Hostname</span>
+                }
+            }
+            @if (row.Safety.IsLinkedWorktree)
+            {
+                <span class="chip muted gap" title="A linked worktree of @row.RepoName. Its branches are kept by the main repo.">worktree</span>
+                @if (row.Stale is { IsStale: true } stale)
+                {
+                    <span class="chip warn" title="This worktree looks finished with">@stale.Label(Now)</span>
+                }
+            }
+            <div class="sub mono path" title="@row.Entry.Path">@path</div>
+        </td>
+    };
+
+    private RenderFragment Reasons(IReadOnlyList<SafetyReason> reasons) => __builder =>
+    {
+        <ul class="safety-reasons" title="@string.Join("\n", reasons.Select(r => r.Text))">
+            @foreach (var reason in reasons.Take(ReasonRows))
+            {
+                <li><span class="dot @DotClass(reason)"></span>@reason.Text</li>
+            }
+            @if (reasons.Count > ReasonRows)
+            {
+                <li class="muted">and @(reasons.Count - ReasonRows) more</li>
+            }
+        </ul>
+    };
+
+    private static string DotClass(SafetyReason reason) => reason.Effect switch
+    {
+        SafetyEffect.Risk => SafetyView.LevelClass(reason.Level),
+        SafetyEffect.Caveat => "warn",
+        _ => "",
+    };
+}

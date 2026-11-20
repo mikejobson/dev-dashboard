@@ -27,4 +27,14 @@ public sealed class ActionsOptions
 
     /// <summary>Timeout for the actions that talk to a remote (fetch, push).</summary>
     public int NetworkTimeoutSeconds { get; set; } = 120;
+
+    /// <summary>Timeout for a clone, which downloads a whole repository.</summary>
+    public int CloneTimeoutSeconds { get; set; } = 900;
+
+    /// <summary>
+    /// A folder to move removed projects into, instead of the operating system's trash (<c>~/.Trash</c>,
+    /// the Recycle Bin, or the freedesktop trash). It must be on the same volume as the scan roots: a
+    /// removal is a rename, never a copy. Leave empty to use the system trash.
+    /// </summary>
+    public string? TrashDirectory { get; set; }
 }

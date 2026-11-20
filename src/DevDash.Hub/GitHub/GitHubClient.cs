@@ -30,7 +30,7 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
 
     private const string PullRequestFields = """
         fragment PrFields on PullRequest {
-          number title url isDraft createdAt updatedAt reviewDecision mergeable headRefName baseRefName
+          number title url isDraft createdAt updatedAt reviewDecision mergeable headRefName headRefOid isCrossRepository baseRefName
           author { login }
           repository { nameWithOwner }
           commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -353,6 +353,8 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
             Mergeable = Str(node, "mergeable"),
             Ci = ci,
             HeadRef = Str(node, "headRefName"),
+            HeadSha = Str(node, "headRefOid"),
+            IsCrossRepository = Bool(node, "isCrossRepository"),
             BaseRef = Str(node, "baseRefName"),
         };
     }

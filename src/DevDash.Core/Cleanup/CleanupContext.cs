@@ -15,11 +15,14 @@ public sealed record CleanupOptions
 }
 
 /// <summary>A git working tree on one machine.</summary>
-public sealed record LocalClone(MachineSnapshot Snapshot, DevEntry Entry)
+/// <param name="Main">The main working tree, when <paramref name="Entry"/> is a linked worktree and both were scanned.</param>
+public sealed record LocalClone(MachineSnapshot Snapshot, DevEntry Entry, DevEntry? Main = null)
 {
     public MachineInfo Machine => Snapshot.Machine;
     public GitState Git => Entry.Git!;
-    public string RepoKey => RepoIdentity.KeyFor(Machine.MachineId, Entry);
+
+    /// <summary>A linked worktree has its main working tree's key, so the two are one repo everywhere.</summary>
+    public string RepoKey => RepoIdentity.KeyFor(Machine.MachineId, Main ?? Entry);
 }
 
 /// <summary>Input to the rules: every machine's latest snapshot plus what GitHub says.</summary>
@@ -34,9 +37,10 @@ public sealed record CleanupContext
     /// <summary>Every git working tree, including linked worktrees and worktree-container children.</summary>
     public IEnumerable<LocalClone> Clones() =>
         from snapshot in Machines
+        let mains = RepoIdentity.MainWorkingTrees(snapshot.Entries)
         from entry in RepoIdentity.Flatten(snapshot.Entries)
         where entry.Kind == EntryKind.GitRepo && entry.Git is not null
-        select new LocalClone(snapshot, entry);
+        select new LocalClone(snapshot, entry, RepoIdentity.MainOf(entry, mains));
 
     /// <summary>
     /// One clone per repository (shared .git directory) per machine, preferring the main working tree.

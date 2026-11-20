@@ -3,6 +3,8 @@
 @inject RepoCatalog Catalog
 @inject FindingsService Findings
 @inject RefreshBoard Refreshes
+@inject SafetyService SafetyRows
+@inject ActionBoard Actions
 
 <PageTitle>@(_row?.Name ?? "Repo") · DevDash</PageTitle>
 
@@ -89,6 +91,12 @@ else
         <BranchMapView Clones="_row.Clones" PullRequests="_row.PullRequests" Now="Now" GitHubUrl="@_row.GitHub?.Url" Name="@_row.Clones.FirstOrDefault()?.Entry.Name" />
     }
 
+    @if (_hasActivity)
+    {
+        <ActivityHeatmap Days="_activity" Today="Today" Compact="true" Caption="in the last year, on every branch"
+                         Note="@(_mine is { } mine ? $"{mine} of them with your git email." : null)" />
+    }
+
     @if (_row.GitHub is not null || _row.PullRequests.Count > 0)
     {
         <h2>
@@ -136,12 +144,13 @@ else
                 @foreach (var clone in _row.Clones)
                 {
                     var target = RefreshTargets.For(clone);
-                    <tr @key="(clone.Machine.MachineId, clone.Entry.Path)">
+                    <tr @key="(clone.Machine.MachineId, clone.Entry.Path)" class="@(clone.IsLinkedWorktree ? "worktree-child" : "")">
                         <td class="nowrap cell-main"><a class="title-link" href="machines#machine-@clone.Machine.MachineId">@clone.Machine.Machine.Hostname</a></td>
-                        <td data-label="Path" class="mono path">@clone.Entry.Path</td>
+                        <td data-label="Path" class="mono path">@(clone.IsLinkedWorktree ? "↳ " : "")@clone.Entry.Path</td>
                         <td data-label="State">
                             <div>
                                 <CloneChips Clone="clone" />
+                                <div class="chips safety-line"><SafetyBadge Safety="_safety.GetValueOrDefault((clone.Machine.MachineId, clone.Entry.Path))" /></div>
                                 @if (clone.Git is { Upstream: not null } g)
                                 {
                                     <div class="sub">tracks <span class="mono">@g.Upstream</span></div>
@@ -182,6 +191,170 @@ else
         </table>
     </div>
 
+    @if (Pinned.Count > 0)
+    {
+        <h2 id="toolchains">Toolchains <span class="muted small">what this repo pins, and whether each machine has it</span></h2>
+        <div class="table-wrap">
+            <table class="stack">
+                <thead><tr><th>Machine</th><th>Pinned</th><th>On that machine</th></tr></thead>
+                <tbody>
+                    @foreach (var clone in Pinned)
+                    {
+                        var checks = ToolchainCheck.For(clone.Entry, clone.Machine.Machine);
+                        <tr @key="(clone.Machine.MachineId, clone.Entry.Path)">
+                            <td class="cell-main nowrap">@clone.Machine.Machine.Hostname@(_row.Clones.Count(c => c.Machine.MachineId == clone.Machine.MachineId) > 1 ? $" · {clone.DisplayName}" : "")</td>
+                            <td data-label="Pinned">
+                                <div>
+                                    @foreach (var pin in clone.Entry.Pins!)
+                                    {
+                                        <div class="pin-row"><span>@ToolNames.Display(pin.Tool) <span class="mono">@pin.Version</span></span><span class="sub">@pin.Source@(pin.RollForward is null ? "" : $" · rollForward {pin.RollForward}")</span></div>
+                                    }
+                                </div>
+                            </td>
+                            <td data-label="On that machine">
+                                <div>
+                                    @if (checks.Count == 0)
+                                    {
+                                        <span class="sub">@ToolchainView.WhyNotReported(clone.Machine.Machine)</span>
+                                    }
+                                    @foreach (var check in checks)
+                                    {
+                                        <div class="pin-row">
+                                            <span class="chip @(check.Status switch { PinStatus.Satisfied => "ok", PinStatus.Missing => "danger", _ => "muted" })">@(check.Status switch { PinStatus.Satisfied => "installed", PinStatus.Missing => "missing", _ => "not checked" })</span>
+                                            <span class="sub">@check.Detail</span>
+                                        </div>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (Checked.Count > 0)
+    {
+        <h2 id="dependencies">Dependencies <span class="muted small">from <code>dotnet list package</code> and <code>npm audit</code>, about once a day</span></h2>
+        <div class="table-wrap">
+            <table class="stack">
+                <thead><tr><th>Machine</th><th>Packages</th><th>Known vulnerabilities</th><th>Outdated</th><th class="right">Checked</th></tr></thead>
+                <tbody>
+                    @foreach (var clone in Checked)
+                    {
+                        var health = clone.Entry.Dependencies!;
+                        @foreach (var report in health.Reports)
+                        {
+                            <tr @key="(clone.Machine.MachineId, clone.Entry.Path, report.Ecosystem)">
+                                <td class="cell-main nowrap">@clone.Machine.Machine.Hostname@(_row.Clones.Count(c => c.Machine.MachineId == clone.Machine.MachineId) > 1 ? $" · {clone.DisplayName}" : "")</td>
+                                <td data-label="Packages">@DependencyView.Ecosystem(report.Ecosystem) <div class="sub mono">@report.Target</div></td>
+                                <td data-label="Known vulnerabilities">
+                                    <div>
+                                        @if (report.Vulnerable is not { } counts)
+                                        {
+                                            <span class="chip muted" title="@report.Skipped">not checked</span>
+                                            <div class="sub">@report.Skipped</div>
+                                        }
+                                        else if (counts.Total == 0)
+                                        {
+                                            <span class="chip ok">none known</span>
+                                        }
+                                        else
+                                        {
+                                            <div class="chips">
+                                                @if (counts.Critical > 0) { <span class="chip danger">@counts.Critical critical</span> }
+                                                @if (counts.High > 0) { <span class="chip warn">@counts.High high</span> }
+                                                @if (counts.Moderate > 0) { <span class="chip info">@counts.Moderate moderate</span> }
+                                                @if (counts.Low > 0) { <span class="chip muted">@counts.Low low</span> }
+                                            </div>
+                                            <div class="dep-names sub">
+                                                @foreach (var package in report.TopVulnerable)
+                                                {
+                                                    <span title="@package.Severity"><span class="mono">@package.Name@(package.Version is null ? "" : " " + package.Version)</span>@foreach (var advisory in package.Advisories.Where(a => a.StartsWith("GHSA-", StringComparison.Ordinal)))
+                                                    {
+                                                        <text> </text><a href="https://github.com/advisories/@advisory" target="_blank" rel="noopener">@advisory</a>
+                                                    }</span>
+                                                }
+                                                @if (counts.Total > report.TopVulnerable.Count) { <span>and @(counts.Total - report.TopVulnerable.Count) more</span> }
+                                            </div>
+                                        }
+                                    </div>
+                                </td>
+                                <td data-label="Outdated">
+                                    <div>
+                                        @if (report.Outdated is not { } outdated)
+                                        {
+                                            <span class="sub">@(report.Vulnerable is null ? "" : report.Skipped ?? "not checked")</span>
+                                        }
+                                        else if (outdated == 0)
+                                        {
+                                            <span class="chip ok">up to date</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="chip muted">@outdated outdated</span>
+                                            <div class="dep-names sub">
+                                                @foreach (var package in report.TopOutdated)
+                                                {
+                                                    <span class="mono" title="@package.Name: @package.Current → @package.Latest">@package.Name @package.Latest</span>
+                                                }
+                                                @if (outdated > report.TopOutdated.Count) { <span>and @(outdated - report.TopOutdated.Count) more</span> }
+                                            </div>
+                                        }
+                                    </div>
+                                </td>
+                                <td data-label="Checked" class="right nowrap sub" title="@Fmt.Date(health.CheckedAt)">@Fmt.Ago(health.CheckedAt, Now)</td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (BuildOutputs.Count > 0)
+    {
+        <h2>Build output <span class="muted small">@Fmt.Size(BuildOutputs.Sum(c => c.Entry.Size!.ReclaimableBytes)) that a build or install recreates</span></h2>
+        <p class="muted small build-note">Clean deletes the folder for good on that machine. It is not moved to the trash, because a build or an install brings it back.</p>
+        <div class="table-wrap">
+            <table class="stack build-table">
+                <thead>
+                    <tr><th>Folder</th><th>Machine</th><th class="right">Size</th><th></th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var clone in BuildOutputs)
+                    {
+                        var dirs = clone.Entry.Size!.ReclaimableDirs;
+                        @foreach (var dir in dirs)
+                        {
+                            <tr @key="(clone.Machine.MachineId, dir.Path)">
+                                <td class="cell-main mono path" title="@dir.Path">@Relative(clone.Entry.Path, dir.Path)</td>
+                                <td data-label="Machine" class="nowrap sub">@clone.Machine.Machine.Hostname@(_row.Clones.Count(c => c.Machine.MachineId == clone.Machine.MachineId) > 1 ? $" · {clone.DisplayName}" : "")</td>
+                                <td data-label="Size" class="right nowrap">@Fmt.Size(dir.Bytes)</td>
+                                <td class="right cell-buttons">
+                                    <ActionButton Machine="clone.Machine" Action="AgentAction.CleanBuildDirs(clone.Entry.Path, [dir.Path])" Label="Clean"
+                                                  Ask="@($"Delete {Relative(clone.Entry.Path, dir.Path)} on {clone.Machine.Machine.Hostname}?")" Confirm="@($"Delete on {clone.Machine.Machine.Hostname}")" What="@($"Delete {Relative(clone.Entry.Path, dir.Path)} on {clone.Machine.Machine.Hostname}")" />
+                                </td>
+                            </tr>
+                        }
+                        @if (dirs.Count > 1)
+                        {
+                            <tr @key="(clone.Machine.MachineId, clone.Entry.Path, 0)" class="build-all">
+                                <td class="cell-main muted">All @dirs.Count in <span class="mono">@clone.DisplayName</span></td>
+                                <td data-label="Machine" class="nowrap sub">@clone.Machine.Machine.Hostname</td>
+                                <td data-label="Size" class="right nowrap"><strong>@Fmt.Size(dirs.Sum(d => d.Bytes))</strong></td>
+                                <td class="right cell-buttons">
+                                    <ActionButton Machine="clone.Machine" Action="AgentAction.CleanBuildDirs(clone.Entry.Path, dirs.Select(d => d.Path))" Label="Clean all build output"
+                                                  Ask="@($"Delete all build output in {clone.DisplayName} on {clone.Machine.Machine.Hostname}?")" Confirm="@($"Delete {dirs.Count} folders on {clone.Machine.Machine.Hostname}")" What="@($"Delete all build output in {clone.DisplayName} on {clone.Machine.Machine.Hostname}")" />
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
     @if (_findings.Count > 0)
     {
         <h2>Cleanup findings</h2>
@@ -206,6 +379,10 @@ else
                         <tr>
                             <td class="cell-main">
                                 <span class="mono">@branch.Name</span>
+                                @foreach (var match in BranchPullRequests.For(_row.PullRequests, branch, git.Remotes.Select(r => r.Name)))
+                                {
+                                    <PrChip @key="match.PullRequest.Url" PullRequest="match.PullRequest" AtHead="match.AtHead" />
+                                }
                                 <div class="sub">@branch.Subject</div>
                             </td>
                             <td data-label="Upstream" class="mono sub @(branch.Upstream is null ? "blank" : "")">@branch.Upstream</td>
@@ -218,6 +395,7 @@ else
                                     @if (branch.Ahead > 0) { <span class="chip info">↑@branch.Ahead</span> }
                                     @if (branch.Behind > 0) { <span class="chip info">↓@branch.Behind</span> }
                                     @if (branch.MergedIntoDefault == true && branch.Name != git.DefaultBranch) { <span class="chip ok">merged</span> }
+                                    <SyncButtons Short="true" Offers="_sync.Where(o => o.Machine.MachineId == clone.Machine.MachineId && o.RepoPath == clone.Entry.Path && o.Branch == branch.Name).ToList()" />
                                 </div>
                             </td>
                             <td data-label="Last commit" class="right nowrap sub" title="@Fmt.Date(branch.LastCommitDate)">@Fmt.Ago(branch.LastCommitDate, Now)</td>
@@ -282,6 +460,8 @@ else
     private IReadOnlyDictionary<string, List<CloneView>> _clonesByKey = new Dictionary<string, List<CloneView>>();
     private HashSet<(string Machine, string Branch)> _checkedOut = [];
     private IReadOnlyList<RefreshTarget> _targets = [];
+    private IReadOnlyList<SyncOffer> _sync = [];
+    private IReadOnlyDictionary<(string MachineId, string Path), SafetyAssessment> _safety = new Dictionary<(string, string), SafetyAssessment>();
 
     /// <summary>The top button is offered when any machine can take a refresh; otherwise it says why none can.</summary>
     private RefreshAvailability AllAvailability
@@ -314,6 +494,25 @@ else
         TickWhile(() => Refreshes.Ticking);
     }
 
+    private IReadOnlyDictionary<DateOnly, int> _activity = new Dictionary<DateOnly, int>();
+    private bool _hasActivity;
+    private int? _mine;
+
+    private DateOnly Today => DateOnly.FromDateTime(Time.GetLocalNow().DateTime);
+
+    /// <summary>Working trees that pin a tool version.</summary>
+    private List<CloneView> Pinned => (_row?.Clones ?? []).Where(c => c.Entry.Pins is { Count: > 0 }).ToList();
+
+    /// <summary>Working trees whose dependencies an agent has checked.</summary>
+    private List<CloneView> Checked => (_row?.Clones ?? []).Where(c => c.Entry.Dependencies is { Reports.Count: > 0 }).ToList();
+
+    /// <summary>Working trees with build output measured: what Clean can delete. Repositories only, since the agent asks git what is tracked.</summary>
+    private List<CloneView> BuildOutputs => (_row?.Clones ?? []).Where(c => c.Entry is { Kind: EntryKind.GitRepo, Size.ReclaimableDirs.Count: > 0 }).ToList();
+
+    /// <summary>A folder relative to its working tree, keeping the reporting machine's separators.</summary>
+    private static string Relative(string root, string path) =>
+        path.Length > root.Length + 1 && path.StartsWith(root, StringComparison.Ordinal) ? path[(root.Length + 1)..] : path;
+
     /// <summary>Clones with a folder to open: everything but loose files.</summary>
     private List<CloneView> Openable => (_row?.Clones ?? []).Where(c => c.Entry.Kind != EntryKind.LooseFile).ToList();
 
@@ -336,13 +535,22 @@ else
         _row = string.IsNullOrEmpty(Key) ? null : await Catalog.FindAsync(Key);
         _clonesByKey = Catalog.ClonesByGitHubKey();
         _targets = RefreshTargets.For(_row?.Clones ?? []);
+        _safety = SafetyRows.ByClone();
         await Refreshes.LoadAsync();
+        await Actions.LoadAsync();
+        _sync = SyncOffers.For(_row?.Clones ?? []);
         TickWhile(() => Refreshes.Ticking);
         if (_row is null)
         {
             _findings = [];
+            _hasActivity = false;
             return;
         }
+
+        _hasActivity = ActivityView.Any([_row]);
+        _activity = ActivityView.ForRepo(_row, mine: false);
+        var first = Today.AddDays(-(ActivityView.Days - 1));
+        _mine = ActivityView.AnyMine([_row]) ? ActivityView.ForRepo(_row, mine: true).Where(d => d.Key >= first && d.Key <= Today).Sum(d => d.Value) : null;
 
         var paths = _row.Clones.Select(c => (c.Machine.MachineId, c.Entry.Path)).ToHashSet();
         _findings = (await Findings.GetAsync())

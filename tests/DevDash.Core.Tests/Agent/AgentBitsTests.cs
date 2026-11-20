@@ -65,6 +65,10 @@ public class AgentBitsTests
     [InlineData("dist", "package.json", true)]
     [InlineData("dist", "", false)]
     [InlineData("src", "package.json", false)]
+    [InlineData(".angular", "", true)]
+    [InlineData(".dart_tool", "", true)]
+    [InlineData("packages", "App.sln", false)] // NuGet's folder is not counted: the name is too ordinary to delete
+    [InlineData("coverage", "package.json", false)]
     public void Build_folders_only_count_next_to_the_manifest_that_makes_them(string name, string sibling, bool expected) =>
         Assert.Equal(expected, TreeWalker.IsReclaimable(name, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { sibling }));
 }

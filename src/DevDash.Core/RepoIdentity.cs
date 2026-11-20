@@ -33,6 +33,37 @@ public static class RepoIdentity
         || name.EndsWith("-worktrees", StringComparison.OrdinalIgnoreCase)
         || name.Equals("worktrees", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Compares two paths reported by one machine. Git prints forward slashes on Windows where the
+    /// scanner has backslashes, so separators and case are ignored.
+    /// </summary>
+    public static bool SamePath(string? a, string? b) =>
+        a is not null && b is not null
+        && string.Equals(a.Replace('\\', '/').TrimEnd('/'), b.Replace('\\', '/').TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The main working tree of each repository in a snapshot, by shared .git directory. A linked
+    /// worktree belongs under the entry found here; one whose main working tree is outside the scan
+    /// roots is not in the result.
+    /// </summary>
+    public static IReadOnlyDictionary<string, DevEntry> MainWorkingTrees(IEnumerable<DevEntry> entries)
+    {
+        var result = new Dictionary<string, DevEntry>(StringComparer.Ordinal);
+        foreach (var entry in Flatten(entries))
+        {
+            if (entry is { Kind: EntryKind.GitRepo, Git: { IsLinkedWorktree: false, CommonDir: { } dir } })
+            {
+                result.TryAdd(dir, entry);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>The main working tree a linked worktree belongs to, when it is in the same snapshot.</summary>
+    public static DevEntry? MainOf(DevEntry entry, IReadOnlyDictionary<string, DevEntry> mains) =>
+        entry.Git is { IsLinkedWorktree: true, CommonDir: { } dir } && mains.TryGetValue(dir, out var main) ? main : null;
+
     /// <summary>Flattens top-level entries and the children of worktree containers.</summary>
     public static IEnumerable<DevEntry> Flatten(IEnumerable<DevEntry> entries)
     {

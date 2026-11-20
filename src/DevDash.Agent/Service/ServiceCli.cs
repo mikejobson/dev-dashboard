@@ -25,6 +25,7 @@ public sealed class ServiceCli(ServiceEnvironment environment, IServiceManager m
           --machine-id <id>     Override the machine id (default: host name)
           --no-fetch            Do not run `git fetch --prune --quiet`
           --no-watch            Do not watch for file changes between scans
+          --no-deps             Do not run `dotnet list package` / `npm audit` once a day per repo
           --enable-actions      Allow actions requested from the hub (writes Agent:Actions:Enabled)
           --updates <mode>      off | notify | auto (writes Agent:Updates:Mode; default notify: update when
                                 asked from the dashboard, never unprompted)

@@ -51,6 +51,12 @@ public sealed record PullRequestInfo
     public string? Mergeable { get; init; }
     public CiState Ci { get; init; }
     public string? HeadRef { get; init; }
+
+    /// <summary>The commit the pull request's branch is at on GitHub. Null in a poll cached before this was asked for.</summary>
+    public string? HeadSha { get; init; }
+
+    /// <summary>The head branch lives in a fork, so its name says nothing about a branch of this repository.</summary>
+    public bool IsCrossRepository { get; init; }
     public string? BaseRef { get; init; }
     public bool Authored { get; init; }
     public bool ReviewRequested { get; init; }

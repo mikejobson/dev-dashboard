@@ -1,0 +1,128 @@
+@* A button that queues one typed agent action after a confirmation, with its status beside it. Used
+   where an action is not part of a cleanup finding: clean, push, pull, re-clone. The command shown in
+   the dialog is for reading; only the typed action is ever sent. *@
+@inject ActionBoard Board
+@inject IOptionsMonitor<HubOptions> Options
+<span class="act">
+    @if (!Status.InFlight)
+    {
+        <button type="button" class="@Class @(Blocked ? "is-disabled" : "")" aria-disabled="@(Blocked ? "true" : "false")" title="@Title" @onclick="AskAsync">@Label</button>
+    }
+    @if (Status.Row is { } row)
+    {
+        <span class="chip @Status.Class" title="@StatusTitle(row)">@Status.Text</span>
+    }
+    @if (_asking)
+    {
+        var machine = Machine.Machine.Hostname;
+        <div class="modal-backdrop" @onclick="Cancel">
+            <div class="modal" role="dialog" aria-modal="true" aria-label="@Heading" @onclick:stopPropagation="true">
+                <h3>@Heading</h3>
+                <dl class="kv">
+                    <dt>Machine</dt>
+                    <dd>@machine <span class="muted mono">@Machine.MachineId</span></dd>
+                    <dt>@(Action.Kind == AgentActionKind.Clone ? "Folder" : "Repo")</dt>
+                    <dd class="mono">@Action.RepoPath</dd>
+                    <dt>Action</dt>
+                    <dd>@AgentActions.Summary(Action)</dd>
+                </dl>
+                <p>The agent on @machine does the same as this, and nothing else:</p>
+                <div class="command"><code>@AgentActions.CommandLine(Action)</code></div>
+                <p>@AgentActions.Safeguard(Action)</p>
+                @ChildContent
+                <p>It is recorded as queued by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and never runs.</p>
+                @if (_error is not null)
+                {
+                    <div class="banner danger">@_error</div>
+                }
+                <div class="modal-actions">
+                    <button type="button" @onclick="Cancel">Cancel</button>
+                    <button type="button" class="primary" disabled="@_busy" @onclick="ConfirmAsync">@(Confirm ?? Label)</button>
+                </div>
+            </div>
+        </div>
+    }
+</span>
+
+@code {
+    [Parameter, EditorRequired] public MachineView Machine { get; set; } = default!;
+
+    [Parameter, EditorRequired] public AgentAction Action { get; set; } = default!;
+
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+
+    /// <summary>What a click does, for the tooltip.</summary>
+    [Parameter] public string? What { get; set; }
+
+    /// <summary>The dialog's question. "<see cref="Label"/>?" when not given.</summary>
+    [Parameter] public string? Ask { get; set; }
+
+    /// <summary>The dialog's confirm button. The label when not given.</summary>
+    [Parameter] public string? Confirm { get; set; }
+
+    /// <summary>A reason this cannot be done right now that the agent's own state does not explain (a dirty working tree, say).</summary>
+    [Parameter] public string? BlockedBy { get; set; }
+
+    [Parameter] public string Class { get; set; } = "run";
+
+    /// <summary>Extra lines for the dialog.</summary>
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private bool _asking;
+    private bool _busy;
+    private string _login = "";
+    private string? _error;
+
+    private ActionAvailability Availability => Board.For(Machine, Action.Kind);
+
+    private ActionStatus Status => Board.StatusOf(Machine.MachineId, Action);
+
+    // aria-disabled, not disabled: a disabled button shows no tooltip in some browsers, and the tooltip is the explanation.
+    private bool Blocked => !Availability.Available || BlockedBy is not null;
+
+    private string Heading => Ask ?? $"{Label}?";
+
+    private string Title => Availability.WhyNot ?? BlockedBy ?? $"{What ?? AgentActions.Summary(Action)}. You confirm first.";
+
+    private static string StatusTitle(AgentActionEntity row) =>
+        row.Status is AgentActionStatus.Failed or AgentActionStatus.Expired && !string.IsNullOrWhiteSpace(row.Output)
+            ? row.Output!
+            : $"Queued by {row.QueuedBy} at {Fmt.Date(row.QueuedAt)}";
+
+    private async Task AskAsync()
+    {
+        if (Blocked)
+        {
+            return;
+        }
+
+        _login = await Board.LoginAsync();
+        _error = null;
+        _asking = true;
+    }
+
+    private void Cancel()
+    {
+        _asking = false;
+        _error = null;
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _error = await Board.QueueAsync(Machine.MachineId, Action);
+            _asking = _error is not null;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

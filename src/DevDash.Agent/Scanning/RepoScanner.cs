@@ -16,17 +16,22 @@ public sealed class RepoScanner
     private readonly FetchService _fetch;
     private readonly IOptionsMonitor<AgentOptions> _options;
     private readonly CommitGraphCollector _graphs;
+    private readonly SafetyCollector _safety;
+    private readonly ActivityCollector _activity;
 
-    public RepoScanner(GitRunner git, FetchService fetch, IOptionsMonitor<AgentOptions> options)
+    public RepoScanner(GitRunner git, FetchService fetch, IOptionsMonitor<AgentOptions> options, TimeProvider? time = null)
     {
+        _activity = new ActivityCollector(git, time);
         _git = git;
         _graphs = new CommitGraphCollector(git);
+        _safety = new SafetyCollector(git, options);
         _fetch = fetch;
         _options = options;
     }
 
     /// <summary>Returns the git state, or throws <see cref="GitScanException"/> when the folder cannot be read as a repo.</summary>
-    public async Task<GitState> ScanAsync(string path, bool allowFetch, CancellationToken ct, ForcedFetch? forcedFetch = null)
+    /// <param name="justFetched">The caller has fetched this repository itself a moment ago: do not fetch, and compare tags with the remote now.</param>
+    public async Task<GitState> ScanAsync(string path, bool allowFetch, CancellationToken ct, ForcedFetch? forcedFetch = null, bool justFetched = false)
     {
         var timeout = TimeSpan.FromSeconds(_options.CurrentValue.GitTimeoutSeconds);
         Task<GitResult> Run(params string[] args) => _git.RunAsync(path, args, timeout, ct);
@@ -43,12 +48,14 @@ public sealed class RepoScanner
 
         var remotes = RemoteListParser.Parse((await Run("remote", "-v").ConfigureAwait(false)).StdOut);
 
-        if (allowFetch)
+        var fetched = justFetched;
+        if (allowFetch && !justFetched)
         {
-            await _fetch.FetchIfDueAsync(path, commonDir, remotes.Count > 0, ct, forcedFetch).ConfigureAwait(false);
+            fetched = await _fetch.FetchIfDueAsync(path, commonDir, remotes.Count > 0, ct, forcedFetch).ConfigureAwait(false);
         }
 
-        var statusResult = await Run("status", "--porcelain=v2", "--branch").ConfigureAwait(false);
+        // --ignored adds the ignored files to the same call; the safety facts are read from them.
+        var statusResult = await Run("status", "--porcelain=v2", "--branch", "--ignored").ConfigureAwait(false);
         if (!statusResult.Ok)
         {
             throw new GitScanException(statusResult.StdErr.Trim());
@@ -97,6 +104,35 @@ public sealed class RepoScanner
             }
         }
 
+        // The branch map may be drawn along another line than the default branch (develop, in git-flow).
+        // "Merged" on the map then means merged into that line; cleanup keeps asking about the default branch.
+        var graphTrunk = await GraphTrunkAsync(args => Run(args), mergeTarget, defaultBranch).ConfigureAwait(false);
+        if (graphTrunk is not null && graphTrunk != mergeTarget)
+        {
+            var merged = await Run("for-each-ref", "--merged", graphTrunk, "--format=%(refname:short)", "refs/heads").ConfigureAwait(false);
+            if (merged.Ok)
+            {
+                var names = ForEachRefParser.ParseNames(merged.StdOut);
+                branches = branches.Select(b => b with { MergedIntoTrunk = names.Contains(b.Name) }).ToList();
+            }
+        }
+
+        // Which branches are on a remote, local-only tags, ignored and secret-looking files, submodules.
+        var (safety, checkedBranches) = await _safety.CollectAsync(
+            path,
+            new SafetyRequest
+            {
+                CommonDir = commonDir,
+                Status = status,
+                Branches = branches,
+                Remotes = remotes,
+                MayAskRemote = justFetched || (allowFetch && _options.CurrentValue.AutoFetch.Enabled),
+                Fetched = fetched,
+            },
+            timeout,
+            ct).ConfigureAwait(false);
+        branches = checkedBranches;
+
         var worktrees = WorktreeListParser.Parse((await Run("worktree", "list", "--porcelain").ConfigureAwait(false)).StdOut);
         var stashes = StashListParser.Parse((await Run("stash", "list", "--format=" + StashListParser.Format).ConfigureAwait(false)).StdOut);
 
@@ -120,8 +156,6 @@ public sealed class RepoScanner
             }
         }
 
-        var graphTrunk = await GraphTrunkAsync(args => Run(args), mergeTarget, defaultBranch).ConfigureAwait(false);
-
         var isLinked = !PathsEqual(commonDir, gitDir);
         // Linked worktrees get the repository's graph too (it is cached, so that costs one for-each-ref);
         // MachineScanner drops the copies when the main working tree is in the same snapshot.
@@ -141,6 +175,11 @@ public sealed class RepoScanner
             },
             timeout,
             ct).ConfigureAwait(false);
+
+        // Commits per day for the heatmap. Cached against the refs, like the graph.
+        var activity = _options.CurrentValue.Activity
+            ? await _activity.CollectAsync(path, commonDir, timeout, ct).ConfigureAwait(false)
+            : null;
 
         var (trackedAt, untrackedAt) = NewestChange(path, status.Paths);
 
@@ -163,12 +202,15 @@ public sealed class RepoScanner
             DefaultBranch = defaultBranch,
             IsLinkedWorktree = isLinked,
             CommonDir = commonDir,
+            MainWorktreePath = isLinked && worktrees.Count > 0 ? worktrees[0].Path : null,
             LastFetchAt = FetchService.LastFetch(commonDir),
             Remotes = remotes,
             Branches = branches,
             Worktrees = worktrees,
             Stashes = stashes,
             Graph = graph,
+            Safety = safety,
+            Activity = activity,
         };
     }
 

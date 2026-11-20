@@ -2,6 +2,7 @@ using DevDash.Contracts;
 using DevDash.Core;
 using DevDash.Core.GitHub;
 using DevDash.Hub.GitHub;
+using Microsoft.Extensions.Options;
 
 namespace DevDash.Hub.Services;
 
@@ -9,6 +10,14 @@ namespace DevDash.Hub.Services;
 public sealed record CloneView(MachineView Machine, DevEntry Entry, string? Container)
 {
     public GitState? Git => Entry.Git;
+
+    /// <summary>The main working tree this linked worktree hangs off, when that machine reported both.</summary>
+    public DevEntry? Main { get; init; }
+
+    /// <summary>For a linked worktree: whether it looks finished with (merged, deleted upstream, idle). Null for anything else.</summary>
+    public WorktreeStaleness? Stale { get; init; }
+
+    public bool IsLinkedWorktree => Git is { IsLinkedWorktree: true };
     public string DisplayName => Container is null ? Entry.Name : $"{Container}/{Entry.Name}";
 
     public string MachineKey() => Machine.MachineId;
@@ -38,17 +47,25 @@ public sealed record RepoRow
 }
 
 /// <summary>Builds the local-to-remote join from the latest snapshots and the latest GitHub poll.</summary>
-public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDescriptionProvider descriptions)
+/// <remarks>
+/// A linked worktree is never a row of its own: it is a clone of its main working tree's row, listed
+/// straight after it. That holds for repos with no hosted remote too, whose key is otherwise their path.
+/// </remarks>
+public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDescriptionProvider descriptions, IOptionsMonitor<HubOptions> options, TimeProvider time)
 {
     public async Task<IReadOnlyList<RepoRow>> GetAsync(CancellationToken ct = default)
     {
         var gh = github.Current;
         var groups = new Dictionary<string, (EntryKind Kind, List<CloneView> Clones)>(StringComparer.OrdinalIgnoreCase);
 
-        void Add(MachineView machine, DevEntry entry, string? container)
+        var now = time.GetUtcNow();
+        var staleDays = options.CurrentValue.Cleanup.WorktreeStaleDays;
+
+        void Add(MachineView machine, DevEntry entry, string? container, IReadOnlyDictionary<string, DevEntry> mains)
         {
+            var main = RepoIdentity.MainOf(entry, mains);
             var key = entry.Kind == EntryKind.GitRepo
-                ? RepoIdentity.KeyFor(machine.MachineId, entry)
+                ? RepoIdentity.KeyFor(machine.MachineId, main ?? entry)
                 : $"{RepoIdentity.LocalPrefix}{machine.MachineId}:{entry.Path}";
             if (!groups.TryGetValue(key, out var group))
             {
@@ -56,23 +73,24 @@ public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDe
                 groups[key] = group;
             }
 
-            group.Clones.Add(new CloneView(machine, entry, container));
+            group.Clones.Add(new CloneView(machine, entry, container) { Main = main, Stale = WorktreeState.Of(entry, now, staleDays) });
         }
 
         foreach (var machine in snapshots.Machines)
         {
+            var mains = RepoIdentity.MainWorkingTrees(machine.Snapshot.Entries);
             foreach (var entry in machine.Snapshot.Entries)
             {
                 if (entry.Kind == EntryKind.WorktreeContainer && entry.Children.Count > 0)
                 {
                     foreach (var child in entry.Children)
                     {
-                        Add(machine, child, entry.Name);
+                        Add(machine, child, entry.Name, mains);
                     }
                 }
                 else
                 {
-                    Add(machine, entry, null);
+                    Add(machine, entry, null, mains);
                 }
             }
         }
@@ -86,6 +104,8 @@ public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDe
         {
             var clones = group.Clones
                 .OrderBy(c => c.Machine.Machine.Hostname, StringComparer.OrdinalIgnoreCase)
+                // Each main working tree, then the worktrees linked to it.
+                .ThenBy(c => (c.Main ?? c.Entry).Path, StringComparer.Ordinal)
                 .ThenBy(c => c.Git?.IsLinkedWorktree ?? false)
                 .ThenBy(c => c.Entry.Path, StringComparer.Ordinal)
                 .ToList();
@@ -97,7 +117,7 @@ public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDe
             string? owner = null;
             if (RepoIdentity.IsLocalOnly(key))
             {
-                name = clones[0].DisplayName;
+                name = (clones.FirstOrDefault(c => !c.IsLinkedWorktree) ?? clones[0]).DisplayName;
             }
             else if (repo is not null)
             {

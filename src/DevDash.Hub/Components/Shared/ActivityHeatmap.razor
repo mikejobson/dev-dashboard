@@ -1,0 +1,59 @@
+@* A year of commits per day as a calendar grid, GitHub style. Drawn as SVG on the server (ActivityView):
+   each square has a <title>, so hovering shows "12 commits on 3 Nov" and a screen reader can read it;
+   the months table under it is the same data without colour. *@
+@if (_map is not null)
+{
+    <div class="card heat @(Compact ? "compact" : "")">
+        <div class="heat-head">
+            <span><strong>@Fmt.Count(_map.Total, "commit")</strong> <span class="muted">@Caption</span></span>
+            @ChildContent
+        </div>
+        <div class="heat-scroll">@((MarkupString)ActivityView.Svg(_map, Today, Compact))</div>
+        <div class="heat-foot muted small">
+            <span>
+                @(_map.Busiest is { } busiest ? $"Busiest day: {ActivityView.Tooltip(busiest, Today)}. " : "")@Note
+            </span>
+            <span class="heat-legend" aria-hidden="true">
+                <span>Less</span><i style="background:var(--heat-0)"></i><i style="background:var(--heat-1)"></i><i style="background:var(--heat-2)"></i><i style="background:var(--heat-3)"></i><i style="background:var(--heat-4)"></i><span>More</span>
+            </span>
+        </div>
+        @if (!Compact && _map.Total > 0)
+        {
+            <details class="heat-months small">
+                <summary class="muted">By month</summary>
+                <table>
+                    <thead><tr><th>Month</th><th class="right">Commits</th><th class="right">Days with commits</th></tr></thead>
+                    <tbody>
+                        @foreach (var (month, count, days) in _map.ByMonth)
+                        {
+                            <tr><td>@month</td><td class="right">@count</td><td class="right">@days</td></tr>
+                        }
+                    </tbody>
+                </table>
+            </details>
+        }
+    </div>
+}
+
+@code {
+    /// <summary>Commits per day. Days outside the last year are ignored.</summary>
+    [Parameter, EditorRequired] public IReadOnlyDictionary<DateOnly, int> Days { get; set; } = default!;
+
+    [Parameter, EditorRequired] public DateOnly Today { get; set; }
+
+    /// <summary>Smaller squares and no weekday labels, for a repo's page.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    /// <summary>What follows the total: "in the last year, across 12 repos".</summary>
+    [Parameter] public string Caption { get; set; } = "in the last year";
+
+    /// <summary>A sentence for the footer, after the busiest day.</summary>
+    [Parameter] public string? Note { get; set; }
+
+    /// <summary>Controls at the right of the heading, e.g. a mine/everyone switch.</summary>
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private Heatmap? _map;
+
+    protected override void OnParametersSet() => _map = ActivityView.Build(Days, Today);
+}

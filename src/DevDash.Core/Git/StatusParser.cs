@@ -5,7 +5,7 @@ namespace DevDash.Core.Git;
 
 public sealed record ChangedPath(string Path, bool Tracked);
 
-/// <summary>Parsed output of <c>git status --porcelain=v2 --branch</c>.</summary>
+/// <summary>Parsed output of <c>git status --porcelain=v2 --branch</c>, with or without <c>--ignored</c>.</summary>
 public sealed record StatusResult
 {
     public string? HeadSha { get; init; }
@@ -25,6 +25,12 @@ public sealed record StatusResult
     public int Untracked { get; init; }
     public int Conflicted { get; init; }
     public IReadOnlyList<ChangedPath> Paths { get; init; } = [];
+
+    /// <summary>
+    /// Ignored files and folders (a folder ends with <c>/</c>), when git was asked with <c>--ignored</c>.
+    /// A folder whose whole content is ignored is listed once, not file by file.
+    /// </summary>
+    public IReadOnlyList<string> Ignored { get; init; } = [];
 }
 
 public static class StatusParser
@@ -35,6 +41,7 @@ public static class StatusParser
         bool detached = false, initial = false, sawAb = false;
         int ahead = 0, behind = 0, staged = 0, unstaged = 0, untracked = 0, conflicted = 0;
         var paths = new List<ChangedPath>();
+        var ignored = new List<string>();
 
         foreach (var raw in output.Split('\n'))
         {
@@ -96,8 +103,14 @@ public static class StatusParser
                     untracked++;
                     AddPath(paths, line.Length > 2 ? line[2..] : null, tracked: false);
                     break;
+                case '!':
+                    if (line.Length > 2)
+                    {
+                        ignored.Add(Unquote(line[2..]));
+                    }
+
+                    break;
                 default:
-                    // '!' ignored entries and anything unknown
                     break;
             }
         }
@@ -117,6 +130,7 @@ public static class StatusParser
             Untracked = untracked,
             Conflicted = conflicted,
             Paths = paths,
+            Ignored = ignored,
         };
     }
 

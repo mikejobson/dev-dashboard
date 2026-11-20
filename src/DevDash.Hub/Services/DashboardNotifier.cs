@@ -7,6 +7,9 @@ public enum DashboardChange
     Findings,
     Machines,
     Actions,
+
+    /// <summary>An alert opened, cleared or was sent, or the alert settings changed.</summary>
+    Alerts,
 }
 
 /// <summary>

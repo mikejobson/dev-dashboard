@@ -1,0 +1,437 @@
+@page "/alerts"
+@inherits LivePage
+@inject AlertService AlertRuns
+@inject AlertSettings Settings
+@inject IOptionsMonitor<HubOptions> Hub
+@inject Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider Auth
+
+<PageTitle>Alerts · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Alerts</h1>
+        <p>What the hub tells you about without being asked, and where it sends it.</p>
+    </div>
+    <div class="toolbar">
+        <span class="muted small" title="@Fmt.Date(AlertRuns.LastEvaluatedAt)">@(AlertRuns.LastEvaluatedAt is null ? "Not checked yet" : "Checked " + Fmt.Ago(AlertRuns.LastEvaluatedAt, Now))</span>
+        <button type="button" disabled="@_busy" title="Look at every trigger now, and send whatever is due" @onclick="CheckAsync">Check now</button>
+    </div>
+</div>
+
+@if (_edit is not null)
+{
+    @if (!_saved.Enabled)
+    {
+        <div class="banner">Alerts are switched off. Nothing is checked or sent.</div>
+    }
+    else if (_activeChannels.Count == 0)
+    {
+        <div class="banner info">No channel is switched on and set up, so nothing is sent. Alerts that come up meanwhile wait below and go out when one is.</div>
+    }
+    @if (_publicUrl is null)
+    {
+        <div class="banner info">
+            Alerts carry no link back to the dashboard yet. Set <code>Hub:PublicUrl</code> (<code>Hub__PublicUrl</code> in the environment)
+            to the address you open this page at.
+        </div>
+    }
+    @if (_error is not null)
+    {
+        <div class="banner danger">@_error</div>
+    }
+
+    <h2>Open now <span class="muted small">@_open.Count</span></h2>
+    @if (_open.Count == 0)
+    {
+        <div class="card muted">Nothing is alerting.</div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="stack">
+                <thead>
+                    <tr><th>Alert</th><th>Kind</th><th>Sent</th><th class="right">Since</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var alert in _open.Take(_openShown))
+                    {
+                        <tr @key="alert.Key">
+                            <td class="cell-main"><a class="title-link" href="@alert.Path">@alert.Title</a></td>
+                            <td data-label="Kind"><span class="chip @KindClass(alert.Trigger)">@AlertTriggers.Label(alert.Trigger)</span></td>
+                            <td data-label="Sent" class="sub">
+                                @if (alert.LastNotifiedAt is { } sent)
+                                {
+                                    <span title="@Fmt.Date(sent)">@Fmt.Ago(sent, Now)</span>
+                                }
+                                else if (alert.Attempts >= AlertPlanner.MaxAttempts)
+                                {
+                                    <span class="chip danger" title="Every channel failed @alert.Attempts times. See the delivery log.">not delivered</span>
+                                }
+                                else if (alert.Attempts > 0)
+                                {
+                                    <span class="chip warn" title="Every channel failed. It is tried again, waiting longer each time.">retrying</span>
+                                }
+                                else
+                                {
+                                    <span class="chip muted" title="@WaitingWhy">waiting</span>
+                                }
+                            </td>
+                            <td data-label="Since" class="cell-when right nowrap sub" title="@Fmt.Date(alert.FirstSeenAt)">@Fmt.Ago(alert.FirstSeenAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (_open.Count > _openShown)
+        {
+            <div class="more-row">
+                <button type="button" @onclick="() => _openShown += 50">Show more</button>
+                <span class="muted small">@_openShown of @_open.Count</span>
+            </div>
+        }
+    }
+
+    <h2>Channels</h2>
+    <div class="alert-channels">
+        <section class="card alert-channel">
+            <header>
+                <label class="check"><input type="checkbox" @bind="_edit.Channels.Webhook.Enabled" /> <strong>Webhook</strong></label>
+                @ChannelState(AlertChannels.Webhook)
+            </header>
+            <p class="muted small">A JSON <code>POST</code> to any address: your own script, a chat tool, an automation service.</p>
+            @SecretField(AlertSettings.WebhookUrl, "URL", "https://…")
+            @SecretField(AlertSettings.WebhookToken, "Bearer token (optional)", "")
+            @TestRow(AlertChannels.Webhook)
+        </section>
+
+        <section class="card alert-channel">
+            <header>
+                <label class="check"><input type="checkbox" @bind="_edit.Channels.Ntfy.Enabled" /> <strong>ntfy</strong></label>
+                @ChannelState(AlertChannels.Ntfy)
+            </header>
+            <p class="muted small">Push notifications to your phone through ntfy.sh or your own ntfy server.</p>
+            <label class="field"><span>Server</span><input type="text" @bind="_edit.Channels.Ntfy.Server" placeholder="https://ntfy.sh" /></label>
+            @SecretField(AlertSettings.NtfyTopic, "Topic", "")
+            @SecretField(AlertSettings.NtfyToken, "Access token (optional)", "tk_…")
+            @TestRow(AlertChannels.Ntfy)
+        </section>
+
+        <section class="card alert-channel">
+            <header>
+                <label class="check"><input type="checkbox" @bind="_edit.Channels.HomeAssistant.Enabled" /> <strong>Home Assistant</strong></label>
+                @ChannelState(AlertChannels.HomeAssistant)
+            </header>
+            <p class="muted small">Fires a webhook trigger, so an automation decides what happens: a phone notification, a light, a spoken message.</p>
+            <label class="field"><span>Address</span><input type="text" @bind="_edit.Channels.HomeAssistant.Url" placeholder="http://homeassistant.local:8123" /></label>
+            @SecretField(AlertSettings.HomeAssistantWebhookId, "Webhook ID", "")
+            @TestRow(AlertChannels.HomeAssistant)
+        </section>
+    </div>
+
+    <h2>Triggers</h2>
+    <div class="card alert-triggers">
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.AtRisk.Enabled" /> Work that exists on one machine only</label>
+            <span class="alert-with">
+                for <input type="number" min="0" max="3650" @bind="_edit.Triggers.AtRisk.Days" aria-label="Days" /> days or more, counting
+                <select @bind="_edit.Triggers.AtRisk.Level" aria-label="Which risks">
+                    <option value="High">commits on no remote</option>
+                    <option value="Medium">also uncommitted changes, stashes and tags</option>
+                    <option value="Low">also untracked files</option>
+                </select>
+            </span>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.MachineOffline.Enabled" /> A machine goes offline</label>
+            <span class="alert-with">
+                for <input type="number" min="1" @bind="_edit.Triggers.MachineOffline.Minutes" aria-label="Minutes" /> minutes or more, except
+                <input type="text" class="wide" @bind="_edit.Triggers.MachineOffline.Ignore" placeholder="machines to leave out, separated by commas" aria-label="Machines to leave out" />
+            </span>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.Diverged.Enabled" /> A branch diverges across machines</label>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.CiFailed.Enabled" /> CI turns red on one of my pull requests</label>
+            <span class="alert-with"><label class="check"><input type="checkbox" @bind="_edit.Triggers.CiFailed.IncludeDrafts" /> drafts too</label></span>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.ActionFailed.Enabled" /> An agent action fails</label>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Triggers.DailyDigest.Enabled" /> A daily digest</label>
+            <span class="alert-with">at <input type="text" class="time" @bind="_edit.Triggers.DailyDigest.Time" placeholder="08:00" aria-label="Time of day" /></span>
+        </div>
+    </div>
+
+    <h2>Delivery</h2>
+    <div class="card alert-triggers">
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.Enabled" /> Alerts on</label>
+        </div>
+        <div class="alert-trigger">
+            <label class="check"><input type="checkbox" @bind="_edit.QuietHours.Enabled" /> Quiet hours</label>
+            <span class="alert-with">
+                from <input type="text" class="time" @bind="_edit.QuietHours.Start" placeholder="22:00" aria-label="Quiet hours start" />
+                to <input type="text" class="time" @bind="_edit.QuietHours.End" placeholder="07:00" aria-label="Quiet hours end" />
+                <span class="muted small">What comes up meanwhile is sent afterwards, if it is still true.</span>
+            </span>
+        </div>
+        <div class="alert-trigger">
+            <span>Say it again every</span>
+            <span class="alert-with">
+                <input type="number" min="0" @bind="_edit.RenotifyHours" aria-label="Hours" /> hours while it lasts
+                <span class="muted small">0: once, then again only after it clears and comes back.</span>
+            </span>
+        </div>
+        <div class="alert-trigger">
+            <span>Time zone</span>
+            <span class="alert-with">
+                <input type="text" @bind="_edit.TimeZone" placeholder="the hub's own" aria-label="Time zone" />
+                <span class="muted small">@ZoneNote</span>
+            </span>
+        </div>
+    </div>
+
+    <div class="toolbar alert-save">
+        <button type="button" class="primary" disabled="@_busy" @onclick="SaveAsync">Save</button>
+        @if (_overrides > 0)
+        {
+            <button type="button" class="danger" disabled="@_busy" title="Forget everything saved on this page, secrets included, and go back to what the hub's configuration says" @onclick="ResetAsync">Reset to configuration</button>
+            <span class="muted small">@Fmt.Count(_overrides, "setting") changed here</span>
+        }
+        @if (_notice is not null)
+        {
+            <span class="chip ok">@_notice</span>
+        }
+    </div>
+
+    <h2>Delivery log <span class="muted small">@(_failures > 0 ? $"{_failures} failed" : "")</span></h2>
+    @if (_deliveries.Count == 0)
+    {
+        <div class="card muted">Nothing has been sent yet.</div>
+    }
+    else
+    {
+        <div class="toolbar">
+            <button type="button" class="toggle @(_failedOnly ? "on" : "")" aria-pressed="@(_failedOnly ? "true" : "false")" @onclick="() => _failedOnly = !_failedOnly">Failed only</button>
+        </div>
+        <div class="table-wrap">
+            <table class="stack">
+                <thead>
+                    <tr><th>Alert</th><th>Channel</th><th>Result</th><th class="right">When</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var delivery in _deliveries.Where(d => !_failedOnly || !d.Ok))
+                    {
+                        <tr @key="delivery.Id">
+                            <td class="cell-main">@delivery.Title <span class="chip muted gap">@AlertTriggers.Label(delivery.Trigger)</span></td>
+                            <td data-label="Channel" class="sub">@AlertChannels.Label(delivery.Channel)</td>
+                            <td data-label="Result">
+                                @if (delivery.Ok)
+                                {
+                                    <span class="chip quiet-ok">sent</span>
+                                }
+                                else
+                                {
+                                    <span class="chip danger">failed</span> <span class="sub">@delivery.Error</span>
+                                }
+                            </td>
+                            <td data-label="When" class="cell-when right nowrap sub" title="@Fmt.Date(delivery.At)">@Fmt.Ago(delivery.At, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+@code {
+    private AlertOptions? _edit;
+    private AlertOptions _saved = new();
+    private IReadOnlyDictionary<string, SecretState> _secrets = new Dictionary<string, SecretState>();
+    private readonly Dictionary<string, string> _typed = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _removing = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DeliveryResult> _tests = [];
+    private IReadOnlyList<AlertStateEntity> _open = [];
+    private IReadOnlyList<AlertDeliveryEntity> _deliveries = [];
+    private IReadOnlyList<string> _activeChannels = [];
+    private string? _publicUrl;
+    private string? _error;
+    private string? _notice;
+    private string? _testing;
+    private int _overrides;
+    private int _failures;
+    private int _openShown = 50;
+    private bool _failedOnly;
+    private bool _busy;
+
+    private string WaitingWhy => _activeChannels.Count == 0 ? "No channel is switched on yet" : "Held until quiet hours end, or until the next check";
+
+    private string ZoneNote => _edit is { } edit && !new AlertOptions { TimeZone = (edit.TimeZone ?? "").Trim() }.ZoneIsKnown
+        ? "This hub does not know that zone. Use a name like Europe/London."
+        : "For quiet hours and the digest. A name like Europe/London.";
+
+    protected override async Task LoadAsync()
+    {
+        // The form is only filled once: a snapshot arriving must not undo what is being typed.
+        if (_edit is null)
+        {
+            await LoadSettingsAsync();
+        }
+
+        _saved = await Settings.GetAsync();
+        _secrets = await Settings.SecretsAsync();
+        _overrides = await Settings.OverrideCountAsync();
+        _activeChannels = AlertChannels.Active(_saved);
+        _publicUrl = AlertService.Link(Hub.CurrentValue.PublicUrl, "");
+        _open = await AlertRuns.OpenAsync();
+        _deliveries = await AlertRuns.DeliveriesAsync(100);
+        _failures = _deliveries.Count(d => !d.Ok);
+    }
+
+    private async Task LoadSettingsAsync()
+    {
+        _edit = await Settings.GetAsync();
+        _typed.Clear();
+        _removing.Clear();
+    }
+
+    private async Task<string> LoginAsync() =>
+        (await Auth.GetAuthenticationStateAsync()).User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+
+    private async Task SaveAsync()
+    {
+        if (_edit is null)
+        {
+            return;
+        }
+
+        await RunAsync(async () =>
+        {
+            var secrets = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in _removing)
+            {
+                secrets[key] = null;
+            }
+
+            foreach (var (key, value) in _typed.Where(t => !string.IsNullOrWhiteSpace(t.Value)))
+            {
+                secrets[key] = value;
+            }
+
+            await Settings.SaveAsync(_edit, secrets, await LoginAsync());
+            await LoadSettingsAsync();
+            _tests.Clear();
+            _notice = "Saved";
+
+            // What was waiting for a channel can go now.
+            await AlertRuns.EvaluateAsync();
+        });
+    }
+
+    private Task ResetAsync() => RunAsync(async () =>
+    {
+        await Settings.ResetAsync(await LoginAsync());
+        await LoadSettingsAsync();
+        _tests.Clear();
+        _notice = "Back to configuration";
+    });
+
+    private Task CheckAsync() => RunAsync(async () =>
+    {
+        var run = await AlertRuns.EvaluateAsync();
+        _notice = !run.Ran ? null : run.Sent > 0 ? $"Sent {run.Sent}" : "Nothing new";
+    });
+
+    private async Task TestAsync(string channel)
+    {
+        _testing = channel;
+        _tests.Remove(channel);
+        await RunAsync(async () => _tests[channel] = await AlertRuns.SendTestAsync(channel));
+        _testing = null;
+    }
+
+    private async Task RunAsync(Func<Task> work)
+    {
+        _busy = true;
+        _error = null;
+        _notice = null;
+        try
+        {
+            await work();
+            await LoadAsync();
+        }
+        catch (Exception ex) when (ex is Microsoft.EntityFrameworkCore.DbUpdateException or InvalidOperationException or HttpRequestException)
+        {
+            _error = "That did not work: " + ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string KindClass(string trigger) => trigger switch
+    {
+        AlertTriggers.AtRisk or AlertTriggers.Diverged or AlertTriggers.CiFailed => "danger",
+        AlertTriggers.MachineOffline or AlertTriggers.ActionFailed => "warn",
+        _ => "muted",
+    };
+
+    private RenderFragment ChannelState(string channel) => @<span class="chips">
+        @if (AlertChannels.WhyNotReady(channel, _saved) is { } why)
+        {
+            <span class="chip muted" title="@why">not set up</span>
+        }
+        else if (AlertChannels.IsEnabled(channel, _saved))
+        {
+            <span class="chip ok">on</span>
+        }
+        else
+        {
+            <span class="chip muted">off</span>
+        }
+    </span>;
+
+    /// <summary>A write-only field: the page is told whether there is a value, never what it is.</summary>
+    private RenderFragment SecretField(string key, string label, string placeholder) => @<div class="field">
+        <span>@label</span>
+        @{
+            var state = _secrets.GetValueOrDefault(key) ?? new SecretState(false, false);
+            var removing = _removing.Contains(key);
+        }
+        <input type="password" autocomplete="new-password" spellcheck="false" aria-label="@label"
+               placeholder="@(state.Set && !removing ? "leave empty to keep it" : placeholder)"
+               value="@_typed.GetValueOrDefault(key)" @onchange="e => _typed[key] = e.Value?.ToString() ?? string.Empty" />
+        <span class="chip @(removing ? "warn" : state.Set ? "ok" : "muted")" data-secret="@key">@(removing ? "will be removed" : state.Text)</span>
+        @if (state.SavedHere && !removing)
+        {
+            <button type="button" class="link" title="Forget the value saved here when you press Save" @onclick="() => _removing.Add(key)">Remove</button>
+        }
+    </div>;
+
+    private RenderFragment TestRow(string channel) => @<div class="alert-test">
+        <button type="button" disabled="@(_busy || AlertChannels.WhyNotReady(channel, _saved) is not null)"
+                title="@(AlertChannels.WhyNotReady(channel, _saved) ?? "Send one test message with the saved settings")" @onclick="() => TestAsync(channel)">Send test</button>
+        @if (_testing == channel)
+        {
+            <span class="muted small">Sending…</span>
+        }
+        else if (_tests.TryGetValue(channel, out var result))
+        {
+            @if (result.Ok)
+            {
+                <span class="chip ok">sent</span>
+            }
+            else
+            {
+                <span class="chip danger">failed</span> <span class="sub">@result.Error</span>
+            }
+        }
+        else if (AlertChannels.WhyNotReady(channel, _saved) is not null)
+        {
+            <span class="muted small">Save the settings first.</span>
+        }
+    </div>;
+}

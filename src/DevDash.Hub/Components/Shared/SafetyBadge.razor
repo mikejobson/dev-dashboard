@@ -1,0 +1,13 @@
+@* A compact verdict for one working tree: at risk, safe to remove, safe with caveats or not sure. The tooltip has the reasons. *@
+@if (Safety is not null)
+{
+    <a class="chip safety-badge @SafetyView.VerdictClass(Safety.Verdict)" href="safety" title="@Title">@SafetyView.VerdictLabel(Safety.Verdict)</a>
+}
+
+@code {
+    [Parameter] public SafetyAssessment? Safety { get; set; }
+
+    private string Title => Safety is null || Safety.Reasons.Count == 0
+        ? "Everything here is on a remote or can be rebuilt."
+        : string.Join("\n", Safety.Reasons.Select(r => r.Text));
+}

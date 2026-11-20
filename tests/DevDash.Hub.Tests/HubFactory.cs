@@ -26,6 +26,32 @@ public sealed class HubFactory : WebApplicationFactory<Program>
     public TimeProvider? Time { get; init; }
 
     /// <summary>
+    /// Stands in for every alert channel: the hub never posts an alert anywhere real in tests. Null (the
+    /// default) answers 200 to everything. <see cref="AlertRequests"/> records what was sent.
+    /// </summary>
+    public Func<HttpRequestMessage, string, HttpResponseMessage>? AlertResponder { get; set; }
+
+    /// <summary>The alerts the hub tried to send: address, Authorization header and body.</summary>
+    public List<(string Url, string? Auth, string Body)> AlertRequests { get; } = [];
+
+    /// <summary>Extra configuration, e.g. <c>Hub:Alerts:Channels:Ntfy:Topic</c>. Set before the hub starts.</summary>
+    public Dictionary<string, string?> Settings { get; } = [];
+
+    private sealed class AlertStub(HubFactory factory) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+            lock (factory.AlertRequests)
+            {
+                factory.AlertRequests.Add((request.RequestUri!.ToString(), request.Headers.Authorization?.ToString(), body));
+            }
+
+            return factory.AlertResponder?.Invoke(request, body) ?? new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+        }
+    }
+
+    /// <summary>
     /// What "GitHub" answers when the hub asks for the agent's releases. The hub never reaches the real
     /// GitHub in tests. Set before the first request to the hub; the default is no releases at all.
     /// </summary>
@@ -74,6 +100,11 @@ public sealed class HubFactory : WebApplicationFactory<Program>
         builder.UseSetting("ConnectionStrings:DevDash", _connectionString);
         builder.UseSetting("GitHub:Enabled", "false");
         builder.UseSetting("Auth:RequireLoopback", RequireLoopback ? "true" : "false");
+        foreach (var (key, value) in Settings)
+        {
+            builder.UseSetting(key, value);
+        }
+
         builder.ConfigureServices(services =>
         {
             if (Time is not null)
@@ -82,6 +113,13 @@ public sealed class HubFactory : WebApplicationFactory<Program>
             }
 
             services.AddHttpClient<DevDash.Hub.Updates.ReleaseClient>().ConfigurePrimaryHttpMessageHandler(() => new ReleaseStub(this));
+            services.AddHttpClient<DevDash.Hub.Alerts.AlertSender>().ConfigurePrimaryHttpMessageHandler(() => new AlertStub(this));
+
+            // Tests evaluate alerts themselves, so the background worker cannot get there first.
+            foreach (var worker in services.Where(d => d.ImplementationType == typeof(DevDash.Hub.Alerts.AlertWorker)).ToList())
+            {
+                services.Remove(worker);
+            }
             services.AddSingleton<DevDash.Hub.GitHub.IGitHubTokenProvider>(new NoToken());
         });
     }

@@ -225,6 +225,9 @@ public sealed record BranchMap
     public IReadOnlyList<PullRequestInfo> UnplacedPullRequests { get; init; } = [];
     public bool HasFolds { get; init; }
 
+    /// <summary>Some merged commit is tied to its merge by a dashed line: the commits in between were not sent.</summary>
+    public bool HasJoinLinks { get; init; }
+
     /// <summary>
     /// The branch the map is drawn along, without its remote: usually the default branch, or
     /// <c>develop</c> in a git-flow repository. Null when no device sent a graph.
@@ -266,6 +269,12 @@ public static class BranchGraph
         public HashSet<int> ReportedBy = [];
         public List<Node> Parents = [];
         public List<Node> Children = [];
+
+        /// <summary>The trunk commit that first contains this one, as an agent reported it.</summary>
+        public string? Join;
+
+        /// <summary>Parents this node is only known to lead to: the commits in between were not sent. Drawn dashed.</summary>
+        public HashSet<Node>? Links;
         public bool Visible;
         public bool Stub;
         public int Hidden;
@@ -298,9 +307,15 @@ public static class BranchGraph
         public bool Visible;
         public required GitState Git;
         public CommitGraph? Graph;
+
+        /// <summary>The branch this device's graph is drawn along, without its remote.</summary>
+        public string? TrunkName;
         public string AgentVersion = "";
         public List<MapTree> Trees = [];
         public List<BranchInfo> Branches = [];
+
+        /// <summary>The remote-tracking refs to show: all of the graph's, less the upstreams of hidden merged branches.</summary>
+        public List<GraphRef> RemoteRefs = [];
         public int Unplaced;
     }
 
@@ -326,6 +341,7 @@ public static class BranchGraph
         foreach (var source in sources)
         {
             source.Branches = source.Git.Branches.Where(b => !options.HideMerged || !IsMergedAway(source, b)).ToList();
+            source.RemoteRefs = (source.Graph?.RemoteRefs ?? []).ToList();
         }
 
         // ---- 1. every commit any shown device reported, joined by sha ----
@@ -341,6 +357,7 @@ public static class BranchGraph
 
                 node.Pos = commit.TrunkPos is { } pos ? Math.Max(pos, node.Pos ?? 0) : node.Pos;
                 node.InTrunk |= commit.InTrunk;
+                node.Join ??= commit.JoinsTrunkAt;
                 node.ReportedBy.Add(source.Index);
                 if (commit.Unpushed)
                 {
@@ -365,6 +382,18 @@ public static class BranchGraph
 
         Node? Find(string? sha) => sha is not null && union.TryGetValue(sha, out var node) ? node : null;
 
+        // The upstream of a hidden merged branch goes with it, unless it has moved on to commits that are not merged.
+        if (options.HideMerged)
+        {
+            foreach (var source in sources)
+            {
+                var kept = source.Branches.Select(b => b.Upstream).OfType<string>().ToHashSet(StringComparer.Ordinal);
+                var gone = source.Git.Branches.Where(b => IsMergedAway(source, b)).Select(b => b.Upstream).OfType<string>().ToHashSet(StringComparer.Ordinal);
+                source.RemoteRefs.RemoveAll(r => gone.Contains(r.Name) && !kept.Contains(r.Name) && r.Name != source.Graph!.TrunkRef
+                    && Find(r.Sha) is { } at && (at.InTrunk || at.Pos is not null));
+            }
+        }
+
         // ---- 2. keep what a shown ref leads to ----
         var roots = new List<Node>();
         foreach (var source in shown)
@@ -382,9 +411,11 @@ public static class BranchGraph
             }
 
             roots.AddRange(source.Trees.Select(t => Find(t.Head)).OfType<Node>());
-            roots.AddRange((source.Graph?.RemoteRefs ?? []).Select(r => Find(r.Sha)).OfType<Node>());
+            roots.AddRange(source.RemoteRefs.Select(r => Find(r.Sha)).OfType<Node>());
             roots.AddRange(source.Git.Stashes.Select(s => Find(s.BaseSha)).OfType<Node>());
         }
+
+        static bool MergedIn(Node n) => n is { InTrunk: true, Pos: null };
 
         var pending = new Stack<Node>(roots);
         while (pending.TryPop(out var node))
@@ -397,10 +428,26 @@ public static class BranchGraph
             node.Visible = true;
             foreach (var parent in node.Commit!.Parents)
             {
-                if (Find(parent) is { Visible: false } next)
+                // With merged branches hidden, a merge on the trunk does not pull in what it merged:
+                // that history is only shown where something still shown needs it (below).
+                if (Find(parent) is { Visible: false } next && !(options.HideMerged && node.Pos is not null && MergedIn(next)))
                 {
                     pending.Push(next);
                 }
+            }
+        }
+
+        if (options.HideMerged)
+        {
+            ShowWaysUp(union);
+        }
+
+        // A merged commit whose way up was not sent still knows which trunk commit it joined at.
+        foreach (var node in union.Values.Where(n => n.Visible && n.Join is not null).ToList())
+        {
+            if (Find(node.Join) is { Pos: not null } join)
+            {
+                join.Visible = true;
             }
         }
 
@@ -450,6 +497,8 @@ public static class BranchGraph
             }
         }
 
+        LinkToJoins(nodes, trunk, Find);
+
         // Uncommitted work is drawn as a commit that does not exist yet, on top of the HEAD it sits on.
         foreach (var source in shown)
         {
@@ -481,7 +530,7 @@ public static class BranchGraph
                 .Concat(source.Trees.Select(t => Find(t.Head)))
                 .OfType<Node>()
                 .ToList();
-            var remoteTips = (source.Graph?.RemoteRefs ?? []).Select(r => Find(r.Sha)).OfType<Node>().ToList();
+            var remoteTips = source.RemoteRefs.Select(r => Find(r.Sha)).OfType<Node>().ToList();
             var local = Reach(
                 localTips.Where(n => n.Visible)
                     .Concat(nodes.Where(n => n.Kind == NodeKind.Ghost && n.Tree!.Source == source.Index))
@@ -581,14 +630,109 @@ public static class BranchGraph
             MergedBranches = mergedBranches,
             UnplacedPullRequests = unplacedPrs,
             HasFolds = hasFolds,
+            HasJoinLinks = nodes.Any(n => n.Links is not null),
         };
+    }
+
+    /// <summary>
+    /// With merged branches hidden, merged history is not followed down from the trunk. What is still
+    /// shown inside it (a branch somebody has checked out, the commit an open branch forks from) keeps
+    /// its way up to the merge that brought it in, when the agents sent one.
+    /// </summary>
+    private static void ShowWaysUp(Dictionary<string, Node> union)
+    {
+        static bool MergedIn(Node n) => n is { InTrunk: true, Pos: null };
+
+        var childrenOf = new Dictionary<string, List<Node>>(StringComparer.Ordinal);
+        foreach (var node in union.Values)
+        {
+            foreach (var parent in node.Commit!.Parents)
+            {
+                if (!childrenOf.TryGetValue(parent, out var list))
+                {
+                    childrenOf[parent] = list = [];
+                }
+
+                list.Add(node);
+            }
+        }
+
+        foreach (var start in union.Values.Where(n => n.Visible && MergedIn(n)).OrderByDescending(n => n.Date).ThenBy(n => n.Id, StringComparer.Ordinal).ToList())
+        {
+            // Breadth first through merged history, to the oldest trunk commit that can be reached.
+            var from = new Dictionary<Node, Node?> { [start] = null };
+            var queue = new Queue<Node>([start]);
+            Node? target = null;
+            while (queue.TryDequeue(out var node))
+            {
+                foreach (var child in childrenOf.GetValueOrDefault(node.Id) ?? [])
+                {
+                    if (from.ContainsKey(child))
+                    {
+                        continue;
+                    }
+
+                    if (child.Pos is not null)
+                    {
+                        if (target is null || child.Pos < target.Pos)
+                        {
+                            from[child] = node;
+                            target = child;
+                        }
+                    }
+                    else if (MergedIn(child))
+                    {
+                        from[child] = node;
+                        queue.Enqueue(child);
+                    }
+                }
+            }
+
+            for (var node = target; node is not null; node = from[node])
+            {
+                node.Visible = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A merged commit with no line up to the trunk (its merge is many commits away, so the agent sent
+    /// only where it joins) is hung under that trunk commit.
+    /// </summary>
+    private static void LinkToJoins(List<Node> nodes, List<Node> trunk, Func<string?, Node?> find)
+    {
+        if (trunk.Count == 0)
+        {
+            return;
+        }
+
+        var anchored = Reach([trunk[0]]);
+        foreach (var node in nodes.Where(n => n is { Kind: NodeKind.Commit, Join: not null, Pos: null }).OrderByDescending(n => n.Date).ThenBy(n => n.Id, StringComparer.Ordinal).ToList())
+        {
+            if (anchored.Contains(node) || find(node.Join) is not { Visible: true, Pos: not null } join)
+            {
+                continue;
+            }
+
+            join.Parents.Add(node);
+            (join.Links ??= []).Add(node);
+            anchored.UnionWith(Reach([node]));
+        }
     }
 
     /// <summary>A merged branch that nothing is checked out on: the ones "hide merged" hides.</summary>
     private static bool IsMergedAway(Source source, BranchInfo branch) =>
-        branch.MergedIntoDefault == true
+        IsMerged(source, branch) && source.Trees.All(t => t.Branch != branch.Name);
+
+    /// <summary>
+    /// Merged, as the map means it: into the line the map is drawn along. That is the default branch
+    /// unless the agent draws along another (develop, in git-flow) and says what is merged into that.
+    /// Neither the default branch nor the trunk itself ever counts as a merged branch.
+    /// </summary>
+    private static bool IsMerged(Source source, BranchInfo branch) =>
+        (branch.MergedIntoTrunk ?? branch.MergedIntoDefault) == true
         && branch.Name != source.Git.DefaultBranch
-        && source.Trees.All(t => t.Branch != branch.Name);
+        && branch.Name != source.TrunkName;
 
     /// <summary>The trunk most devices reported, as a branch name: <c>origin/develop</c> becomes <c>develop</c>.</summary>
     public static string? TrunkNameOf(IEnumerable<string?> trunkRefs)
@@ -637,6 +781,7 @@ public static class BranchGraph
                 Graph = group.Select(c => c.Git!.Graph).FirstOrDefault(g => g is not null),
                 AgentVersion = main.Machine.Machine.AgentVersion,
             };
+            source.TrunkName = TrunkNameOf([source.Graph?.TrunkRef]);
 
             foreach (var clone in group)
             {
@@ -689,11 +834,25 @@ public static class BranchGraph
     {
         var warnings = new List<MapWarning>();
 
+        // What git itself counted: a branch at one commit whose upstream is at another, on some device.
+        var counted = new Dictionary<(string Tip, string Other), (int TipOnly, int OtherOnly)>();
+        foreach (var source in shown)
+        {
+            var refs = (source.Graph?.RemoteRefs ?? []).GroupBy(r => r.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Sha, StringComparer.Ordinal);
+            foreach (var branch in source.Git.Branches)
+            {
+                if (branch is { Upstream: { } upstream, UpstreamGone: false } && refs.TryGetValue(upstream, out var other) && other != branch.Sha)
+                {
+                    counted[(branch.Sha, other)] = (branch.Ahead, branch.Behind);
+                }
+            }
+        }
+
         var locals = shown.SelectMany(s => s.Branches.Select(b => (Source: s, Branch: b))).GroupBy(x => x.Branch.Name, StringComparer.Ordinal);
         foreach (var name in locals)
         {
             var tips = name.GroupBy(x => x.Branch.Sha, StringComparer.Ordinal).ToList();
-            var warning = tips.Count > 1 ? Describe(name.Key, tips.Select(t => (find(t.Key), Labels: t.Select(x => x.Source.Label).ToList())).ToList()) : null;
+            var warning = tips.Count > 1 ? Describe(name.Key, tips.Select(t => (find(t.Key), Labels: t.Select(x => x.Source.Label).ToList())).ToList(), counted, find) : null;
             if (warning is not null)
             {
                 warnings.Add(warning);
@@ -714,7 +873,7 @@ public static class BranchGraph
                     Sources = tip.Select(x => x.Source.Index).ToList(),
                     HeadOf = tip.Where(x => x.Source.Trees.Any(t => t.Branch == name.Key)).Select(x => x.Source.Index).ToList(),
                     IsDefault = tip.Any(x => x.Source.Git.DefaultBranch == name.Key),
-                    Merged = tip.All(x => x.Branch.MergedIntoDefault == true && x.Source.Git.DefaultBranch != name.Key),
+                    Merged = tip.All(x => IsMerged(x.Source, x.Branch)),
                     UpstreamGone = tip.Any(x => x.Branch.UpstreamGone),
                     NoUpstream = tip.All(x => x.Branch.Upstream is null),
                     Ahead = tip.Max(x => x.Branch.Ahead),
@@ -725,7 +884,7 @@ public static class BranchGraph
             }
         }
 
-        var remotes = shown.SelectMany(s => (s.Graph?.RemoteRefs ?? []).Select(r => (Source: s, Ref: r))).GroupBy(x => x.Ref.Name, StringComparer.Ordinal);
+        var remotes = shown.SelectMany(s => s.RemoteRefs.Select(r => (Source: s, Ref: r))).GroupBy(x => x.Ref.Name, StringComparer.Ordinal);
         foreach (var name in remotes)
         {
             var tips = name.GroupBy(x => x.Ref.Sha, StringComparer.Ordinal).ToList();
@@ -759,37 +918,65 @@ public static class BranchGraph
         return warnings.OrderByDescending(w => w.Diverged).ThenBy(w => w.Branch, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static MapWarning Describe(string branch, List<(Node? Node, List<string> Labels)> tips)
+    /// <summary>
+    /// Says how two devices' copies of a branch differ. The numbers are git's own when some device
+    /// counted exactly this pair of commits (a branch against its upstream). Otherwise they are counted
+    /// on the map, which holds only part of the history: "at least" unless every commit in between is in it.
+    /// </summary>
+    private static MapWarning Describe(
+        string branch,
+        List<(Node? Node, List<string> Labels)> tips,
+        Dictionary<(string Tip, string Other), (int TipOnly, int OtherOnly)> counted,
+        Func<string?, Node?> find)
     {
         static string Names(List<string> labels) => string.Join(" and ", labels);
-        static string Commits(int n) => n == 1 ? "1 commit" : $"{n} commits";
+        static string Commits(int n, bool exact) => (exact ? "" : "at least ") + (n == 1 ? "1 commit" : $"{n} commits");
 
         if (tips.Count == 2 && tips[0].Node is { Visible: true } a && tips[1].Node is { Visible: true } b)
         {
             var aAll = Reach([a]);
             var bAll = Reach([b]);
-            var aOnly = aAll.Where(n => !bAll.Contains(n)).Sum(Weight);
-            var bOnly = bAll.Where(n => !aAll.Contains(n)).Sum(Weight);
+            var aRest = aAll.Where(n => !bAll.Contains(n)).ToList();
+            var bRest = bAll.Where(n => !aAll.Contains(n)).ToList();
+            var (aOnly, bOnly) = (aRest.Sum(Weight), bRest.Sum(Weight));
+            var (aExact, bExact) = (aRest.All(Whole), bRest.All(Whole));
+            if (counted.TryGetValue((a.Id, b.Id), out var ab))
+            {
+                (aOnly, bOnly, aExact, bExact) = (ab.TipOnly, ab.OtherOnly, true, true);
+            }
+            else if (counted.TryGetValue((b.Id, a.Id), out var ba))
+            {
+                (aOnly, bOnly, aExact, bExact) = (ba.OtherOnly, ba.TipOnly, true, true);
+            }
+
             var (aNames, bNames) = (Names(tips[0].Labels), Names(tips[1].Labels));
-            if (bAll.Contains(a))
+            if (bAll.Contains(a) || (aOnly == 0 && bOnly > 0 && aExact))
             {
-                return new MapWarning(branch, false, $"{bNames} {(tips[1].Labels.Count == 1 ? "is" : "are")} {Commits(bOnly)} ahead of {aNames}.");
+                return new MapWarning(branch, false, $"{bNames} {(tips[1].Labels.Count == 1 ? "is" : "are")} {Commits(bOnly, bExact)} ahead of {aNames}.");
             }
 
-            if (aAll.Contains(b))
+            if (aAll.Contains(b) || (bOnly == 0 && aOnly > 0 && bExact))
             {
-                return new MapWarning(branch, false, $"{aNames} {(tips[0].Labels.Count == 1 ? "is" : "are")} {Commits(aOnly)} ahead of {bNames}.");
+                return new MapWarning(branch, false, $"{aNames} {(tips[0].Labels.Count == 1 ? "is" : "are")} {Commits(aOnly, aExact)} ahead of {bNames}.");
             }
 
-            return new MapWarning(branch, true, $"has diverged: {aNames} has {Commits(aOnly)} that {bNames} does not, and {bNames} has {Commits(bOnly)} of its own.");
+            return new MapWarning(branch, true, $"has diverged: {aNames} has {Commits(aOnly, aExact)} that {bNames} does not, and {bNames} has {Commits(bOnly, bExact)} of its own.");
         }
 
         return new MapWarning(branch, true, $"is at {tips.Count} different commits: {string.Join("; ", tips.Select(t => Names(t.Labels)))}.");
 
         static int Weight(Node node) => node.Kind == NodeKind.Gap ? node.Hidden : node.Kind == NodeKind.Commit ? 1 : 0;
+
+        // A commit is all there when each of its parents is in the map too. A gap stands for the
+        // first-parent commits only: whatever those merged is not counted.
+        bool Whole(Node node) => node.Kind != NodeKind.Gap && (node.Commit is null || node.Commit.Parents.All(p => find(p) is { Visible: true }));
     }
 
-    /// <summary>A pull request goes on the commit its branch points at: the remote branch if a device tracks it, else a local one of that name.</summary>
+    /// <summary>
+    /// A pull request goes on the commit it is at on GitHub when the map has that commit and a name on
+    /// it. Otherwise on the commit its branch points at: the remote branch if a device tracks it, else a
+    /// local one of that name. A pull request from a fork is only ever placed by its commit.
+    /// </summary>
     private static List<PullRequestInfo> PlacePullRequests(IReadOnlyList<PullRequestInfo> pullRequests, List<Node> order)
     {
         var unplaced = new List<PullRequestInfo>();
@@ -800,8 +987,13 @@ public static class BranchGraph
                 continue;
             }
 
-            var home = order.FirstOrDefault(n => n.Refs.Any(r => r.Kind == MapRefKind.Remote && r.Name.EndsWith("/" + head, StringComparison.Ordinal) && r.Name.IndexOf('/') == r.Name.Length - head.Length - 1))
-                ?? order.FirstOrDefault(n => n.Refs.Any(r => r.Kind == MapRefKind.Local && r.Name == head));
+            var home = order.FirstOrDefault(n => n.Kind == NodeKind.Commit && n.Refs.Count > 0 && BranchPullRequests.SameCommit(pr.HeadSha, n.Commit?.Sha) == true);
+            if (home is null && !pr.IsCrossRepository)
+            {
+                home = order.FirstOrDefault(n => n.Refs.Any(r => r.Kind == MapRefKind.Remote && r.Name.EndsWith("/" + head, StringComparison.Ordinal) && r.Name.IndexOf('/') == r.Name.Length - head.Length - 1))
+                    ?? order.FirstOrDefault(n => n.Refs.Any(r => r.Kind == MapRefKind.Local && r.Name == head));
+            }
+
             if (home is null)
             {
                 unplaced.Add(pr);
@@ -861,13 +1053,15 @@ public static class BranchGraph
 
                 if (!descended)
                 {
-                    node.Row = order.Count;
                     order.Add(node);
                 }
             }
         }
 
-        void Descend(Node root)
+        // Places a commit, then what it leads down to: its parents off the trunk, and theirs. The trunk
+        // itself is walked by the loop below, one commit at a time, so that a merged branch is finished
+        // right under its merge instead of dragging the rest of the trunk in between.
+        void Settle(Node root)
         {
             var stack = new Stack<Node>();
             stack.Push(root);
@@ -878,13 +1072,26 @@ public static class BranchGraph
                     continue;
                 }
 
-                node.Descended = true;
+                var start = order.Count;
                 Place(node);
 
-                // The first parent is pushed first so the others, a merged branch, come out right below the merge.
-                foreach (var parent in node.Parents)
+                // Everything that went in just now (the commit and what descends from it) has parents to follow.
+                // Pushed from the top row down, first parent first: the last row's other parents come out next.
+                foreach (var placed in order.GetRange(start, order.Count - start).Append(node))
                 {
-                    stack.Push(parent);
+                    if (placed.Descended)
+                    {
+                        continue;
+                    }
+
+                    placed.Descended = true;
+                    foreach (var parent in placed.Parents)
+                    {
+                        if (!parent.OnTrunk && !parent.Descended)
+                        {
+                            stack.Push(parent);
+                        }
+                    }
                 }
             }
         }
@@ -896,28 +1103,103 @@ public static class BranchGraph
             older.Placed = older.Descended = true;
         }
 
-        if (trunk.Count > 0)
+        for (var node = trunk.FirstOrDefault(); node is not null; node = node.Parents.FirstOrDefault(p => p.OnTrunk))
         {
-            Descend(trunk[0]);
+            Settle(node);
         }
 
-        foreach (var node in nodes.Where(n => n.Kind == NodeKind.Commit).OrderByDescending(n => n.Date).ThenBy(n => n.Id, StringComparer.Ordinal))
+        // What is left has no line to the trunk in the map: an old agent's merged branch, a branch
+        // whose history was cut off. Each such piece is placed whole.
+        var connected = order.Count;
+        var pieces = new List<(int Start, int Count)>();
+        foreach (var node in nodes.Where(n => n.Kind == NodeKind.Commit).OrderByDescending(n => n.Date).ThenBy(n => n.Id, StringComparer.Ordinal).Concat(nodes))
         {
-            Descend(node);
+            var start = order.Count;
+            Settle(node);
+            if (order.Count > start)
+            {
+                pieces.Add((start, order.Count - start));
+            }
         }
 
-        foreach (var node in nodes)
+        if (connected > 0 && pieces.Count > 0)
         {
-            Descend(node);
+            order = Interleave(order, connected, pieces);
         }
 
         if (older is not null)
         {
-            older.Row = order.Count;
             order.Add(older);
         }
 
+        for (var i = 0; i < order.Count; i++)
+        {
+            order[i].Row = i;
+        }
+
         return order;
+    }
+
+    /// <summary>
+    /// Puts each piece that is not connected to the trunk where it belongs in time: right under the
+    /// last trunk row that is newer than it, instead of after the whole trunk. A piece never goes above
+    /// a commit that descends from it.
+    /// </summary>
+    private static List<Node> Interleave(List<Node> order, int connected, List<(int Start, int Count)> pieces)
+    {
+        var slotOf = new Dictionary<Node, int>(); // the index in the connected part a node sits at, or is placed before
+        for (var i = 0; i < connected; i++)
+        {
+            slotOf[order[i]] = i;
+        }
+
+        var before = new List<List<Node>>(connected + 1);
+        for (var i = 0; i <= connected; i++)
+        {
+            before.Add([]);
+        }
+
+        foreach (var (start, count) in pieces)
+        {
+            var piece = order.GetRange(start, count);
+            var mine = piece.ToHashSet();
+            var date = piece.Where(n => n.Kind != NodeKind.Gap).Select(n => n.Date).DefaultIfEmpty(DateTimeOffset.MinValue).Max();
+
+            var slot = 0;
+            for (var i = 0; i < connected; i++)
+            {
+                if (order[i].OnTrunk && order[i].Date > date)
+                {
+                    slot = i + 1;
+                }
+            }
+
+            foreach (var child in piece.SelectMany(n => n.Children))
+            {
+                if (!mine.Contains(child) && slotOf.TryGetValue(child, out var at))
+                {
+                    slot = Math.Max(slot, at < connected && order[at] == child ? at + 1 : at);
+                }
+            }
+
+            before[slot].AddRange(piece);
+            foreach (var node in piece)
+            {
+                slotOf[node] = slot;
+            }
+        }
+
+        var result = new List<Node>(order.Count);
+        for (var i = 0; i <= connected; i++)
+        {
+            result.AddRange(before[i]);
+            if (i < connected)
+            {
+                result.Add(order[i]);
+            }
+        }
+
+        return result;
     }
 
     private static List<MapRow> AssignLanes(List<Node> order, bool hasTrunk, out int laneCount)
@@ -1018,8 +1300,9 @@ public static class BranchGraph
                 else if (existing < 0)
                 {
                     var fresh = Allocate();
-                    lanes[fresh] = new LaneState { Expect = parent, Color = node.Color, Style = style };
-                    outs.Add(new MapLine(fresh, node.Color, style));
+                    var link = node.Links?.Contains(parent) == true ? MapLineStyle.Dashed : style;
+                    lanes[fresh] = new LaneState { Expect = parent, Color = node.Color, Style = link };
+                    outs.Add(new MapLine(fresh, node.Color, link));
                 }
             }
 

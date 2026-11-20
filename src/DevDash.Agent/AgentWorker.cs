@@ -32,15 +32,17 @@ public sealed class AgentWorker : BackgroundService
     private readonly Lock _refreshLock = new();
     private Dictionary<(string Root, string Name), List<TaskCompletionSource<Actions.RefreshOutcome>>> _refreshes = [];
     private readonly Updates.UpdateGuard? _guard;
+    private readonly Actions.KnownRemotes? _knownRemotes;
     private MachineSnapshot? _last;
     private int _rescanNow;
 
     /// <summary>While a new version waits to be confirmed, it keeps trying to reach the hub this often.</summary>
     private static readonly TimeSpan VerifyRetry = TimeSpan.FromSeconds(30);
 
-    public AgentWorker(MachineScanner scanner, HubClient hub, IOptionsMonitor<AgentOptions> options, ILogger<AgentWorker> logger, Actions.RescanRequests? rescans = null, Updates.UpdateGuard? guard = null)
+    public AgentWorker(MachineScanner scanner, HubClient hub, IOptionsMonitor<AgentOptions> options, ILogger<AgentWorker> logger, Actions.RescanRequests? rescans = null, Updates.UpdateGuard? guard = null, Actions.KnownRemotes? knownRemotes = null)
     {
         _guard = guard;
+        _knownRemotes = knownRemotes;
         _scanner = scanner;
         _hub = hub;
         _options = options;
@@ -152,6 +154,7 @@ public sealed class AgentWorker : BackgroundService
             var request = quick ? new ScanRequest(AllowFetch: false, SizeMode.CachedOnly) : new ScanRequest(AllowFetch: true, SizeMode.WhenDue);
             var snapshot = await _scanner.ScanAsync(request, ct).ConfigureAwait(false);
             _last = snapshot;
+            _knownRemotes?.Update(snapshot);
             await PushAsync(snapshot, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -237,6 +240,7 @@ public sealed class AgentWorker : BackgroundService
                 ScannedAt = DateTimeOffset.UtcNow,
                 Entries = MachineScanner.WithOneGraphPerRepository(entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
             };
+            _knownRemotes?.Update(_last);
             if (changed.Count > 0)
             {
                 _logger.LogInformation("Rescanned {Names} after file changes", string.Join(", ", changed.Select(c => c.Name)));

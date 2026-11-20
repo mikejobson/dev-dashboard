@@ -1,3 +1,4 @@
+using DevDash.Contracts;
 using static DevDash.Core.Cleanup.RuleHelpers;
 
 namespace DevDash.Core.Cleanup.Rules;
@@ -27,7 +28,9 @@ public sealed class LargeBuildDirsRule : ICleanupRule
                     $"{Size(size.ReclaimableBytes)} of {Size(size.TotalBytes)} is regenerable. Largest: {top}.",
                     [
                         Inspect("Size of each folder", "du -sh " + string.Join(' ', dirs.Select(d => Quote(d.Path)))),
-                        Fix("Delete the build output", "rm -rf " + string.Join(' ', dirs.Select(d => Quote(d.Path)))),
+                        // An agent can do this in a repository, where git can say that nothing in the folders is tracked.
+                        Fix("Delete the build output (for good: a build recreates it)", "rm -rf " + string.Join(' ', dirs.Select(d => Quote(d.Path))),
+                            entry is { Kind: EntryKind.GitRepo, Git: not null } ? AgentAction.CleanBuildDirs(entry.Path, dirs.Select(d => d.Path)) : null),
                     ]);
             }
         }

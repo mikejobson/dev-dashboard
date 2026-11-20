@@ -129,15 +129,38 @@ The trunk is the default branch, or `develop` when that is where the newest work
   a parent of any trunk commit either: it is reachable only through second parents and merges no branch points at. For those (and for
   fork points inside merged history) the collector reads the trunk's recent history once (`git log --date-order --format=%H %P`, bounded
   to what the newest 500 first-parent commits brought in and 6,000 commits) and works out in memory the oldest first-parent commit
-  that contains each one and the shortest run of commits up to it. It sends that run (at most 40 commits per tip, 200 per repository)
-  and marks the tip `JoinsTrunkAt = <merge sha>`; the merge itself is always sent. Past the caps only `JoinsTrunkAt` goes out. Both
-  fields are optional: schema version unchanged, older hubs ignore them. Still one cached result per ref state.
+  that contains each one and the shortest run of commits up to it. It sends that run and marks the tip `JoinsTrunkAt = <merge sha>`;
+  the merge itself is always sent. Runs are taken shortest first, at most 150 commits per tip and 300 per repository (≈90 KB at
+  ~300 bytes a commit; a whole graph stays under ~300 KB: 250 side + 20 trunk + ≤400 hangers + ≤300 joins). Past the caps the tip
+  gets `JoinDistance` (commits in between) instead. All optional: schema version unchanged, older hubs ignore them. Still one cached
+  result per ref state.
+- **Why dashed links appeared (0.7.0).** On a real repo the gap was a 63-commit feature branch merged with a merge commit and a
+  branch forked from inside it: over the old 40-commit cap, so only `JoinsTrunkAt` went out. It is now sent whole and folds as a
+  quiet run.
 - **Hub ordering (`BranchGraph.Order`).** Newest first, as `git log --graph --date-order` reads: a row goes in once every row that
   descends from it is above it, and of the rows free to go next the newest wins (an uncommitted-changes row or a gap sits right on top
   of its commit; "older commits" closes the map). Branches worked on alongside the trunk interleave with it by date, at the cost of a
   few more lanes. (0.6.0 first grouped each merged branch under its merge; users read dates down the page, so that was dropped.)
-- **Join links.** A merged commit with `JoinsTrunkAt` and no line of children up to the trunk sits at its date and is joined to that
-  trunk commit with a dashed line ("merged there, through commits not shown").
+- **Join links.** A merged commit with `JoinsTrunkAt` and no line of children up to the trunk sits at its date. With `JoinDistance`
+  it hangs from that trunk commit through a solid collapsed row ("63 more commits of a merged branch", `MapRowKind.Collapsed`,
+  dimmed); from older agents, by a dashed line ("merged there, through commits not shown").
+- **Squash-merged branches.** A squash merge leaves the branch's commits on no remote and off the trunk, so they read as unpushed.
+  The agent (`SquashDetector`, cached per branch/trunk sha pair, ≤40 unmerged branches with unpushed commits, only when the trunk
+  is a remote-tracking ref and has moved ≤1,000 commits since the fork) proves it two ways: `log --cherry-mark` finds every commit
+  of the branch with an equal patch on the trunk (rebase merge, cherry-pick; the named commit is the newest non-empty match), or one
+  first-parent trunk commit since the merge-base touches exactly the branch's files and its `diff --unified=0` has the same
+  removed/added lines per file as `diff <merge-base> <tip>` (no context, no line numbers; binary files by resulting blob id). Proof
+  sets `BranchInfo.SquashMergedInto` and `GraphCommit.SquashMerged` on its unpushed commits (which keep `Unpushed` for older hubs).
+  The hub also counts a branch at the head commit of one of my pull requests merged in the last 30 days (`GitHubSnapshot.MergedPullRequests`,
+  same-repo only) as merged on GitHub: its unpushed commits up to that commit only. Squash-merged commits are muted ("squash-merged" /
+  "merged in #N"), not counted as unpushed on the map, and the branch counts as merged (hide merged hides it). `RepoSafety` and the
+  unpushed/gone-upstream cleanup rules trust only the agent's proof: a GitHub-only match leaves safety at risk. Limits: a squash that
+  was edited or conflict-resolved on merge, a PR that merged the trunk in after branching (merge-base moves; usually still matches),
+  or a branch with commits after the merge are not proven and stay unpushed.
+- **Paging.** The page draws 100 rows, then "show 100 more" (or "all N"); a last page under 20 is folded into the previous one
+  (`BranchMapPaging`). Lanes are assigned over every row before any is drawn, so more rows never move the ones above.
+- **Remote branches.** `GitState.RemoteBranches` (optional): every `refs/remotes` branch except `*/HEAD`, newest commit first, at
+  most 200, with sha, date and remote; one `for-each-ref`. Dropped from a linked worktree whose main working tree is sent.
 - **Merged means merged into the trunk.** `BranchInfo.MergedIntoDefault` keeps its meaning for cleanup. When the trunk is not the
   default branch the agent also sends `MergedIntoTrunk` (optional), and the map's dimming and "hide merged" use it; the default branch
   and the trunk branch never count as merged. With merged branches hidden, a trunk merge no longer pulls in what it merged: merged
@@ -186,6 +209,7 @@ Findings can be snoozed or dismissed (stored per finding fingerprint).
 - **Issues**: open issues of cloned GitHub repos, T3 threads started for them, and the label trigger's settings (§18)
 - **Cleanup**: findings grouped by rule, with snooze, dismiss and copy-command buttons
 - **Alerts**: what is alerting now, channels with a test button, triggers, quiet hours, delivery log (§16)
+- **History**: disk, at-risk work and unpushed commits per machine over time, the fastest-growing repos; "since yesterday" on the Overview (§22)
 - **Machines**: agent versions, scan health, toolchains per machine and the pins they do not meet, issue and revoke API keys
 - **Command palette** (⌘K / Ctrl+K, any page): repos, pull requests, machines, pages and a few actions (§17)
 - **Settings**: orgs exclude list, thresholds, LLM on/off and model
@@ -891,6 +915,7 @@ ages, `total`/`shown` where it lists).
 | `action_status` (id) | read | the `AgentActions` row |
 | `t3_threads` (repo, machine, state) | read | `T3View.All`: reported threads joined with the dashboard's starts |
 | `list_issues` (repo, label, include_body) | read | `T3View.Issues`; bodies only on request, labelled untrusted |
+| `history` (metric, machine, project, days) | read | `HistoryStore` per-day rollups (§22) |
 | `refresh_project` | read+actions | `RefreshTargets` → Refresh |
 | `fetch` | read+actions | `AgentAction.Fetch` on the main working tree |
 | `push_branch` / `pull_fast_forward` | read+actions | only an offer `SyncOffers.For` makes (same-name upstream, strictly ahead / behind; a pull into a dirty tree is refused with its `Blocked` text) |
@@ -922,3 +947,426 @@ and follows one with `action_status`; refusals carry the queue's and `SyncOffers
 **Limits.** A token is all-or-nothing within its scope: no per-machine or per-repo tokens. Stateless means no server-initiated
 notifications (e.g. "your action finished"); the client polls `action_status`. The data is as fresh as each agent's last scan; the tools
 say so and `refresh_project` asks for a new one. Tested with the SDK's client, not yet with Claude Code itself against a deployed hub.
+
+## 20. Where I left off, tags and notes (built 2026-11-20)
+
+Two things for getting back into work: a list of what was touched last, on any machine, and the user's own words about each repo.
+The agent's part is one optional field, so `SnapshotSchema.Version` stays 1; tags, notes and pins never leave the hub.
+
+**New snapshot field.** `GitState.RecentChanges` (`RecentChange { Path, ModifiedAt, Untracked? }[]`): the changed paths of `git status`
+(tracked and untracked) that `RepoScanner.NewestChange` already stats for `NewestTrackedChangeAt`, newest first, at most
+`RecentChange.MaxPerRepo` (5). Paths as git prints them, relative to the working tree; a deleted file has no mtime and is left out.
+Names only, never contents. Null when the tree is clean and from older agents.
+
+### Where I left off
+
+`LeftOff` (Services, pure) builds the list from `RepoCatalog` rows:
+
+- **Last touched** (`LeftOff.LastTouched`) for one working tree is the newest of: the last commit's date, `NewestTrackedChangeAt`,
+  `NewestUntrackedAt`, the `RecentChanges` times, and the `UpdatedAt` (else `CreatedAt`) of the T3 threads on it. It says which of the
+  three it was (committed / edited / T3). `DevEntry.LastModified` is not used: a checkout or pull rewrites file times without anyone
+  working there.
+- **Threads on a working tree** (`LeftOff.ThreadsOn`): the repo's reported threads whose `WorktreePath` is that folder, or, for a thread
+  naming no worktree, whose branch is the one checked out.
+- **One row per repo**, for its most recently touched working tree on any machine (a linked worktree counts); the others touched in the
+  window are listed as "Also". Git repos only. Each row: machine, branch, last commit subject and age, uncommitted / untracked counts,
+  the recent file names, stashes, unpushed (the agent's `UnpushedCount` for the branch, else ahead of its upstream, else nothing claimed),
+  the open PR for the branch (`BranchPullRequests`, the branch map's rule) with CI, the T3 threads, tags and note.
+- **Window and groups.** The last 14 days by default (`?days=` 1–90). Grouped by calendar day in the hub's time zone
+  (`TimeProvider.LocalTimeZone`, i.e. `TZ` in the container): Today, Yesterday, This week (2–6 days), Earlier. Pinned repos form a group
+  of their own at the top, whenever they were last touched.
+- **Actions per row**: Open in T3 (the existing `ActionButton` with `AgentAction.OpenInT3`, so the existing gating and confirmation),
+  copy `cd <path>`, GitHub (the PR, else the branch's tree when it has an upstream, else the repo), Details (the repo page).
+
+Shown on a page (`/left-off`, nav "Left off", ⌘K "Where I left off") with a window, a tag filter and a "show #archived" switch, and as a
+compact card on the Overview (six rows, `?tag=` filters it).
+
+### Tags, notes and pins
+
+*Storage.* One table, `RepoNotes` (key, tags, note, pinned, updated at, updated by), keyed by the repo's dashboard key lower-cased
+(`github.com/owner/repo`, or `local:<machine>:<path>` for a repo with no hosted remote; lookups ignore case like the catalog's). A row
+that ends up with no tags, no note and no pin is deleted. `RepoNotes` (singleton) keeps the table in memory, reads it again after a save,
+and announces a save as `DashboardChange.Notes`, so open pages and the alert worker pick it up.
+
+*Rules* (`RepoTags`, pure). A tag is lower case, a leading `#` dropped, letters, digits and `- _ . / :` (anything else becomes `-`), at
+most 32 characters; at most 12 per repo, each once. A note is one line of at most 200 characters, control characters dropped. In a
+search, a word `#tag` is a tag filter (`#12` is a PR number, not a tag).
+
+*Where they show.* RepoDetail edits them in place (Pin / Unpin, "Edit tags and note"). Local shows the chips and note under the name, has
+a tag select and `?tag=`, takes `#tag` in its search box, and puts pinned rows first whatever the sort. Where I left off and its Overview
+card show them and filter by tag. ⌘K: repo items carry `#tag` and the note as keywords and the tags in their detail, so typing `#client`
+lists the repos tagged client; a pinned repo gains 10 (ahead of an equal match, not of a better one).
+
+*Quiet tags.* `Hub:Tags:QuietTags` (default `archived`; commas or spaces) silences a repo: `AlertCandidate.RepoKey` is set by the
+repo-bound triggers (`at-risk`, `diverged`, `ci-failed`, `t3-needs-input`, `t3-done`) and `AlertEvaluator.Evaluate` drops candidates
+whose repo is in `AlertInputs.QuietRepos`, in that one place. An alert already open clears on the next evaluation like any condition that
+has gone. `machine-offline` and `action-failed` are not about a repo and are unaffected; so is the digest's count. Where I left off leaves
+quiet repos out unless asked (`?quiet=1`, or filtering by the quiet tag itself).
+
+*MCP.* `list_projects` and `get_project` carry `tags`, `note` and `pinned` when set; `list_projects` takes `tag`.
+
+**Schema.** `RepoNotes`, added to an existing database by `SchemaUpgrade`.
+
+**Tests.** Agent (`ScannerTests`): recent paths newest first, capped, deleted files left out, untracked marked; and in the end-to-end scan.
+Hub (`LeftOffAndTagsTests`): last touched from each source, threads by worktree and by branch, day groups across a time zone, the list
+(most recent clone, window, limit, also-touched, unpushed rules, PR and threads, pinned first, quiet hidden, tag filter), tag and note
+rules, the note set, saving (case, normalising, delete when empty, notification), an old database gaining `RepoNotes`, alert silencing
+(pure, and end to end clearing an open alert; the quiet list from configuration), ⌘K by `#tag`, note and pin, the page, Overview, Local
+and repo page, and the MCP fields and filter.
+
+**Limits.** "Committed" is the date of the checked-out branch's last commit, whoever made it, so a `git pull` of others' work counts as
+touching the repo. Untracked files are statted only as far as `git status` lists them (a new folder is one entry, its time the folder's).
+Time zones: one zone for the whole hub, not per viewer. Tags are per repo, not per clone. The page's look was checked through rendered
+HTML in tests, not in a browser.
+## 21. Disk and dev servers (0.8.0 agent actions)
+
+Two machine-level views the per-repo scan could not give: where the disk goes outside the repositories, and which development
+servers are listening right now. Both are optional `MachineInfo` fields and two new action kinds, so `SnapshotSchema.Version` stays 1.
+
+**New snapshot fields.**
+
+| Field | What | Null when |
+|---|---|---|
+| `MachineInfo.Disk` (`DiskReport { CollectedAt, Items[] }`; `DiskItem { Id, Path, Bytes, ReclaimableBytes, LastModified, MeasuredAt, Count, Cleanable, Problem, Parts[] }`) | the developer caches outside the repos | agent before 0.8.0, `Agent:Disk:Enabled` off, or the first measurement not done yet |
+| `MachineInfo.DevServers` (`DevServerReport { CollectedAt, Servers[], Problem }`; `DevServer { Pid, Name, Command, StartedAt, Cwd, Ports[], RepoPath }`) | listening dev servers, as of this push | agent before 0.8.0 or `Agent:DevServers:Enabled` off |
+| `MachineInfo.AcceptsCleanCache`, `AcceptsStopDevServer` | the capability flags | false from older agents |
+
+`DiskItem.Id` is text, a `DiskCacheId` name: a hub that meets an id from a newer agent shows it plainly (no Clean button) instead of
+failing to read the snapshot, which an unknown enum value would do.
+
+### Disk (`src/DevDash.Agent/Disk`)
+
+*What is measured.* `DiskCollector` finds each cache from the tool that owns it, or a fixed place, never from the hub:
+
+| Id | Found by | Clean recipe (`DiskCaches`, Contracts) |
+|---|---|---|
+| `NuGetGlobalPackages`, `NuGetHttpCache` | `dotnet nuget locals all --list` (else `~/.nuget/packages`, measured, not cleanable) | `dotnet nuget locals global-packages\|http-cache --clear` |
+| `NpmCache` | `npm config get cache` (Windows: `node npm-cli.js`, as §17) | `npm cache clean --force` |
+| `PnpmStore` | `pnpm store path` | `pnpm store prune` |
+| `YarnCache`, `GradleCache`, `MavenRepository` | fixed folders | report only |
+| `XcodeDerivedData` (macOS) | `~/Library/Developer/Xcode/DerivedData` | each entry moved to the Trash with the §15 `ITrash`; the folder stays |
+| `XcodeArchives`, `XcodeDeviceSupport` (macOS) | fixed folders (DeviceSupport: one part per iOS version) | report only: archives cannot be made again |
+| `CoreSimulator` (macOS) | `~/Library/Developer/CoreSimulator` | `xcrun simctl delete unavailable`, only when Xcode.app exists |
+| `DockerImages`, `DockerBuildCache`, `DockerVolumes` | `docker system df --format json`; dangling images summed from `docker image ls --filter dangling=true --format json` | `docker image prune -f` (dangling only, never `-a`), `docker builder prune -f`; volumes report only |
+| `DotnetSdks` | `sdk/<version>` of every `dotnet` found (links followed), one part each | report only |
+| `HomebrewCache` | `brew --cache` | `brew cleanup -s` |
+
+*Off the hot path.* `DiskWorker` (hosted, `run` only) waits `StartDelaySeconds` (90), then measures whenever the kept report is older
+than `IntervalHours` (6), checking every 10 minutes, one cache after another, each within `TimeoutSeconds` (120: a tool call or a walk
+that runs out reports what it counted, with "at least this big"). `DiskService` keeps the report in `agent-disk.json` beside the size
+cache, so a restart does not measure again; the scanner only reads it. After measuring, `RescanRequests.RequestMachine()` has the scan
+loop push without waiting for the next full scan (`AgentWorker` re-reads the machine facts on every push now, not only on full scans).
+`FolderMeasure` never follows a link and skips what it cannot read. An empty cache is not a row. `Agent:Disk:Skip` leaves ids out;
+`--no-disk` turns it all off.
+
+*Hub.* `DiskView` (pure) and the **Disk** page (`/disk`, nav and ⌘K): per machine, the caches by size with what cleaning does, whether it
+is regenerable, last written, reclaimable (the tool's figure for Docker, all of it for a cache that is cleared, "unknown" for one that is
+pruned) and a total; the .NET SDKs with the working trees each serves (each `global.json` resolved with §17's `DotnetSdkResolver`
+against what is installed, the newest for everything unpinned; the rest marked "unused", report only); and the top 10 working trees by
+build output from the existing size data.
+
+### Dev servers (`src/DevDash.Agent/DevServers`)
+
+*Listing, every push.* `IProcessProbe` per system:
+
+- *macOS:* `lsof -nP -iTCP -sTCP:LISTEN -Fpcn`, then for those pids (at most 200) `ps -o pid=,lstart=,command=` and
+  `lsof -a -p … -d cwd -Fpn`, all with `LC_ALL=C` so `lstart` is always `Mon Nov 16 07:32:33 2026` (read in the machine's zone).
+- *Linux:* `/proc/net/tcp{,6}` (state `0A`) gives the inodes, `/proc/<pid>/fd/*` → `socket:[inode]` gives the process, then
+  `comm`, `cmdline`, `cwd`, `exe`, and `stat` field 22 + `btime` for the start (100 ticks a second assumed).
+- *Windows:* one PowerShell call (`Get-NetTCPConnection -State Listen` + `Win32_Process`: name, command line, path, creation date as
+  ISO UTC). If PowerShell does not answer, `netstat -ano -p TCP` (rows whose remote is the any-address, so a localised state name does
+  not matter) with names and start times from .NET and no command lines, so nothing is stoppable. A working folder cannot be read from
+  outside a process on Windows, so repos are matched by command-line paths only.
+
+`DevServerCollector` keeps a process when its working folder, program or an absolute path on its command line is inside a scanned
+working tree (the deepest one, so a linked worktree wins over its container), or when its name is a well-known dev tool (node, deno,
+bun, dotnet, python*, ruby, go, java, php, docker-proxy, vite, next-server, uvicorn, gunicorn, puma, rails, beam.smp…). Everything
+else (desktop listeners, sync clients) is left out. Coding agents, editors and language servers are never reported, even inside a
+repo (`IgnoredTools`: claude, codex, t3, code-*, cursor, rider…, npm installs of the agent CLIs, plus `Agent:DevServers:Ignore`): a Claude
+session works in the repo and listens on localhost, and a Stop button for it would end the session. Found live on 2026-11-20. At most `MaxServers` (50), repos first. `DevServerText.Command` folds the command line,
+masks secrets (`--token x`, `--password=x`, `API_KEY=x`, `https://user:pass@`) and cuts it to 300 characters, the same way on the side
+that lists and the side that stops, because the stop compares them.
+
+*Hub.* `DevServerView` (pure) joins servers to repos (a linked worktree's main repo key), marks a **port clash** when servers of
+different repos (or a repo and a stray tool), on any machine, share a port, and **old** past 7 days. Overview: "Running: widget —
+dotnet on :5001, 3 days" for servers in repos. RepoDetail: a Running table with Stop. Machines: every server, including tools outside
+repos, with Stop where possible, and the listing's problem if any.
+
+### The two actions
+
+| Kind | Fields | The hub queues only when | The agent refuses unless |
+|---|---|---|---|
+| `CleanCache` | `CacheId` (a `DiskCacheId` name; no path) | the machine's last report has that id with `Cleanable` and this build knows a recipe | disk on, not skipped, a recipe exists, the id applies to this OS, and `LocateAsync` finds it again right now (folder exists, tool found) |
+| `StopDevServer` | `RepoPath`, `Pid` (> 1), `ExpectedStartedAt`, `ExpectedCommand` | that repo is reported and a server with that pid, repo, command and start (±2 s) is in the last report | dev servers on; `RepoRefusalAsync` (a working tree at scanner depth in a root); not the agent's own pid; the process exists **now** with the same start (±2 s) and the same `DevServerText.Command`; and its working folder (Windows: a command-line path) resolves inside that repo |
+
+**Safety rules.**
+
+1. No command string crosses the wire. `CleanCache` carries an id, validated against the enum on both sides; the agent finds the cache
+   and the tool itself and runs its own fixed argument list (no shell). `StopDevServer` carries a pid and what identifies the process.
+2. Only regenerable caches have a recipe. Docker volumes, Xcode archives, SDKs, DeviceSupport, Gradle, Maven and Yarn are report only;
+   Docker cleaning is dangling images and dangling build cache only, never `-a`, never `system prune`, never volumes. DerivedData goes
+   to the Trash, not `rm`.
+3. A recycled pid is refused: the start time and command line must match what the user was shown, checked by the hub against the
+   snapshot and by the agent against the live process.
+4. Only a process working inside a scanned repository can be stopped. A dev tool listed from outside the repos has no Stop button and
+   the agent would refuse it.
+5. SIGTERM (`kill(2)` via libc), never SIGKILL. The agent waits `StopWaitSeconds` (5) and reports "stopped" or "still shutting down;
+   nothing more was sent". Windows has no SIGTERM: `CloseMainWindow`, then (no window, or still running after 5 s)
+   `Process.Kill` of that one process, not its tree.
+6. Gated like §11: actions on (`--enable-actions`), the feature on, agent ≥ **0.8.0** (`AgentActions.DiskMinAgentVersion`);
+   `WhyNotAccepted` tells "update to 0.8.0" from "disk report / dev server list switched off". Both confirmed in `ActionButton`'s dialog
+   (the dialog now omits the Repo line for an action with no path) and audited in `AgentActions`. Neither has an MCP tool.
+
+**Tests.** Agent (`DiskAndDevServerTests`): parsers on captured output (`nuget locals` in both SDK formats, `docker system df` JSON
+lines and sizes, dangling images, `lsof -F` sockets and cwd, `ps lstart` in two zones and a padded day, `/proc/net/tcp{,6}`, `/proc/<pid>/stat`
+with a name holding parentheses, `cmdline`, `netstat` with a localised state, the Windows script's JSON as lists and single objects);
+secret masking and truncation; repo mapping (cwd, deepest worktree, `--opt=path`, quoted program, case); the collector's filter; the
+macOS probe against `FakeTools` and the Linux probe against a fake `/proc`; the disk collector on a made-up machine (every cache found
+from its tool or place, only read-only commands run, Xcode only on macOS, skip, Docker not answering); the cleaner (recipe run, Docker
+never `-a`/volumes, DerivedData into a recording trash, report-only/missing/unknown/foreign-OS/skipped/off refused, actions off refused by
+the executor first); the stop (SIGTERM sent once, still-running reported, recycled pid, different command, gone, outside the repo,
+repo outside the roots, the agent's own pid, switches off) against a fake process table and a real `git init` repo; the machine facts
+attached on every push; contracts (shapes, gating, command lines, no recipe for anything that holds data, an unknown id still
+deserialises). Hub (`DiskAndDevServerHubTests`): reclaimable rules, unused SDKs, the Disk page (three Clean buttons, never volumes or
+SDKs; an 0.7.0 machine told to update), clashes and old servers, the three pages, the queue's checks for both kinds, an 0.7.0 agent
+never sent them, and a queued stop claimed by the agent intact.
+
+**Verified on a Mac (read-only) vs only by tests.** On macOS the collectors were run against the real machine without writing state:
+every cache above was found and measured (sizes match `du`), Docker's df and dangling list parsed, and `lsof`/`ps` gave pids, start times,
+working folders and command lines in about 0.1 s, matched to a repo by cwd. No clean was run and no process was signalled: the recipes,
+the Trash step, SIGTERM and the Windows close/terminate are covered by fakes only. The Linux `/proc` probe and the Windows PowerShell and
+netstat paths are tested on captured or made-up output and have not been run on those systems.
+
+**Limits.** Sizes are apparent sizes: pnpm's store and hard-linked caches can report more than cleaning frees, and Docker's figures are
+Docker's. Reclaimable for pnpm and simulators is "unknown". `brew cleanup -s` also removes old versions of installed formulae, as the
+dialog says. Linux start times assume `CLK_TCK` = 100. The dev server list is as fresh as the last push (each full scan, rescan or
+action); a server started a minute ago shows on the next one. On Windows, a console server with no window is terminated rather than
+asked, there being no gentler signal.
+## 22. History and trends (built 2026-11-20)
+
+Until now the hub kept only each machine's latest snapshot, so it could say what is true but not what changed or for how long. It
+now keeps compact per-day rollups, never whole snapshots. All of it is in `src/DevDash.Hub/History`, plus the History page, two small
+components and one line each in `SnapshotStore`, `Program.cs`, the DbContext, `HubOptions`, the nav, the palette and `McpSetup`.
+
+**Recording.** `SnapshotStore.IngestAsync` calls `HistoryStore.RecordAsync` after saving the snapshot. It assesses the snapshot with
+`RepoSafety.AssessAll` (the Safety page's own verdicts) into `CloneFacts` (`HistoryRollup.Clones`, pure) and upserts today's rows: the
+latest value of the day wins, and the counts where a peak matters also keep the day's highest (`MaxUnpushedCommits`, `MaxAtRisk`,
+`MaxUnpushed`, `MaxRiskLevel`). A scan that did not measure sizes keeps the day's last known size. A day is the hub's local calendar
+day (`TZ` in a container), as for the activity heatmap. Recording is serialised, and a database error is logged, never passed on: the
+history must not cost an agent its push. Forgetting a machine deletes its history and episodes.
+
+**What is kept.**
+
+| Table | Key | Columns |
+|---|---|---|
+| `HistoryMachineDays` | machine, day | host name; repo count (main working trees), dirty count, unpushed commits (+ max), at risk by level High/Medium/Low (+ max of the total); bytes used by working trees, build output, safe to remove; samples, updated |
+| `HistoryCloneDays` | machine, path, day | repo key (indexed, as the repo page uses it), name, branch, linked worktree; size, build output; dirty, unpushed (+ max), ahead, behind; risk level (+ max), verdict; unpushed branch names (≤ 20) |
+| `RiskEpisodes` | machine, path | at risk since (any level), at Medium-or-worse since, at High since, current level, last seen |
+
+Unpushed commits are the branches' `UnpushedCount`s (only on a tree that includes the repository, so a linked worktree does not count
+its main repository's branches twice), falling back to `Ahead` for an agent that predates them.
+
+**Risk episodes.** "Risk since" is the first snapshot in which a working tree was at risk, in its current unbroken run. Each level has
+its own start, which resets when the tree drops below that level; the row is deleted when the tree is no longer at risk or no longer
+reported, so the next time is a new episode (`HistoryRollup.Advance`, pure). Episodes are kept even with history switched off, because
+the at-risk alert reads them, and being in the database they survive hub restarts.
+
+**Retention and size.** `Hub:History:RetentionDays` (180) and `Hub:History:Enabled` (true). Rows older than the retention are deleted on
+the first snapshot of each day. Measured: 50 working trees on 3 machines for 180 days (9,000 tree rows, 540 machine rows, with
+indexes) is about 3.3 MB, roughly 370 bytes per tree per day, and flat after that.
+
+**Since yesterday.** `SinceYesterday.Compare` (pure) compares each machine's working trees now (from the live snapshots) with that
+machine's newest day of history before today (normally yesterday; after a gap, the last day there is). It lists trees that became at
+risk, new unpushed commits, trees no longer at risk, branches whose unpushed commits are gone (pushed, or deleted when the branch is no
+longer there), size changes of at least 100 MB and 10%, new clones and removed ones. A machine with no earlier day is not compared, so
+the first day is not "everything is new". The baseline is read once per day and cached. The Overview shows it as a card
+(`SinceYesterdayCard`), five lines per kind, and leaves it out until there is a day to compare with.
+
+**Trends.** `/history` (nav and ⌘K): disk used by repos, at risk, unpushed commits and build output, one line per machine over 30, 90 or
+180 days, and the working trees that grew most over 30 days with a sparkline each. The repo page has a Trends table: size and unpushed
+commits per working tree over 30 days (`RepoTrends`). Charts are SVG drawn on the server by `HistoryCharts` (pure), like the heatmap:
+one shared axis, a missing day breaks the line, a hover target with a `<title>` on every point, direct labels for up to four lines plus
+a legend, and each chart has the same numbers as a table. A machine has the same colour on every chart, from the branch map's
+`--dev-N` variables, so both themes and forced colours work.
+
+**Alerts.** The `at-risk` trigger gets the episodes in `AlertInputs.RiskEpisodes`, in one place (`AlertEvaluator.AtRisk`). The body now
+starts with how long: "Unpushed for 7 days", from the earlier of the hub's episode at that risk's level and, for work whose date says
+when it started (oldest unpushed commit, oldest stash), that date; uncommitted changes carry the last edit rather than a start, so only
+the episode dates them. New setting `Triggers:AtRisk:ForDays` (0, on the Alerts page): alert only once the hub has seen the tree at the
+configured level or worse for that many days in a row. The key is unchanged, so open alerts stay open.
+
+**MCP.** A read tool `history` (`HistoryTools`): a metric per day over N days, per machine (`disk`, `build_output`, `safe_to_remove`,
+`repos`, `dirty`, `unpushed`, `at_risk`, `at_risk_high`) or, given a project, per working tree (`disk`, `build_output`, `dirty`,
+`unpushed`, `ahead`, `behind`, `at_risk` as a level 0–3).
+
+**Schema.** The three tables are added to an existing database by `SchemaUpgrade` like the earlier ones.
+
+**Tests.** `HistoryTests`: the rollup of a snapshot and the machine totals; last value wins and the peaks stay; episodes (at risk,
+level up and down, recovered, at risk again); since yesterday, every kind, with a machine that has no baseline; the size threshold; the
+alert's duration from the episode or the commits and the `ForDays` threshold per level; the chart SVG (gaps, titles, direct labels) and
+sparklines; top growing; then the real hub: upserts within a day and a new row the next, forget, pruning at the retention, history
+off, episodes across pushes feeding a delivered alert, the Overview card, `/history` and the repo page's Trends, the MCP tool, and an
+old database gaining the tables.
+
+**Limits.** One point per day: a change made and undone within a day leaves only the peaks behind. Days follow the hub's time zone,
+not the viewer's. A machine that did not report on a day has no point that day (the line breaks). An episode starts when the hub first
+sees the risk, so on first install it starts then; the alert's duration still uses the commit dates where they say more. Removed
+clones and pushed branches are seen only by comparing days, not as events. Not yet looked at in a real browser against real data.
+## 23. Archiving a project (0.8.0 agents)
+
+§15 removes what is safe to remove. This is for the rest: a project you are done with that still holds work
+nowhere else (no remote, unpushed commits, a stash, ignored notes), or one you simply want kept. The agent packs
+the whole folder into an archive in a folder its owner chose, proves the archive is good, and only then moves the
+folder to the trash. Everything goes through the action queue of §11.
+
+**Setting it up.** `Agent:Archive:Folder` (empty: off), e.g. `~/Archive` or a NAS mount. Also `Format` (empty:
+tar.gz on macOS and Linux, zip on Windows), `TimeoutMinutes` (180) and `MarginMegabytes` (512). The agent never
+creates the folder: a share that is not mounted must not turn into a folder on the local disk under its mount
+point. Every full scan reports `MachineInfo.Archive` (`ArchiveInfo`: folder, exists, writable by a create-and-delete
+probe, free space by `statvfs` / `GetDiskFreeSpaceEx` on the folder itself so a share reports its own, margin,
+format, and a `Problem` sentence) and two capabilities, `AcceptsArchiveProject` (actions on, folder there and
+writable) and `AcceptsRestoreArchive` (actions on, folder there). `AgentActions.WhyNotAccepted` tells "update to
+0.8.0" (`ArchiveMinAgentVersion`) from "set Agent:Archive:Folder" from the agent's own problem ("does not exist").
+The Machines page shows the folder and its free space under each machine's actions.
+
+**Archive.** `AgentActionKind.ArchiveProject { RepoPath, ExpectedFingerprint, IncludeBuildOutput }`
+(`IncludeBuildOutput` is left off the wire when false, so every older action's JSON and `AgentActions.Key` are
+unchanged). Buttons (`ArchiveButton`): the Safety page (at-risk, safe and not-sure rows, beside Remove) and each
+clone on the repo page, only on machines that report an archive folder. The dialog shows the destination pattern,
+the estimated size (measured size, less reclaimable build output unless kept), the free space there, what at-risk
+work the archive is keeping, and the build-output checkbox.
+
+*Hub, before queueing* (`Archives.Refusal`): the path is reported, is not a linked worktree, has no linked
+worktrees, the fingerprint equals the one shown, the machine's archive folder is available and writable, and the
+estimate plus margin fits in its reported free space. Unlike `RemoveRefusal`, any verdict is accepted. A
+tombstone is written as for a removal, with `Kind = Archived`.
+
+*Agent* (`ArchiveActions`, after the gate, the switch and `ActionValidator`, which checks the path as for a
+removal and that the folder is not a link):
+
+1. The archive folder is configured, exists, is writable, is not inside the project, and the project is not
+   inside it.
+2. `git fetch --all --prune` when there are remotes. Unlike a removal, a failed fetch is **not** a refusal: a
+   project whose remote is gone is exactly what gets archived, the archive keeps every local ref whatever the
+   remote says, and the fingerprint (which covers the refs as the last scan saw them) still has to match. The
+   output says the fetch failed.
+3. `ScanRepoAsync`, `RepoSafety.Assess`; refuse a linked worktree (its commits are in the main repository) and a
+   repository with linked worktrees (moving it would break them); refuse if the fingerprint differs.
+4. Walk the folder (`ProjectArchive.PlanAsync`) without following any link. A folder whose name is build output
+   by the scanner's own lists (`IsReclaimable`, `IsRecreated`, `IsCache`; never inside `.git`) is left out, unless
+   kept, and only when `git ls-files -- <name>`, asked from its parent, says git tracks nothing in it.
+5. Free space: refuse unless free ≥ the uncompressed size of what will be archived + margin. Unknown free space
+   is a refusal too.
+6. Write `<folder>/<name>-<yyyyMMdd-HHmmss>.<ext>.partial` (a counter is added when the name, its manifest or its
+   partial is taken; nothing is ever replaced). Each file is read through `ExactFile`: exactly the size the walk
+   saw, hashed as it goes; a file that turns out shorter or longer stops the archive. A content digest is built
+   as it goes: SHA-256 over every entry's name, kind, size, link target and content hash.
+7. Verify: SHA-256 of the archive file; re-open it and read every entry and all its data (`ProjectArchive.Read`);
+   the counts of files, folders and links, the total bytes and the content digest must equal what was written.
+8. Walk the folder again and compare with step 4 (names, kinds, sizes, link targets, file times). Anything
+   written while it was being archived would otherwise go to the trash unarchived, so any difference fails it.
+9. Rename `.partial` to the final name and write `<name>-<stamp>.json` (`ArchiveManifest`: source path, machine,
+   archive file, format, SHA-256, archive bytes, file/folder/link counts, total bytes, content digest, excluded
+   build output, skipped entries, remotes, branches with shas, HEAD branch and commit, verdict and fingerprint,
+   created at, DevDash version), itself written to a temporary name and renamed.
+10. `ITrash.Move` the folder (§15's trash; never deleted). If that fails, the archive and manifest are deleted:
+    the action did everything or nothing. `RemovalLog` records the remotes, so Re-clone works as after a removal.
+
+Any failure in 6–10, an exception, or the timeout deletes the partial archive, the archive and the manifest (in
+a `finally`) and leaves the folder exactly as it was. The result carries `ActionResultRequest.Archive`
+(`ArchiveResult`: archive path, manifest path, manifest), which settles the tombstone with `ArchivePath`,
+`ArchiveSha256` and `ManifestJson` (`Archives.Recorded` checks it looks like one); a failed, expired or lost
+result deletes it, as for a removal.
+
+**Format: tar.gz on POSIX, zip on Windows.** A tar (PAX, written with `System.Formats.Tar`) stores a symbolic link
+as a link with its target, and the full permission bits, the executable bit included; any `tar` reads it (the
+tests list one with the system's `tar -tzvf`). Zip keeps neither natively, only through the Info-ZIP "Unix
+attributes" extension, which many tools ignore. On Windows there is no executable bit to keep, creating symbolic
+links needs a privilege, and Explorer opens a zip without extra software, so zip is the default there; a link in
+a project on Windows is listed in the manifest's `Skipped` and not archived. Zip can still be chosen on POSIX
+(`Format: zip`): it then stores modes and links the Info-ZIP way, and restores them. Not kept either way: owners,
+extended attributes, ACLs, hard links (each name is archived as its own file) and the times of links. FIFOs and
+sockets have no content and are archived as empty files.
+
+**Links.** Never followed, in either direction. Archiving stores a link as a link (its target as written, even if
+it points outside the project or nowhere); nothing it points at is read. Restoring creates every link *after*
+every file and folder, so no file is ever written through a link, and creates files with `CreateNew`. Entry names
+must be the project's folder name or start with it and a `/`, with no empty, `.` or `..` segment and no backslash
+(`ProjectArchive.Relative`); anything else stops the restore.
+
+**Restore.** `AgentActionKind.RestoreArchive { RepoPath (the target), ArchivePath, ArchiveSha256 }`, from the
+tombstone's **Restore** button (`RestoreButton`), with a path box that defaults to where the project was, or
+`<path>-restored` when something is there again.
+
+*Hub* (`RestoreRefusalAsync`): a confirmed archived tombstone for that machine with that archive path and that
+checksum; nothing reported at the target; the target is strictly inside one of the machine's reported roots.
+
+*Agent*: the target passes the clone's free-folder rules (`ActionValidator.FreeFolderRefusal`: a plain absolute
+path in a scan root at scanner depth, not a dot-folder, the parent exists and is not a repository, nothing at the
+path, a dangling link included); the archive is inside the configured archive folder after resolving links,
+exists and is not a link (a missing archive is a refusal); its manifest exists, names it, and records the
+checksum the hub sent; the file's SHA-256 matches the manifest. Then it unpacks into
+`<parent>/.devdash-restore-<guid>` (a dot name, which the scanner skips), checks the counts, bytes and content
+digest against the manifest, refuses if the target appeared meanwhile, and renames the folder into place. Any
+failure deletes the temporary folder; the archive is never touched. A successful restore deletes the tombstone
+(the archive stays on disk).
+
+An archived tombstone stays listed even when something is reported at its old path again, and a later removal or
+clone at that path does not drop it: it is the dashboard's only record of an archive that still exists.
+**Forget** drops the record and leaves the archive where it is.
+
+**Long actions.** Archiving can take an hour. The agent bounds each archive or restore with
+`Agent:Archive:TimeoutMinutes`; the hub's lease for these kinds is `Hub:Actions:ArchiveLeaseMinutes` (240), longer,
+so the agent's own result (after its cleanup) arrives first. `AgentActions.IsLongRunning` (clone, archive,
+restore) ends a claim: the hub hands out nothing after one in the same claim, because the agent runs a claim's
+actions in turn and anything claimed behind an archive would outrun its 5-minute lease and be recorded as never
+reported while it was still to run. Actions queued during a long action wait for the next claim, and expire after
+`ExpiryMinutes` if it runs longer than that.
+
+*Progress*: `POST /api/v1/actions/{id}/progress` (`ActionProgressRequest`), agent key only, accepted only for a
+claimed action of the caller's machine; it replaces the row's `Output` until the result does. The agent sends
+"Archiving <path>: n of m files, x of y" at most every 5 s, then "Checking the archive", from `ActionWorker`
+without waiting on it; a hub before 0.8.0 answers 404, which is ignored. The Archive button shows it under its
+chip.
+
+**Schema.** `RemovedProjects` gains `Kind`, `ArchivePath`, `ArchiveSha256` and `ManifestJson`, all nullable.
+`SchemaUpgrade.CreateMissingTablesAsync` now also adds a nullable column the model has and an existing table lacks
+(`ALTER TABLE … ADD COLUMN … NULL`, names and types from EF's model), so an old database gains them on start;
+existing rows read as plain removals.
+
+**Not exposed over MCP**, like `RemoveProject`: it moves a folder to the trash.
+
+**The safety argument.** Nothing leaves the project's folder until a complete, verified copy exists: the copy is
+read back entry by entry against what was read from disk, the folder is shown not to have changed since, and the
+archive's checksum is on disk beside it. Every failure before the move deletes only files the action itself
+created (under names it chose because nothing was there), and a failed move deletes the archive too, so the
+outcome is all or nothing. The move itself is §15's trash, so even an archive that was somehow wrong would leave
+the folder recoverable. The hub cannot choose what is archived (only a path it was told about, with a fingerprint
+the agent recomputes), where it goes (the agent's own folder), what is restored (only an archive inside that
+folder whose manifest and checksum match) or where (only a free folder in a scan root). Links are never followed,
+so nothing outside the project is read when archiving or written when restoring.
+
+**Tests.** `ArchiveTests` (agent; the archive folder and the trash are in the test's temp folder): the shapes of
+the new kinds; the snapshot fields (configured, a missing share reported and not created, not configured, too
+old); an at-risk project archived, trashed and restored exactly (an unpushed commit, modified, untracked and
+ignored files, build output left out, `.git`; on POSIX an executable script, a relative link and links leading out
+of the project, kept as links, and the system `tar` reading the archive); a zip round trip with build output
+kept; a corrupted archive failing verification with the folder untouched and nothing left in the archive folder;
+a file written during archiving; the free-space refusal; a fingerprint mismatch; a failed trash deleting the
+archive; a missing or unconfigured folder (not created) and a folder inside the project; linked worktrees; restore
+refusing an existing target, a wrong checksum, an archive outside the folder, a target outside the roots, a
+damaged archive and a missing one; entry names that would leave the folder; archive names never replacing one.
+`ArchiveHubTests`: queueing an at-risk archive, progress, the settled tombstone and its restore action, the pages;
+refusals (stale, unknown path, too big, no folder, too old, unmounted); a failed archive leaving no tombstone; the
+long-action claim and lease; restore refusals and the tombstone's life cycle; a later removal not dropping the
+archive record; an old database gaining the columns. `AgentLoopTests` archives a project with no remote and
+restores it, with the real agent against the real hub.
+
+**Limits and not verified.** Windows: the zip path, `GetDiskFreeSpaceExW` and the skipped-links rule run in CI's
+Windows tests only against a temp folder; no real network share (an SMB or NFS mount on macOS or Linux, a UNC path
+on Windows) has been tried, so free space, the write probe and renames on a NAS are as documented, not observed.
+The re-walk compares sizes and times, so a file rewritten in place with the same size within the file system's
+time resolution is not noticed (its new content would be in the trash, not the archive). The free-space check uses
+the uncompressed size, which is conservative, but space can still run out if something else fills the volume
+meanwhile; the write then fails and is cleaned up. Hard links come back as separate files. The write probe runs
+on every full scan, so a NAS sees a create and a delete every 15 minutes.

@@ -69,6 +69,8 @@ public sealed class GitRunner
             "rev-parse" => true,
             "log" => true,
             "rev-list" => args.Count >= 3 && args[1] == "--count", // counts commits, prints one number
+            "merge-base" => args.Count == 3 && args.Skip(1).All(IsObjectName), // prints one commit
+            "diff" => IsCommitDiff(args), // compares two commits; no working tree, no --output
             "symbolic-ref" => args.Count == 3 && args[1] == "--short", // read form only
             "remote" => args.Count == 2 && args[1] == "-v",
             "worktree" => args.Count >= 2 && args[1] == "list",
@@ -84,6 +86,21 @@ public sealed class GitRunner
             throw new InvalidOperationException($"git {string.Join(' ', args)} is not on the agent's read-only allowlist.");
         }
     }
+
+    /// <summary>Flags a commit-to-commit <c>git diff</c> may take: output shape only, nothing that runs a helper or writes a file.</summary>
+    private static readonly HashSet<string> DiffFlags = new(StringComparer.Ordinal)
+    {
+        "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--name-only", "--unified=0", "--full-index",
+    };
+
+    /// <summary><c>git diff [allowed flags] &lt;sha&gt; &lt;sha&gt;</c>: exactly two full commit names, so it never reads the working tree.</summary>
+    private static bool IsCommitDiff(IReadOnlyList<string> args) =>
+        args.Skip(1).Count(IsObjectName) == 2
+        && args.Skip(1).All(a => IsObjectName(a) || DiffFlags.Contains(a))
+        && args.Contains("--no-ext-diff") && args.Contains("--no-textconv");
+
+    private static bool IsObjectName(string arg) =>
+        arg.Length is 40 or 64 && arg.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
 
     /// <summary>
     /// Starts git with exactly these arguments. Internal so that the scanner cannot reach it: besides

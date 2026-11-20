@@ -52,6 +52,14 @@ public sealed class AgentOptions
     /// <summary>T3 Code: its threads in the snapshot, and the actions that open it or start a thread.</summary>
     public T3Code.T3Options T3 { get; set; } = new();
 
+    /// <summary>The developer caches outside the repositories, measured in the background every few hours (§21).</summary>
+    public Disk.DiskOptions Disk { get; set; } = new();
+
+    /// <summary>Listening development servers, listed with every scan (§21).</summary>
+    public DevServers.DevServerOptions DevServers { get; set; } = new();
+    /// <summary>Archiving projects instead of removing them: off until <c>Agent:Archive:Folder</c> is set.</summary>
+    public Actions.ArchiveOptions Archive { get; set; } = new();
+
     /// <summary>
     /// The folders to scan. Configured roots are used as they are; with none configured, <c>~/Developer</c>
     /// and, when T3 Code has made one, its projects folder.

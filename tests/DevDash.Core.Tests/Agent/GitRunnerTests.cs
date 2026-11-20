@@ -16,6 +16,8 @@ public class GitRunnerTests
     [InlineData("rev-list", "--count", "--first-parent", "origin/main")]
     [InlineData("status", "--porcelain=v2", "--branch", "--ignored")]
     [InlineData("submodule", "status", "--recursive")]
+    [InlineData("merge-base", "0000000000000000000000000000000000000000", "1111111111111111111111111111111111111111")]
+    [InlineData("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--full-index", "--unified=0", "0000000000000000000000000000000000000000", "1111111111111111111111111111111111111111")]
     public void Allows_the_read_only_commands_the_scanner_uses(params string[] args) =>
         GitRunner.EnsureReadOnly(args);
 
@@ -40,6 +42,10 @@ public class GitRunnerTests
     [InlineData("gc")]
     [InlineData("rev-list", "--all")] // only the counting form
     [InlineData("rev-list", "--count")]
+    [InlineData("diff", "--no-ext-diff", "--no-textconv", "HEAD")] // the working tree is not compared
+    [InlineData("diff", "--no-ext-diff", "--no-textconv", "--output=/tmp/x", "0000000000000000000000000000000000000000", "1111111111111111111111111111111111111111")]
+    [InlineData("diff", "0000000000000000000000000000000000000000", "1111111111111111111111111111111111111111")] // external diff helpers must be off
+    [InlineData("merge-base", "main", "feature")] // commit names only
     [InlineData("status", "some-path")]
     public void Refuses_anything_that_could_change_a_repository(params string[] args) =>
         Assert.Throws<InvalidOperationException>(() => GitRunner.EnsureReadOnly(args));

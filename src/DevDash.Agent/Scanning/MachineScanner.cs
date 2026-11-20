@@ -39,12 +39,38 @@ public sealed class MachineScanner
     private readonly Dependencies.DependencyCache? _dependencies;
     private readonly Dependencies.DependencyTargets? _dependencyTargets;
     private readonly T3Code.T3Service? _t3;
+    private readonly Disk.DiskService? _disk;
+    private readonly DevServers.DevServerCollector? _devServers;
+
+    /// <summary>
+    /// The machine facts read afresh with every push (§21): the last disk report (measured in the background, only read
+    /// here) and the listening dev servers, matched to the working trees in <paramref name="entries"/>. Never fails a scan.
+    /// </summary>
+    public async Task<MachineInfo> WithMachineFactsAsync(MachineInfo machine, IReadOnlyList<DevEntry> entries, CancellationToken ct)
+    {
+        DevServerReport? servers = null;
+        if (_devServers is not null)
+        {
+            try
+            {
+                servers = await _devServers.CollectAsync(entries, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning("Could not list dev servers: {Error}", ex.Message);
+            }
+        }
+
+        return machine with { Disk = _disk?.Current, DevServers = servers };
+    }
 
     public MachineScanner(
         RepoScanner repos, SizeCache sizes, IOptionsMonitor<AgentOptions> options, ILogger<MachineScanner> logger, TimeProvider? time = null,
         Toolchains.ToolchainService? toolchains = null, Dependencies.DependencyCache? dependencies = null, Dependencies.DependencyTargets? dependencyTargets = null,
-        T3Code.T3Service? t3 = null)
+        T3Code.T3Service? t3 = null, Disk.DiskService? disk = null, DevServers.DevServerCollector? devServers = null)
     {
+        _disk = disk;
+        _devServers = devServers;
         _t3 = t3;
         _toolchains = toolchains;
         _dependencies = dependencies;
@@ -103,6 +129,8 @@ public sealed class MachineScanner
             machine = machine with { T3 = _t3.Current ?? t3Info, AcceptsT3 = options.Actions.Enabled && t3Info.Available };
         }
 
+        machine = await WithMachineFactsAsync(machine, scanned, ct).ConfigureAwait(false);
+
         return new MachineSnapshot
         {
             Machine = machine,
@@ -146,7 +174,8 @@ public sealed class MachineScanner
             var git = entry.Git;
             if (git is { IsLinkedWorktree: true, Graph: not null, CommonDir: { } dir } && !carried.Add(dir))
             {
-                git = git with { Graph = null };
+                // The remote branches are the repository's too, and go with the graph.
+                git = git with { Graph = null, RemoteBranches = null };
             }
 
             // The same goes for the commits-per-day counts: one history, sent once.

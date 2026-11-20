@@ -1,0 +1,120 @@
+@* Listening dev servers (§21): repo, program, ports, how long it has run, clashes, and a Stop button that
+   queues StopDevServer after a confirmation. The page must have loaded the ActionBoard. *@
+@if (Rows.Count == 0)
+{
+    <p class="muted small">@Empty</p>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="stack devservers-table">
+            <thead>
+                <tr>
+                    @if (ShowRepo) { <th>Repo</th> }
+                    <th>Program</th><th>Ports</th>
+                    @if (ShowMachine) { <th>Machine</th> }
+                    <th class="right">Running</th>
+                    @if (WithStop) { <th></th> }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in Rows.Take(Limit))
+                {
+                    <tr @key="(row.Machine.MachineId, row.Server.Pid)">
+                        @if (ShowRepo)
+                        {
+                            <td class="cell-main">
+                                @if (row.RepoKey is not null)
+                                {
+                                    <a class="title-link" href="@Fmt.RepoUrl(row.RepoKey)">@row.RepoName</a>
+                                }
+                                else
+                                {
+                                    <span class="muted" title="Not inside a scanned repository: listed because @row.Server.Name is a development tool">outside your repos</span>
+                                }
+                            </td>
+                        }
+                        <td data-label="Program">
+                            <div>
+                                <strong>@row.Server.Name</strong> <span class="muted small mono">pid @row.Server.Pid</span>
+                                @if (row.Server.Command is { } command)
+                                {
+                                    <div class="sub mono truncate" title="@command">@command</div>
+                                }
+                            </div>
+                        </td>
+                        <td data-label="Ports" class="nowrap">
+                            <div>
+                                <span class="mono">@row.Ports</span>
+                                @if (row.Clashes.Count > 0)
+                                {
+                                    <span class="chip warn gap" title="@DevServerView.ClashText(row)">port clash</span>
+                                }
+                            </div>
+                        </td>
+                        @if (ShowMachine)
+                        {
+                            <td data-label="Machine" class="nowrap"><a href="machines#machine-@row.Machine.MachineId">@row.Machine.Machine.Hostname</a></td>
+                        }
+                        <td data-label="Running" class="right nowrap" title="@Fmt.Date(row.Server.StartedAt)">
+                            @if (row.Server.StartedAt is { } started)
+                            {
+                                @DevServerView.Running(started, Now)
+                                @if (row.Old)
+                                {
+                                    <span class="chip warn gap" title="Running for more than @((int)DevServerView.OldAfter.TotalDays) days: perhaps forgotten.">old</span>
+                                }
+                            }
+                        </td>
+                        @if (WithStop)
+                        {
+                            <td class="right cell-buttons">
+                                @if (row.StopAction is { } stop)
+                                {
+                                    <ActionButton Machine="row.Machine" Action="stop" Label="Stop" Class="run"
+                                                  Ask="@($"Stop {row.Server.Name} on {row.Ports}?")"
+                                                  What="@($"Ask {row.Server.Name} (pid {row.Server.Pid}) on {row.Machine.Machine.Hostname} to stop")">
+                                        <dl class="kv">
+                                            <dt>Process</dt><dd class="mono">@row.Server.Name, pid @row.Server.Pid, on @row.Ports</dd>
+                                            <dt>Command</dt><dd class="mono">@row.Server.Command</dd>
+                                            <dt>Started</dt><dd>@Fmt.Date(row.Server.StartedAt)</dd>
+                                            @if (row.Server.Cwd is { } cwd)
+                                            {
+                                                <dt>Working in</dt><dd class="mono">@cwd</dd>
+                                            }
+                                        </dl>
+                                        <p>Anything it has not saved may be lost, as when you press Ctrl+C in its terminal.</p>
+                                    </ActionButton>
+                                }
+                                else
+                                {
+                                    <span class="sub" title="@(row.Server.RepoPath is null ? "Only a server running inside a scanned repository can be stopped from here." : "The agent could not read its start time or command line, so it cannot be told from a later process with the same id.")">—</span>
+                                }
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    @if (Rows.Count > Limit)
+    {
+        <p class="muted small">and @(Rows.Count - Limit) more</p>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<DevServerRow> Rows { get; set; } = [];
+
+    [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+
+    [Parameter] public bool ShowRepo { get; set; } = true;
+
+    [Parameter] public bool ShowMachine { get; set; } = true;
+
+    [Parameter] public bool WithStop { get; set; } = true;
+
+    [Parameter] public int Limit { get; set; } = 50;
+
+    [Parameter] public string Empty { get; set; } = "No dev server is running.";
+}

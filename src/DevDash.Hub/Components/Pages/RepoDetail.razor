@@ -7,6 +7,7 @@
 @inject ActionBoard Actions
 @inject T3Starts Starts
 @inject NavigationManager Nav
+@inject RepoNotes Notes
 
 <PageTitle>@(_row?.Name ?? "Repo") · DevDash</PageTitle>
 
@@ -53,6 +54,8 @@ else
             }
         </div>
     </div>
+
+    <RepoNoteEditor @key="_row.Key" Note="_note" Quiet="_quietTags" />
 
     @if (Refreshes.Error is { } refreshError)
     {
@@ -106,7 +109,7 @@ else
 
     @if (_row.Kind == EntryKind.GitRepo)
     {
-        <BranchMapView Clones="_row.Clones" PullRequests="_row.PullRequests" Now="Now" GitHubUrl="@_row.GitHub?.Url" Name="@_row.Clones.FirstOrDefault()?.Entry.Name" />
+        <BranchMapView Clones="_row.Clones" PullRequests="_row.PullRequests" MergedPullRequests="_row.MergedPullRequests" Now="Now" GitHubUrl="@_row.GitHub?.Url" Name="@_row.Clones.FirstOrDefault()?.Entry.Name" />
     }
 
     @if (_hasActivity)
@@ -211,12 +214,24 @@ else
                                 <RefreshButton Compact="true" Availability="Refreshes.For(clone.Machine)" Status="Refreshes.StatusOf(target)"
                                                What="@($"Rescan {clone.Entry.Name} on {clone.Machine.Machine.Hostname} now")" OnRefresh="() => RefreshAsync([target])" />
                             }
+                            @if (!clone.IsLinkedWorktree && (clone.Machine.Machine.Archive is not null || clone.Machine.Machine.AcceptsArchiveProject)
+                                 && _safety.GetValueOrDefault((clone.Machine.MachineId, clone.Entry.Path)) is { } assessed)
+                            {
+                                <ArchiveButton Machine="clone.Machine" Path="@clone.Entry.Path" Name="@_row.Name" Safety="assessed" />
+                            }
                         </td>
                     </tr>
                 }
             </tbody>
         </table>
     </div>
+
+    <RepoTrends RepoKey="@_row.Key" />
+    @if (_servers.Count > 0)
+    {
+        <h2 id="running">Running <span class="muted small">@Fmt.Count(_servers.Count, "dev server")</span></h2>
+        <DevServerList Rows="_servers" Now="Now" ShowRepo="false" />
+    }
 
     @if (Pinned.Count > 0)
     {
@@ -606,14 +621,24 @@ else
         }
     }
 
+    private RepoNote _note = RepoNote.None("");
+    private IReadOnlySet<string> _quietTags = new HashSet<string>();
+    // §21: dev servers listening inside this repo's working trees, on any machine.
+    [Inject] private SnapshotStore ServerSnapshots { get; set; } = default!;
+    private IReadOnlyList<DevServerRow> _servers = [];
+
     protected override async Task LoadAsync()
     {
         _row = string.IsNullOrEmpty(Key) ? null : await Catalog.FindAsync(Key);
+        var notes = await Notes.GetAsync();
+        _note = _row is null ? RepoNote.None("") : notes.For(_row.Key);
+        _quietTags = notes.QuietTags;
         _clonesByKey = Catalog.ClonesByGitHubKey();
         _targets = RefreshTargets.For(_row?.Clones ?? []);
         _safety = SafetyRows.ByClone();
         await Refreshes.LoadAsync();
         await Actions.LoadAsync();
+        _servers = _row is null ? [] : DevServerView.ForRepo(DevServerView.Rows(ServerSnapshots.Machines, Now), _row.Key);
         _sync = SyncOffers.For(_row?.Clones ?? []);
         _t3Rows = _row is null ? [] : T3View.ForRepo(_row, await Starts.RecentAsync());
         _t3Targets = _row is null ? [] : Starts.Targets(_row);

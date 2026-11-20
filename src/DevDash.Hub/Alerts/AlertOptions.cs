@@ -44,6 +44,7 @@ public sealed class AlertOptions
         QuietHours.Start = Clean(QuietHours.Start);
         QuietHours.End = Clean(QuietHours.End);
         Triggers.AtRisk.Days = Math.Clamp(Triggers.AtRisk.Days, 0, 3650);
+        Triggers.AtRisk.ForDays = Math.Clamp(Triggers.AtRisk.ForDays, 0, 3650);
         Triggers.AtRisk.Level = Triggers.AtRisk.MinLevel.ToString();
         Triggers.MachineOffline.Minutes = Math.Clamp(Triggers.MachineOffline.Minutes, 1, 60 * 24 * 365);
         Triggers.MachineOffline.Ignore = Clean(Triggers.MachineOffline.Ignore);
@@ -150,6 +151,12 @@ public sealed class AtRiskTriggerOptions
 
     /// <summary>How long the work has to have been sitting there.</summary>
     public int Days { get; set; } = 3;
+
+    /// <summary>
+    /// And how long the hub has to have seen the tree at risk (at <see cref="Level"/> or worse) without a
+    /// break, from the history's risk episodes (§22). 0: no extra wait.
+    /// </summary>
+    public int ForDays { get; set; }
 
     /// <summary>
     /// The least serious risk that alerts: <c>High</c> (commits on no remote), <c>Medium</c> (also

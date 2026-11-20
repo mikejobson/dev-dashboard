@@ -27,6 +27,7 @@ public sealed class AlertService(
     SafetyService safety,
     FindingsService findings,
     GitHubStore github,
+    RepoNotes notes,
     IDbContextFactory<DevDashDbContext> dbFactory,
     IOptionsMonitor<HubOptions> hub,
     DashboardNotifier notifier,
@@ -214,6 +215,8 @@ public sealed class AlertService(
             StartedThreads = await db.T3Threads.AsNoTracking().Where(t => t.ThreadId != null).OrderByDescending(t => t.Id).Take(200).ToListAsync(ct),
             HubUpSince = _upSince,
             OpenKeys = openKeys,
+            QuietRepos = (await notes.GetAsync(ct)).QuietKeys,
+            RiskEpisodes = (await db.RiskEpisodes.AsNoTracking().ToListAsync(ct)).ToDictionary(e => (e.MachineId, e.Path)),
         };
     }
 

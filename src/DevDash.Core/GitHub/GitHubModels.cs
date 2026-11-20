@@ -62,6 +62,9 @@ public sealed record PullRequestInfo
     /// <summary>The head branch lives in a fork, so its name says nothing about a branch of this repository.</summary>
     public bool IsCrossRepository { get; init; }
     public string? BaseRef { get; init; }
+
+    /// <summary>When it was merged. Only set on <see cref="GitHubSnapshot.MergedPullRequests"/>.</summary>
+    public DateTimeOffset? MergedAt { get; init; }
     public bool Authored { get; init; }
     public bool ReviewRequested { get; init; }
     public bool Assigned { get; init; }
@@ -103,6 +106,12 @@ public sealed record GitHubSnapshot
     public DateTimeOffset FetchedAt { get; init; }
     public IReadOnlyList<string> Organizations { get; init; } = [];
     public IReadOnlyList<PullRequestInfo> PullRequests { get; init; } = [];
+
+    /// <summary>
+    /// My pull requests merged in the last <c>MergedDays</c> days, with their head commit: a local branch
+    /// still at that commit was merged on GitHub even when a squash left it looking unpushed.
+    /// </summary>
+    public IReadOnlyList<PullRequestInfo> MergedPullRequests { get; init; } = [];
     public IReadOnlyList<IssueInfo> Issues { get; init; } = [];
     public IReadOnlyList<GitHubRepo> RecentRepos { get; init; } = [];
 

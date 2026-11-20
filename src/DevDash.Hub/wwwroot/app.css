@@ -781,6 +781,7 @@ details.chip-details > div { margin-top: 4px; max-width: 280px; white-space: nor
 .bm-ref.stash { border-style: dotted; background: none; font-family: inherit; color: var(--muted); }
 .bm-ref.ghost { border-style: dashed; background: none; font-family: inherit; font-style: normal; }
 .bm-tag { font-size: 11px; line-height: 17px; padding: 0 6px; border-radius: 999px; background: var(--warn-bg); color: var(--warn); white-space: nowrap; flex: none; }
+.bm-tag.squash { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
 
 /* ---- an opened commit ---- */
 .bm-detail { grid-column: 3 / -1; padding: 2px 0 12px; min-width: 0; display: grid; gap: 6px; }
@@ -838,6 +839,8 @@ button.run.is-disabled:hover { border-color: var(--accent); }
 .safety-actions { margin-left: auto; }
 td.safety-actions { margin-left: 0; }
 .safety-refusal { max-width: 320px; margin-left: auto; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
+.archive-progress { max-width: 320px; margin-left: auto; overflow-wrap: anywhere; text-align: left; }
+.restore-target { width: 100%; min-width: 0; font-family: var(--mono); }
 .caveats { list-style: none; margin: 8px 0; padding: 0; }
 .caveats li { padding: 3px 0; }
 .caveats label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; overflow-wrap: anywhere; }
@@ -947,4 +950,69 @@ label.field { grid-template-columns: minmax(0, 1fr); }
 .issue-settings .repo-opt select { min-width: 160px; }
 @media (max-width: 640px) {
     .t3-form .t3-row { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---- Where I left off, tags, notes and pins (§20) ---- */
+.btn.toggle.on { background: var(--info-bg); border-color: var(--accent); color: var(--accent); }
+a.chip-btn { display: inline-block; border: 1px solid transparent; color: var(--text); white-space: nowrap; }
+a.chip-btn:hover { border-color: var(--accent); text-decoration: none; }
+.repo-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
+.chip.tag { font-family: var(--mono); font-size: 11.5px; }
+a.chip.tag:hover { text-decoration: none; outline: 1px solid var(--accent); }
+.chip.pin { background: var(--info-bg); color: var(--info); }
+.repo-note { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.note-editor { margin: 4px 0 14px; }
+.note-view { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.note-buttons { display: inline-flex; gap: 6px; }
+.note-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
+.note-form label { display: grid; gap: 3px; }
+.note-form label.note-line { flex: 1 1 280px; }
+.note-form label.note-line input { width: 100%; }
+.note-form label.note-pin { display: flex; gap: 6px; align-items: center; padding-bottom: 6px; }
+.note-form .note-actions { display: inline-flex; gap: 6px; }
+.note-form .note-hint { flex-basis: 100%; }
+.leftoff-day { font-size: 13px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin: 14px 0 4px; }
+.leftoff-day:first-child { margin-top: 0; }
+.leftoff .leftoff-item { display: grid; gap: 4px; min-width: 0; }
+.leftoff-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; min-width: 0; }
+.leftoff-head .chip.branch { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.leftoff-when { margin-left: auto; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.leftoff .sub { color: var(--muted); font-size: 12.5px; }
+.clamp-1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.leftoff-files { display: flex; flex-wrap: wrap; gap: 2px 12px; min-width: 0; }
+.leftoff-files .mono { overflow-wrap: anywhere; font-size: 12px; }
+.leftoff-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.leftoff.compact .leftoff-item { gap: 3px; }
+@media (max-width: 640px) {
+    .leftoff-when { margin-left: 0; flex-basis: 100%; }
+}
+/* ---- history (§22): line charts and sparklines drawn as SVG on the server; colours are the per-device --dev-N ---- */
+.charts { margin-bottom: 8px; }
+.chart h3 { margin: 0; font-size: 14px; }
+.chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 6px; }
+.chart-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); }
+.chart-legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.chart-svg { display: block; max-width: 100%; height: auto; overflow: visible; }
+.chart-grid { stroke: var(--border); stroke-width: 1; }
+.chart-grid.base { stroke: var(--muted); stroke-opacity: .5; }
+.chart-label { fill: var(--muted); font-size: 10px; }
+.chart-end { fill: var(--text); font-size: 11px; }
+.chart-series polyline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-series .dot { stroke: var(--surface); stroke-width: 2; }
+.chart-series .hit { fill: transparent; stroke: none; }
+.chart-series .hit:hover { fill: var(--text); fill-opacity: .15; }
+.spark-svg { display: inline-block; vertical-align: middle; overflow: visible; }
+.spark-svg polyline { fill: none; stroke-width: 1.5; stroke-linejoin: round; }
+.trend { display: inline-flex; align-items: center; gap: 8px; }
+.history-range .chip { text-decoration: none; }
+.since-items > div + div { margin-top: 2px; }
+.s0 polyline { stroke: var(--dev-0); } .s0 .dot, .spark-svg.s0 circle { fill: var(--dev-0); } i.s0 { background: var(--dev-0); }
+.s1 polyline { stroke: var(--dev-1); } .s1 .dot, .spark-svg.s1 circle { fill: var(--dev-1); } i.s1 { background: var(--dev-1); }
+.s2 polyline { stroke: var(--dev-2); } .s2 .dot, .spark-svg.s2 circle { fill: var(--dev-2); } i.s2 { background: var(--dev-2); }
+.s3 polyline { stroke: var(--dev-3); } .s3 .dot, .spark-svg.s3 circle { fill: var(--dev-3); } i.s3 { background: var(--dev-3); }
+.s4 polyline { stroke: var(--dev-4); } .s4 .dot, .spark-svg.s4 circle { fill: var(--dev-4); } i.s4 { background: var(--dev-4); }
+.s5 polyline { stroke: var(--dev-5); } .s5 .dot, .spark-svg.s5 circle { fill: var(--dev-5); } i.s5 { background: var(--dev-5); }
+@media (forced-colors: active) {
+    .chart-series polyline, .spark-svg polyline { stroke: CanvasText; }
+    .chart-series .dot, .spark-svg circle { fill: CanvasText; }
 }

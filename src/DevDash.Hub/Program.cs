@@ -75,6 +75,7 @@ builder.Services.AddSingleton<ApiKeyService>();
 // ---- dashboard state ----------------------------------------------------------------------------
 builder.Services.AddSingleton<DashboardNotifier>();
 builder.Services.AddSingleton<SnapshotStore>();
+builder.Services.AddSingleton<DevDash.Hub.History.HistoryStore>();
 builder.Services.AddSingleton<IDescriptionProvider, DefaultDescriptionProvider>();
 builder.Services.AddSingleton<RepoCatalog>();
 builder.Services.AddSingleton(_ => new CleanupEngine());
@@ -88,6 +89,7 @@ builder.Services.AddHostedService<ActionExpiryService>();
 builder.Services.AddSingleton<FindingsService>();
 builder.Services.AddSingleton<SafetyService>();
 builder.Services.AddSingleton<NavCounts>();
+builder.Services.AddSingleton<RepoNotes>();
 
 // ---- GitHub -------------------------------------------------------------------------------------
 builder.Services.AddSingleton<IGitHubTokenProvider, GitHubTokenProvider>();

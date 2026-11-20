@@ -26,6 +26,7 @@ public static class ApiEndpoints
         // Agent actions. An agent only ever sees, and can only report on, actions for the machine its key is bound to.
         api.MapPost("/actions/claim", ClaimActionsAsync).RequireAuthorization(AgentPolicy);
         api.MapPost("/actions/{id}/result", CompleteActionAsync).RequireAuthorization(AgentPolicy);
+        api.MapPost("/actions/{id}/progress", ActionProgressAsync).RequireAuthorization(AgentPolicy);
 
         // ---- browser / curl (read-only views of what the pages show) -----------------------------
         api.MapGet("/machines", (SnapshotStore store, AgentUpdates updates) => store.Machines.Select(m => new
@@ -176,6 +177,12 @@ public static class ApiEndpoints
             : await actions.ClaimAsync(machineId, ct);
         return Results.Json(new ActionClaimResponse { Actions = claimed }, SnapshotSchema.JsonOptions);
     }
+
+    /// <summary>How a long action (an archive) is getting on, shown in place of its output until the result arrives.</summary>
+    private static async Task<IResult> ActionProgressAsync(string id, ActionProgressRequest? progress, ClaimsPrincipal user, ActionQueue actions, CancellationToken ct) =>
+        progress is not null && MachineOf(user) is { } machineId && await actions.ProgressAsync(machineId, id, progress.Output, ct)
+            ? Results.NoContent()
+            : Results.NotFound();
 
     private static async Task<IResult> CompleteActionAsync(string id, ActionResultRequest? result, ClaimsPrincipal user, ActionQueue actions, CancellationToken ct)
     {

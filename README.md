@@ -239,6 +239,27 @@ To send removed projects somewhere other than the system trash, set
 `"Agent": { "Actions": { "TrashDirectory": "/path/on/the/same/volume" } }`. A removal is a rename,
 never a copy, so it has to be on the same volume as the projects.
 
+### Archiving a project
+
+For a project you are done with but that holds work nowhere else (or that you just want to keep), set
+an archive folder on that machine, a local folder or a mounted NAS share:
+`"Agent": { "Archive": { "Folder": "/Volumes/nas/archive" } }`. The agent never creates the folder,
+so a share that is not mounted is reported, not filled in on the local disk. The Safety page and
+the repo page then show **Archive** beside each project on that machine, at risk or not.
+
+Archiving does the same re-check as a removal (fetch, scan, fingerprint), checks there is room, and
+writes `<name>-<yyyyMMdd-HHmmss>.tar.gz` (`.zip` on Windows) with everything in the folder: `.git`,
+uncommitted, untracked and ignored files. Regenerable build output (`node_modules`, `bin`/`obj`,
+`.venv`…) is left out unless you tick the box. Symbolic links are stored as links and never
+followed. The agent reads the archive back and checks every entry, checks nothing in the folder
+changed meanwhile, writes `<name>-<stamp>.json` beside it (SHA-256, file count, remotes, branches,
+HEAD), and only then moves the folder to the trash. If any step fails, the archive is deleted and
+the folder is left alone. The Removed list then has **Restore**, which unpacks it, after checking
+the checksum, into the old folder or any free folder in a scan root.
+
+`Agent:Archive:TimeoutMinutes` (180) bounds one archive or restore; `Hub:Actions:ArchiveLeaseMinutes`
+(240) is how long the hub waits for its result. See PLAN.md §23 for the details and the reasoning.
+
 ### Toolchains
 
 The Machines page has a **Toolchains** section: what each machine has installed, and which repos on

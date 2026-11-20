@@ -77,8 +77,18 @@ public sealed class AgentWorker : BackgroundService
                 Volatile.Write(ref _rescanNow, 1);
                 _signal.Release();
             };
+
+            // The disk report was measured again, or a cache was cleaned or a server stopped: push the machine's facts now.
+            rescans.MachineChanged += () =>
+            {
+                Volatile.Write(ref _machineChanged, 1);
+                Volatile.Write(ref _rescanNow, 1);
+                _signal.Release();
+            };
         }
     }
+
+    private int _machineChanged;
 
     /// <summary>
     /// Runs the entry rescans that are waiting: file changes, and refreshes asked for from the dashboard.
@@ -201,7 +211,8 @@ public sealed class AgentWorker : BackgroundService
             }
 
             changed.RemoveAll(refreshes.ContainsKey);
-            if (changed.Count == 0 && refreshes.Count == 0)
+            var machineChanged = Interlocked.Exchange(ref _machineChanged, 0) == 1;
+            if (changed.Count == 0 && refreshes.Count == 0 && !machineChanged)
             {
                 return;
             }
@@ -237,6 +248,8 @@ public sealed class AgentWorker : BackgroundService
 
             _last = _last with
             {
+                // Listening servers and the disk report are machine facts: read again with every push, not only on a full scan.
+                Machine = await _scanner.WithMachineFactsAsync(_last.Machine, entries, ct).ConfigureAwait(false),
                 ScannedAt = DateTimeOffset.UtcNow,
                 Entries = MachineScanner.WithOneGraphPerRepository(entries.OrderBy(e => e.Root, StringComparer.Ordinal).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList()),
             };

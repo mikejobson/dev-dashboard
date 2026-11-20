@@ -1,0 +1,39 @@
+@* A repo's pin, tags and note as the lists show them (§20). Tags link to the same page filtered by that tag. *@
+@if (!Note.IsEmpty)
+{
+    <span class="repo-tags">
+        @if (Note.Pinned)
+        {
+            <span class="chip pin" title="Pinned: kept at the top of the lists">pinned</span>
+        }
+        @foreach (var tag in Note.Tags)
+        {
+            @if (TagUrl is not null)
+            {
+                <a class="chip tag @(Quiet(tag) ? "muted" : "")" href="@TagUrl(tag)" title="Show only repos tagged #@tag">#@tag</a>
+            }
+            else
+            {
+                <span class="chip tag @(Quiet(tag) ? "muted" : "")">#@tag</span>
+            }
+        }
+        @if (ShowNote && Note.Note.Length > 0)
+        {
+            <span class="repo-note sub" title="@Note.Note">@Note.Note</span>
+        }
+    </span>
+}
+
+@code {
+    [Parameter, EditorRequired] public RepoNote Note { get; set; } = default!;
+
+    /// <summary>Where a tag links to, e.g. the same page with <c>?tag=</c>. Null: tags are not links.</summary>
+    [Parameter] public Func<string, string>? TagUrl { get; set; }
+
+    [Parameter] public bool ShowNote { get; set; } = true;
+
+    /// <summary>The quiet tags (<c>archived</c>), shown muted.</summary>
+    [Parameter] public IReadOnlySet<string>? QuietTags { get; set; }
+
+    private bool Quiet(string tag) => QuietTags?.Contains(tag) == true;
+}

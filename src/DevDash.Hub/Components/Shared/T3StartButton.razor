@@ -6,7 +6,11 @@
 @inject IOptionsMonitor<HubOptions> Options
 <span class="act">
     <button type="button" class="@Class @(Blocked ? "is-disabled" : "")" aria-disabled="@(Blocked ? "true" : "false")" title="@Tooltip" @onclick="OpenAsync">@Label</button>
-    @if (_queued is { } queued)
+    @if (_queued is { Status: T3StartStatus.Failed } failed)
+    {
+        <span class="chip danger" title="@failed.Error">thread did not start on @failed.MachineName</span>
+    }
+    else if (_queued is { } queued)
     {
         <span class="chip info" title="Queued by @queued.QueuedBy">thread on its way to @queued.MachineName</span>
     }
@@ -39,7 +43,25 @@
                     <label>Title <input type="text" @bind="_title" maxlength="@AgentActions.MaxTitleChars" /></label>
                     <div class="t3-row">
                         <label>New branch <input type="text" class="mono" @bind="_branch" spellcheck="false" /></label>
-                        <label>Start from <input type="text" class="mono" @bind="_base" spellcheck="false" /></label>
+                        <label>
+                            Start from
+                            <select class="mono" value="@(_otherBase ? OtherValue : _base)" @onchange="PickBase">
+                                @foreach (var group in _baseOptions.GroupBy(o => o.Group))
+                                {
+                                    <optgroup label="@group.Key">
+                                        @foreach (var option in group)
+                                        {
+                                            <option value="@option.Value">@option.Label</option>
+                                        }
+                                    </optgroup>
+                                }
+                                <option value="@OtherValue">Other: a tag, commit or branch…</option>
+                            </select>
+                            @if (_otherBase)
+                            {
+                                <input type="text" class="mono" @bind="_base" spellcheck="false" placeholder="v1.2.0, a1b2c3d or origin/feature" aria-label="Start from (ref)" />
+                            }
+                        </label>
                     </div>
                 </div>
                 @if (Current is { } chosen)
@@ -106,11 +128,40 @@
     /// <summary>Told after a thread is queued.</summary>
     [Parameter] public EventCallback<T3ThreadEntity> OnStarted { get; set; }
 
-    private bool _open, _busy;
+    /// <summary>The "Other" entry of the Start from list; never a valid ref, so it cannot clash with one.</summary>
+    private const string OtherValue = "\u0000other";
+
+    private bool _open, _busy, _otherBase;
+    private IReadOnlyList<BaseOption> _baseOptions = [];
     private int _target;
     private string _prompt = "", _title = "", _branch = "", _base = "", _login = "";
     private string? _error;
     private T3ThreadEntity? _queued;
+
+    /// <summary>
+    /// Keeps the "on its way" chip honest: the page re-renders on every snapshot, so look the start up again and drop
+    /// the chip once the agent reports the thread (or show that it failed).
+    /// </summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_queued is not { Status: not T3StartStatus.Failed } queued)
+        {
+            return;
+        }
+
+        if (await Starts.GetAsync(queued.Id) is not { } now)
+        {
+            _queued = null;
+            return;
+        }
+
+        var reported = now.ThreadId is { } id && Targets.Any(t => t.Target.Entry.T3?.Threads.Any(x => x.Id == id) == true);
+        _queued = now.Status switch
+        {
+            T3StartStatus.Started when reported || now.ThreadId is null => null,
+            _ => now,
+        };
+    }
 
     private T3Target? Current => _target >= 0 && _target < Targets.Count ? Targets[_target] : null;
 
@@ -157,17 +208,28 @@
             return;
         }
 
+        var git = target.Target.Git;
         if (Prepare is not null && await Prepare(target) is { } prepared)
         {
             (_prompt, _title, _branch, _base) = (prepared.Prompt, prepared.Title, prepared.NewBranch, prepared.WorktreeBase);
-            return;
+        }
+        else
+        {
+            _prompt = Prompt;
+            _title = T3Prompts.Title(Title ?? Prompt.Split('\n').FirstOrDefault(l => l.Trim().Length > 0) ?? "");
+            _branch = T3Prompts.FreeBranch(Branch ?? "t3/" + T3Prompts.Slug(_title, 40), git?.Branches.Select(b => b.Name) ?? []);
+            _base = Base ?? T3Prompts.DefaultBase(git);
         }
 
-        var git = target.Target.Git;
-        _prompt = Prompt;
-        _title = T3Prompts.Title(Title ?? Prompt.Split('\n').FirstOrDefault(l => l.Trim().Length > 0) ?? "");
-        _branch = T3Prompts.FreeBranch(Branch ?? "t3/" + T3Prompts.Slug(_title, 40), git?.Branches.Select(b => b.Name) ?? []);
-        _base = Base ?? T3Prompts.DefaultBase(git);
+        _baseOptions = T3Prompts.BaseOptions(git, _base);
+        _otherBase = false;
+    }
+
+    private void PickBase(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString() ?? "";
+        _otherBase = value == OtherValue;
+        _base = _otherBase ? "" : value;
     }
 
     private void Close()

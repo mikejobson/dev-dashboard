@@ -1,0 +1,117 @@
+@* Unpack an archived project on its machine, into where it was or another free folder in a scan root. *@
+@inject ActionBoard Board
+@inject IOptionsMonitor<HubOptions> Options
+<span class="act">
+    @if (!Status.InFlight)
+    {
+        <button type="button" class="run @(WhyNot is null ? "" : "is-disabled")" aria-disabled="@(WhyNot is null ? "false" : "true")" title="@(WhyNot ?? $"Unpack the archive on {Machine.Machine.Hostname}. You choose the folder and confirm first.")" @onclick="Ask">Restore</button>
+    }
+    @if (Status.Row is { } row)
+    {
+        <span class="chip @Status.Class" title="@(string.IsNullOrWhiteSpace(row.Output) ? $"Queued by {row.QueuedBy} at {Fmt.Date(row.QueuedAt)}" : row.Output)">restore @Status.Text</span>
+        @if (Status.Failed && !string.IsNullOrWhiteSpace(row.Output))
+        {
+            <div class="sub safety-refusal">@row.Output</div>
+        }
+    }
+    @if (_asking)
+    {
+        var t = Item.Tombstone;
+        var manifest = Item.Manifest;
+        var host = Machine.Machine.Hostname;
+        <div class="modal-backdrop" @onclick="Cancel">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restore-@t.Id" @onclick:stopPropagation="true">
+                <h3 id="restore-@t.Id">Restore @t.Name on @host?</h3>
+                <dl class="kv">
+                    <dt>Archive</dt>
+                    <dd class="mono">@t.ArchivePath</dd>
+                    <dt>SHA-256</dt>
+                    <dd class="mono" title="@t.ArchiveSha256">@t.ArchiveSha256?[..16]…</dd>
+                    @if (manifest is not null)
+                    {
+                        <dt>Holds</dt>
+                        <dd>@Fmt.Count(manifest.FileCount, "file"), @Fmt.Size(manifest.TotalBytes) <span class="muted">· archived @Fmt.Ago(manifest.CreatedAt, DateTimeOffset.UtcNow) from @manifest.SourcePath</span></dd>
+                        @if (manifest.HeadSha is not null)
+                        {
+                            <dt>Was at</dt>
+                            <dd>@(manifest.HeadBranch ?? "detached HEAD") <span class="mono">@Fmt.Sha(manifest.HeadSha)</span></dd>
+                        }
+                    }
+                </dl>
+                <label for="restore-target-@t.Id"><strong>Restore into</strong> (a folder that does not exist, in one of @host's scan roots)</label>
+                <input id="restore-target-@t.Id" type="text" class="restore-target" @bind="_target" @bind:event="oninput" spellcheck="false" />
+                @if (manifest is { ExcludedBuildOutput.Count: > 0 })
+                {
+                    <p class="muted small">Build output was not archived and needs rebuilding: @string.Join(", ", manifest.ExcludedBuildOutput.Take(8))@(manifest.ExcludedBuildOutput.Count > 8 ? $" and {manifest.ExcludedBuildOutput.Count - 8} more" : "").</p>
+                }
+                <p>@AgentActions.Safeguard(AgentAction.RestoreArchive(t.ArchivePath ?? "/", t.ArchiveSha256 ?? "", "/"))</p>
+                <p>It is recorded as queued by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and never runs.</p>
+                @if (_error is not null)
+                {
+                    <div class="banner danger">@_error</div>
+                }
+                <div class="modal-actions">
+                    <button type="button" @onclick="Cancel">Cancel</button>
+                    <button type="button" class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_target))" @onclick="ConfirmAsync">Restore on @host</button>
+                </div>
+            </div>
+        </div>
+    }
+</span>
+
+@code {
+    [Parameter, EditorRequired] public RemovedProjectView Item { get; set; } = default!;
+
+    [Parameter, EditorRequired] public MachineView Machine { get; set; } = default!;
+
+    private bool _asking;
+    private bool _busy;
+    private string _target = "";
+    private string _login = "";
+    private string? _error;
+
+    private ActionStatus Status => Item.Tombstone.ArchivePath is { } archive ? Board.StatusOfRestore(Machine.MachineId, archive) : ActionStatus.None;
+
+    private string? WhyNot => Board.For(Machine, AgentActionKind.RestoreArchive).WhyNot
+        ?? (Item.Tombstone.ArchivePath is null ? "The agent did not report where the archive went." : null);
+
+    private async Task Ask()
+    {
+        if (WhyNot is not null)
+        {
+            return;
+        }
+
+        _login = await Board.LoginAsync();
+        _error = null;
+        // Where it was, unless something is there again; then beside it.
+        var taken = DevDash.Core.RepoIdentity.Flatten(Machine.Snapshot.Entries).Any(e => e.Path == Item.Tombstone.Path);
+        _target = taken ? Item.Tombstone.Path + "-restored" : Item.Tombstone.Path;
+        _asking = true;
+    }
+
+    private void Cancel()
+    {
+        _asking = false;
+        _error = null;
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (_busy || Item.RestoreAction(_target.Trim()) is not { } action)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _error = await Board.QueueAsync(Machine.MachineId, action);
+            _asking = _error is not null;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

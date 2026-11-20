@@ -36,6 +36,9 @@ public sealed record RepoRow
     /// <summary>GitHub says the remote does not exist (deleted, renamed away or no longer visible).</summary>
     public bool RemoteMissing { get; init; }
     public IReadOnlyList<PullRequestInfo> PullRequests { get; init; } = [];
+
+    /// <summary>My recently merged pull requests here, for the branch map's squash-merged branches.</summary>
+    public IReadOnlyList<PullRequestInfo> MergedPullRequests { get; init; } = [];
     public IReadOnlyList<IssueInfo> Issues { get; init; } = [];
     public RepoDescription? Description { get; init; }
     public DateTimeOffset? LastActivity { get; init; }
@@ -96,6 +99,7 @@ public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDe
         }
 
         var prsByRepo = gh.PullRequests.ToLookup(p => p.RepoKey, StringComparer.OrdinalIgnoreCase);
+        var mergedByRepo = gh.MergedPullRequests.ToLookup(p => p.RepoKey, StringComparer.OrdinalIgnoreCase);
         var issuesByRepo = gh.Issues.ToLookup(i => i.RepoKey, StringComparer.OrdinalIgnoreCase);
         var recent = gh.RecentRepos.GroupBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
@@ -149,6 +153,7 @@ public sealed class RepoCatalog(SnapshotStore snapshots, GitHubStore github, IDe
                 GitHub = repo,
                 RemoteMissing = lookup is { Found: false },
                 PullRequests = prsByRepo[key].ToList(),
+                MergedPullRequests = mergedByRepo[key].ToList(),
                 Issues = issuesByRepo[key].ToList(),
                 Description = await descriptions.DescribeAsync(new DescriptionRequest(key, repo, clones.Select(c => c.Entry).ToList()), ct),
                 LastActivity = activity.Max(),

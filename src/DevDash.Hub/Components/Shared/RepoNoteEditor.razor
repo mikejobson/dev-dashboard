@@ -1,0 +1,111 @@
+@* Edits a repo's tags, note and pin in place on the repo page (§20). Saved on the hub only. *@
+@inject RepoNotes Notes
+@inject ActionBoard Board
+<div class="note-editor" id="notes">
+    @if (_editing)
+    {
+        <form class="note-form" @onsubmit="SaveAsync">
+            <label>
+                <span class="muted small">Tags</span>
+                <input type="text" @bind="_tags" placeholder="client work (separated by spaces)" aria-label="Tags, separated by spaces" maxlength="400" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="note-line">
+                <span class="muted small">Note</span>
+                <input type="text" @bind="_note" placeholder="One line: what's next here" aria-label="Note" maxlength="@RepoTags.MaxNoteLength" autocomplete="off" />
+            </label>
+            <label class="note-pin">
+                <input type="checkbox" @bind="_pinned" /> <span>Pinned</span>
+            </label>
+            <span class="note-actions">
+                <button type="submit" class="primary" disabled="@_busy">Save</button>
+                <button type="button" @onclick="Cancel">Cancel</button>
+            </span>
+            @if (Quiet is { Count: > 0 })
+            {
+                <div class="muted small note-hint">Tagging it <span class="mono">@string.Join(", ", Quiet.Select(t => "#" + t))</span> silences its alerts and leaves it out of Where I left off.</div>
+            }
+        </form>
+    }
+    else
+    {
+        <div class="note-view">
+            @if (_current.IsEmpty)
+            {
+                <span class="muted small">No tags or note.</span>
+            }
+            else
+            {
+                <RepoTagChips Note="_current" TagUrl="@(t => "local?tag=" + Uri.EscapeDataString(t))" QuietTags="Quiet" />
+            }
+            <span class="note-buttons">
+                <button type="button" class="chip-btn" @onclick="TogglePinAsync" disabled="@_busy" aria-pressed="@(_current.Pinned ? "true" : "false")"
+                        title="@(_current.Pinned ? "Unpin: stop keeping it at the top" : "Pin: keep it at the top of Local and Where I left off")">@(_current.Pinned ? "Unpin" : "Pin")</button>
+                <button type="button" class="chip-btn" @onclick="Edit">@(_current.IsEmpty ? "Add tags or a note" : "Edit tags and note")</button>
+            </span>
+        </div>
+    }
+    @if (_error is not null)
+    {
+        <div class="banner danger">@_error</div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public RepoNote Note { get; set; } = default!;
+
+    /// <summary>The quiet tags, for the hint and to show them muted.</summary>
+    [Parameter] public IReadOnlySet<string>? Quiet { get; set; }
+
+    private RepoNote _current = RepoNote.None("");
+    private bool _editing, _busy, _pinned;
+
+    protected override void OnParametersSet() => _current = Note;
+    private string _tags = "", _note = "";
+    private string? _error;
+
+    private void Edit()
+    {
+        _tags = string.Join(' ', _current.Tags);
+        _note = _current.Note;
+        _pinned = _current.Pinned;
+        _error = null;
+        _editing = true;
+    }
+
+    private void Cancel()
+    {
+        _editing = false;
+        _error = null;
+    }
+
+    private Task SaveAsync() => RunAsync(by => Notes.SaveAsync(_current.Key, RepoTags.Parse(_tags), _note, _pinned, by), close: true);
+
+    private Task TogglePinAsync() => RunAsync(by => Notes.SetPinnedAsync(_current, !_current.Pinned, by), close: false);
+
+    private async Task RunAsync(Func<string, Task<RepoNote>> save, bool close)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _current = await save(await Board.LoginAsync());
+            _error = null;
+            if (close)
+            {
+                _editing = false;
+            }
+        }
+        catch (Exception ex) when (ex is Microsoft.EntityFrameworkCore.DbUpdateException or InvalidOperationException or ArgumentException)
+        {
+            _error = "Could not save: " + ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

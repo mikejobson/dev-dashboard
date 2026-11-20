@@ -67,7 +67,7 @@ else
                 <div class="table-wrap">
                     <table class="stack safety-table">
                         <thead>
-                            <tr><th>@(Grouping == SafetyGrouping.Repo ? "Machine" : "Repo")</th><th>Only here</th><th class="right">Oldest</th><th class="right">Last touched</th><th class="right">Size</th></tr>
+                            <tr><th>@(Grouping == SafetyGrouping.Repo ? "Machine" : "Repo")</th><th>Only here</th><th class="right">Oldest</th><th class="right">Last touched</th><th class="right">Size</th><th></th></tr>
                         </thead>
                         <tbody>
                             @foreach (var row in group.Rows)
@@ -78,6 +78,7 @@ else
                                     <td data-label="Oldest" class="right nowrap sub @(row.Safety.OldestRiskAt is null ? "blank" : "")" title="@Fmt.Date(row.Safety.OldestRiskAt)">@(row.Safety.OldestRiskAt is { } oldest ? RepoSafety.Age(Now, oldest) : "")</td>
                                     <td data-label="Last touched" class="cell-when right nowrap sub" title="@Fmt.Date(row.Safety.LastTouchedAt)">@Fmt.Ago(row.Safety.LastTouchedAt, Now)</td>
                                     <td data-label="Size" class="right nowrap sub @(row.Safety.TotalBytes is null ? "blank" : "")">@Fmt.Size(row.Safety.TotalBytes)</td>
+                                    <td class="right cell-buttons safety-actions">@Archive(row)</td>
                                 </tr>
                             }
                         </tbody>
@@ -148,6 +149,7 @@ else
                                     var can = Actions.For(row.Machine, AgentActionKind.RemoveProject);
                                     var status = StatusOf(row);
                                 }
+                                @Archive(row)
                                 @if (!status.InFlight)
                                 {
                                     <button type="button" class="danger @(can.Available ? "" : "is-disabled")" aria-disabled="@(can.Available ? "false" : "true")"
@@ -180,7 +182,7 @@ else
     {
         <h2 id="removed">Removed <span class="muted small">@_removed.Count</span></h2>
         <div class="toolbar">
-            <span class="muted small">Moved to the trash from here. Each can be cloned back into the folder it was in; the copy in the trash stays there until that machine's trash is emptied.</span>
+            <span class="muted small">Moved to the trash from here. Each can be cloned back into the folder it was in; the copy in the trash stays there until that machine's trash is emptied. An archived one can also be restored from its archive, with everything it had.</span>
         </div>
         <RemovedProjects Items="_removed" Now="Now" />
     }
@@ -192,7 +194,7 @@ else
             <div class="table-wrap">
                 <table class="stack safety-table">
                     <thead>
-                        <tr><th>Repo</th><th>Why</th><th class="right">Last touched</th><th class="right">Size</th></tr>
+                        <tr><th>Repo</th><th>Why</th><th class="right">Last touched</th><th class="right">Size</th><th></th></tr>
                     </thead>
                     <tbody>
                         @foreach (var row in _unclear)
@@ -202,6 +204,7 @@ else
                                 <td data-label="Why">@Reasons(row.Safety.Reasons)</td>
                                 <td data-label="Last touched" class="cell-when right nowrap sub" title="@Fmt.Date(row.Safety.LastTouchedAt)">@Fmt.Ago(row.Safety.LastTouchedAt, Now)</td>
                                 <td data-label="Size" class="right nowrap sub @(row.Safety.TotalBytes is null ? "blank" : "")">@Fmt.Size(row.Safety.TotalBytes)</td>
+                                <td class="right cell-buttons safety-actions">@Archive(row)</td>
                             </tr>
                         }
                     </tbody>
@@ -517,6 +520,18 @@ else
             }
             <div class="sub mono path" title="@row.Entry.Path">@path</div>
         </td>
+    };
+
+    /// <summary>
+    /// The Archive button, on machines that have an archive folder (or whose agent says why it cannot use one). Not on a
+    /// linked worktree, which is archived with its main repository.
+    /// </summary>
+    private RenderFragment Archive(SafetyRow row) => __builder =>
+    {
+        if (!row.Safety.IsLinkedWorktree && (row.Machine.Machine.Archive is not null || row.Machine.Machine.AcceptsArchiveProject))
+        {
+            <ArchiveButton Machine="row.Machine" Path="@row.Entry.Path" Name="@row.RepoName" Safety="row.Safety" />
+        }
     };
 
     private RenderFragment Reasons(IReadOnlyList<SafetyReason> reasons) => __builder =>

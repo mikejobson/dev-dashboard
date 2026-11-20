@@ -46,6 +46,15 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
         }
         """;
 
+    /// <summary>A merged pull request needs no CI or review state: what it was, and the commit it was at.</summary>
+    private const string MergedPullRequestFields = """
+        fragment MergedPrFields on PullRequest {
+          number title url createdAt updatedAt mergedAt headRefName headRefOid isCrossRepository baseRefName
+          author { login }
+          repository { nameWithOwner }
+        }
+        """;
+
     [GeneratedRegex(@"^[A-Za-z0-9_.\-]+$")]
     private static partial Regex SafeName();
 
@@ -110,6 +119,25 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
             {
                 warnings.Add($"Pull request search \"{search}\": {ex.Message}");
             }
+        }
+
+        // My recently merged pull requests: what a squash merge leaves behind locally can be matched by commit.
+        var merged = new Dictionary<string, PullRequestInfo>(StringComparer.OrdinalIgnoreCase);
+        var mergedSince = now.AddDays(-settings.MergedDays).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var mergedSearch = $"is:pr is:merged author:@me merged:>={mergedSince} archived:false sort:updated-desc";
+        try
+        {
+            await foreach (var node in SearchAsync(mergedSearch, "MergedPrFields", MergedPullRequestFields, warnings, ct))
+            {
+                if (ParsePullRequest(node) is { } pr)
+                {
+                    merged[pr.Url] = pr with { Authored = true, MergedAt = Date(node, "mergedAt") };
+                }
+            }
+        }
+        catch (GitHubQueryException ex)
+        {
+            warnings.Add($"Merged pull request search: {ex.Message}");
         }
 
         // Issues: assigned to me, and recent mentions.
@@ -260,6 +288,7 @@ public sealed partial class GitHubClient(HttpClient http, IGitHubTokenProvider t
             FetchedAt = now,
             Organizations = orgs,
             PullRequests = prs.Values.OrderByDescending(p => p.UpdatedAt).ToList(),
+            MergedPullRequests = merged.Values.OrderByDescending(p => p.MergedAt).ToList(),
             Issues = issues.Values.OrderByDescending(i => i.UpdatedAt).ToList(),
             RecentRepos = recent,
             LocalRemotes = lookups,

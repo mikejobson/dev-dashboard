@@ -189,6 +189,23 @@ public class DestructiveFixCommandTests
     }
 
     [Fact]
+    public void A_branch_the_agent_proved_squash_merged_is_low_severity_and_never_unpushed_work()
+    {
+        var proven = Branch("squashed", "origin/squashed", gone: true, merged: false) with { SquashMergedInto = "abcdef0123456789abcdef0123456789abcdef01" };
+        var never = Branch("rebased", merged: false) with { SquashMergedInto = "abcdef0123456789abcdef0123456789abcdef01" };
+        var git = GitOf(with: g => g with { Branches = [Branch("main", "origin/main", merged: true, current: true), proven, never] });
+        var context = Context(Machine("mac", Repo("widget", git)));
+
+        var gone = Assert.Single(new GoneUpstreamRule().Evaluate(context));
+        Assert.Equal(FindingSeverity.Low, gone.Severity);
+        Assert.Contains("squash-merged", gone.Explanation);
+        Assert.Contains("abcdef0", gone.Explanation);
+        Assert.Null(Fix(gone).Action); // still a forced delete: git does not see it as merged
+
+        Assert.Empty(new UnpushedCommitsRule().Evaluate(context)); // neither is reported as unpushed or "no upstream"
+    }
+
+    [Fact]
     public void A_checked_out_gone_branch_is_not_offered_to_an_agent()
     {
         var git = GitOf(branch: "feature", with: g => g with { Branches = [Branch("feature", "origin/feature", gone: true, merged: true, current: true)] });

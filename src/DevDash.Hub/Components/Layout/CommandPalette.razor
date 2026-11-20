@@ -11,6 +11,7 @@
 @inject SafetyService SafetyRows
 @inject ActionQueue Actions
 @inject AgentUpdates Updates
+@inject RepoNotes Notes
 @inject ActionBoard Board
 @inject NavigationManager Nav
 @inject IJSRuntime JS
@@ -147,7 +148,7 @@
             var safe = SafetyView.Removable(SafetyRows.Get())
                 .Count(r => r.Safety.Verdict == SafetyVerdict.Safe && Actions.Availability(r.Machine, AgentActionKind.RemoveProject).Available);
             _items = Palette.Items(repos, GitHub.Current.PullRequests, Snapshots.Machines, m => Refreshes.For(m).Available, safe, Updates.Updatable().Count,
-                (m, kind) => Actions.Availability(m, kind).Available);
+                (m, kind) => Actions.Availability(m, kind).Available, await Notes.GetAsync());
         }
 
         Search();

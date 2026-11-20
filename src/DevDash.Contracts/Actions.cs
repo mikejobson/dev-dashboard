@@ -93,6 +93,32 @@ public enum AgentActionKind
     /// The thread runs with whatever permissions T3 Code gives it, which is why it needs actions on.
     /// </summary>
     StartT3Thread,
+
+    /// <summary>
+    /// Clean one developer cache outside the repositories (§21), named by a <see cref="DiskCacheId"/>. The agent
+    /// finds the cache itself, checks it is there, and runs its own recipe for that id (<see cref="DiskCaches"/>);
+    /// Docker volumes, Xcode archives and SDKs have none and are refused.
+    /// </summary>
+    CleanCache,
+
+    /// <summary>
+    /// Stop one development server: SIGTERM (never SIGKILL), or on Windows a close request and then terminate. Only a
+    /// process the agent finds still running with the same start time and command line, working inside a scanned repository.
+    /// </summary>
+    StopDevServer,
+    /// Pack a whole project folder into an archive in the machine's archive folder (<c>Agent:Archive:Folder</c>),
+    /// verify the archive, and only then move the folder to the trash. The same re-check as
+    /// <see cref="RemoveProject"/> (fetch, scan, assess, fingerprint must match), but allowed for projects that
+    /// are not safe to remove too, because the archive keeps everything: uncommitted and untracked files,
+    /// ignored files and <c>.git</c>. Only regenerable build output is left out, unless asked for.
+    /// </summary>
+    ArchiveProject,
+
+    /// <summary>
+    /// Unpack an archive made by <see cref="ArchiveProject"/> into a folder that does not exist, after checking
+    /// the archive against its manifest's SHA-256. The archive itself is left where it is.
+    /// </summary>
+    RestoreArchive,
 }
 
 /// <summary>One allowlisted action. Fields that a kind does not use must be null.</summary>
@@ -168,6 +194,30 @@ public sealed record AgentAction
     /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the branch to create for the new worktree. It must not exist yet.</summary>
     public string? NewBranch { get; init; }
 
+    /// <summary><see cref="AgentActionKind.CleanCache"/>: a <see cref="DiskCacheId"/> name.</summary>
+    public string? CacheId { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StopDevServer"/>: the process id.</summary>
+    public int? Pid { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StopDevServer"/>: the start time the user was shown. A different one is a recycled pid, refused.</summary>
+    public DateTimeOffset? ExpectedStartedAt { get; init; }
+
+    /// <summary><see cref="AgentActionKind.StopDevServer"/>: the command line the user was shown (<see cref="DevServer.Command"/>).</summary>
+    public string? ExpectedCommand { get; init; }
+    /// <summary>
+    /// <see cref="AgentActionKind.ArchiveProject"/>: keep regenerable build output (node_modules, bin/obj…) in the archive too.
+    /// Left off the wire when false, so every other action's JSON (and <see cref="AgentActions.Key"/>) is as it was before 0.8.0.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IncludeBuildOutput { get; init; }
+
+    /// <summary><see cref="AgentActionKind.RestoreArchive"/>: the archive to unpack, inside the machine's archive folder.</summary>
+    public string? ArchivePath { get; init; }
+
+    /// <summary><see cref="AgentActionKind.RestoreArchive"/>: the archive's SHA-256 as recorded when it was made. The agent refuses an archive that differs.</summary>
+    public string? ArchiveSha256 { get; init; }
+
     public static AgentAction DeleteBranches(string repoPath, IEnumerable<string> branches) =>
         new() { Kind = AgentActionKind.DeleteBranches, RepoPath = repoPath, Branches = branches.ToList() };
 
@@ -216,6 +266,17 @@ public sealed record AgentAction
 
     public static AgentAction StartT3Thread(string repoPath, string prompt, string title, string worktreeBase, string newBranch) =>
         new() { Kind = AgentActionKind.StartT3Thread, RepoPath = repoPath, Prompt = prompt, Title = title, WorktreeBase = worktreeBase, NewBranch = newBranch };
+
+    public static AgentAction CleanCache(DiskCacheId id) => new() { Kind = AgentActionKind.CleanCache, CacheId = id.ToString() };
+
+    public static AgentAction StopDevServer(string repoPath, int pid, DateTimeOffset startedAt, string command) =>
+        new() { Kind = AgentActionKind.StopDevServer, RepoPath = repoPath, Pid = pid, ExpectedStartedAt = startedAt, ExpectedCommand = command };
+    public static AgentAction ArchiveProject(string path, string expectedFingerprint, bool includeBuildOutput = false) =>
+        new() { Kind = AgentActionKind.ArchiveProject, RepoPath = path, ExpectedFingerprint = expectedFingerprint, IncludeBuildOutput = includeBuildOutput };
+
+    /// <param name="target">The folder to create: where the project was, or another free folder in a scan root.</param>
+    public static AgentAction RestoreArchive(string archivePath, string archiveSha256, string target) =>
+        new() { Kind = AgentActionKind.RestoreArchive, RepoPath = target, ArchivePath = archivePath, ArchiveSha256 = archiveSha256 };
 }
 
 /// <summary>
@@ -243,6 +304,14 @@ public static partial class AgentActions
 
     /// <summary>The first agent release that knows the T3 Code actions.</summary>
     public const string T3MinAgentVersion = "0.7.0";
+
+    /// <summary>The first agent release that knows <see cref="AgentActionKind.CleanCache"/> and <see cref="AgentActionKind.StopDevServer"/>.</summary>
+    public const string DiskMinAgentVersion = "0.8.0";
+    /// <summary>The first agent release that knows <see cref="AgentActionKind.ArchiveProject"/> and <see cref="AgentActionKind.RestoreArchive"/>.</summary>
+    public const string ArchiveMinAgentVersion = "0.8.0";
+
+    [GeneratedRegex(@"^[0-9a-f]{64}$")]
+    private static partial Regex Sha256();
 
     /// <summary>Longest prompt a <see cref="AgentActionKind.StartT3Thread"/> may carry, in UTF-8 bytes.</summary>
     public const int MaxPromptBytes = 32 * 1024;
@@ -282,8 +351,18 @@ public static partial class AgentActions
         AgentActionKind.CleanBuildDirs => machine.ActionsEnabled && machine.AcceptsCleanBuildDirs,
         AgentActionKind.PullFastForward => machine.ActionsEnabled && machine.AcceptsPull,
         AgentActionKind.OpenInT3 or AgentActionKind.StartT3Thread => machine.ActionsEnabled && machine.AcceptsT3,
+        AgentActionKind.CleanCache => machine.ActionsEnabled && machine.AcceptsCleanCache,
+        AgentActionKind.StopDevServer => machine.ActionsEnabled && machine.AcceptsStopDevServer,
+        AgentActionKind.ArchiveProject => machine.ActionsEnabled && machine.AcceptsArchiveProject,
+        AgentActionKind.RestoreArchive => machine.ActionsEnabled && machine.AcceptsRestoreArchive,
         _ => machine.ActionsEnabled,
     };
+
+    /// <summary>True for the archive kinds, which need an archive folder on the machine as well as actions on.</summary>
+    public static bool IsArchiveAction(AgentActionKind kind) => kind is AgentActionKind.ArchiveProject or AgentActionKind.RestoreArchive;
+
+    /// <summary>Kinds that may run for minutes or hours: the hub ends a claim with one, so nothing waits behind it on a lease.</summary>
+    public static bool IsLongRunning(AgentActionKind kind) => kind is AgentActionKind.Clone or AgentActionKind.ArchiveProject or AgentActionKind.RestoreArchive;
 
     /// <summary>True for the kinds that run T3 Code's CLI rather than git.</summary>
     public static bool IsT3Action(AgentActionKind kind) => kind is AgentActionKind.OpenInT3 or AgentActionKind.StartT3Thread;
@@ -324,11 +403,41 @@ public static partial class AgentActions
             return $"Update the agent on {machine.Hostname} to {T3MinAgentVersion} or newer to use T3 Code from here{on}.";
         }
 
+        if (kind is AgentActionKind.CleanCache or AgentActionKind.StopDevServer)
+        {
+            // A 0.8.0 agent that does not accept these has the disk report or the dev server list switched off.
+            if (SemVer.ParseOrNull(machine.AgentVersion) is { } version && version.CompareTo(SemVer.ParseOrNull(DiskMinAgentVersion)!) >= 0)
+            {
+                return kind == AgentActionKind.CleanCache
+                    ? $"The agent on {machine.Hostname} has its disk report switched off (Agent:Disk:Enabled)."
+                    : $"The agent on {machine.Hostname} has its dev server list switched off (Agent:DevServers:Enabled).";
+            }
+
+            return $"Update the agent on {machine.Hostname} to {DiskMinAgentVersion} or newer to do this from here{on}.";
+        }
+
+        if (IsArchiveAction(kind))
+        {
+            // A 0.8.0 agent that does not accept these has no archive folder set, or cannot use the one it has.
+            var minimum = SemVer.ParseOrNull(ArchiveMinAgentVersion)!;
+            if (machine.Archive is { } archive)
+            {
+                return $"Archiving is not available on {machine.Hostname}: {archive.Problem ?? $"{archive.Folder} cannot be used"}.";
+            }
+
+            if (SemVer.ParseOrNull(machine.AgentVersion) is { } version && version.CompareTo(minimum) >= 0)
+            {
+                return $"Archiving is not set up on {machine.Hostname}. Set Agent:Archive:Folder in its agent's configuration.";
+            }
+
+            return $"Update the agent on {machine.Hostname} to {ArchiveMinAgentVersion} or newer to archive projects from here{on}.";
+        }
+
         return $"Update the agent on {machine.Hostname} to {RemovalMinAgentVersion} or newer to do this from here{on}.";
     }
 
-    /// <summary>True for the kinds that name a path on the machine: everything but <see cref="AgentActionKind.UpdateAgent"/>.</summary>
-    public static bool TakesPath(AgentActionKind kind) => kind != AgentActionKind.UpdateAgent;
+    /// <summary>True for the kinds that name a path on the machine: everything but <see cref="AgentActionKind.UpdateAgent"/> and <see cref="AgentActionKind.CleanCache"/>.</summary>
+    public static bool TakesPath(AgentActionKind kind) => kind is not (AgentActionKind.UpdateAgent or AgentActionKind.CleanCache);
 
     /// <summary>POSIX single-quote escaping.</summary>
     public static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
@@ -361,6 +470,8 @@ public static partial class AgentActions
                 AgentActionKind.Refresh => "Entry path",
                 AgentActionKind.RemoveProject => "Project path",
                 AgentActionKind.Clone => "Clone path",
+                AgentActionKind.ArchiveProject => "Project path",
+                AgentActionKind.RestoreArchive => "Restore path",
                 _ => "Repository path",
             };
             if (PathProblem(action.RepoPath, what) is { } repoProblem)
@@ -382,14 +493,21 @@ public static partial class AgentActions
             || (action.SetUpstream && kind != AgentActionKind.Push)
             || (action.StashIndex is not null) != (kind == AgentActionKind.DropStash)
             || (action.ExpectedSha is not null) != (kind == AgentActionKind.DropStash)
-            || (action.ExpectedFingerprint is not null) != (kind == AgentActionKind.RemoveProject)
+            || (action.ExpectedFingerprint is not null) != (kind is AgentActionKind.RemoveProject or AgentActionKind.ArchiveProject)
+            || (action.IncludeBuildOutput && kind != AgentActionKind.ArchiveProject)
+            || (action.ArchivePath is not null) != (kind == AgentActionKind.RestoreArchive)
+            || (action.ArchiveSha256 is not null) != (kind == AgentActionKind.RestoreArchive)
             || (action.AcknowledgedCaveats is not null && kind != AgentActionKind.RemoveProject)
             || (action.Url is not null) != (kind == AgentActionKind.Clone)
             || (action.BuildDirs is not null) != (kind == AgentActionKind.CleanBuildDirs)
             || (action.Prompt is not null) != (kind == AgentActionKind.StartT3Thread)
             || (action.Title is not null) != (kind == AgentActionKind.StartT3Thread)
             || (action.WorktreeBase is not null) != (kind == AgentActionKind.StartT3Thread)
-            || (action.NewBranch is not null) != (kind == AgentActionKind.StartT3Thread))
+            || (action.NewBranch is not null) != (kind == AgentActionKind.StartT3Thread)
+            || (action.CacheId is not null) != (kind == AgentActionKind.CleanCache)
+            || (action.Pid is not null) != (kind == AgentActionKind.StopDevServer)
+            || (action.ExpectedStartedAt is not null) != (kind == AgentActionKind.StopDevServer)
+            || (action.ExpectedCommand is not null) != (kind == AgentActionKind.StopDevServer))
         {
             return $"The fields do not match a {kind} action.";
         }
@@ -467,11 +585,35 @@ public static partial class AgentActions
 
                 return action.BuildDirs.Select(d => PathProblem(d, "Build folder path")).FirstOrDefault(p => p is not null);
 
+            case AgentActionKind.ArchiveProject:
+                return Fingerprint().IsMatch(action.ExpectedFingerprint!) ? null : "The expected fingerprint is not a safety fingerprint.";
+
+            case AgentActionKind.RestoreArchive:
+                if (PathProblem(action.ArchivePath, "Archive path") is { } archiveProblem)
+                {
+                    return archiveProblem;
+                }
+
+                return Sha256().IsMatch(action.ArchiveSha256!) ? null : "The archive checksum is not a lower-case SHA-256.";
+
             case AgentActionKind.StartT3Thread:
                 return PromptProblem(action.Prompt!)
                     ?? TitleProblem(action.Title!)
                     ?? RefProblem(action.WorktreeBase!)
                     ?? BranchProblem(action.NewBranch!);
+
+            case AgentActionKind.CleanCache:
+                return DiskCaches.Find(action.CacheId) is null ? "That is not a cache the agent knows." : null;
+
+            case AgentActionKind.StopDevServer:
+                if (action.Pid is not > 1)
+                {
+                    return "The process id is out of range.";
+                }
+
+                return string.IsNullOrWhiteSpace(action.ExpectedCommand) || action.ExpectedCommand.Length > DevServerText.MaxCommandChars || action.ExpectedCommand.Any(char.IsControl)
+                    ? "The expected command line is missing or not one line."
+                    : null;
 
             default:
                 return null;
@@ -517,6 +659,10 @@ public static partial class AgentActions
                 return $"git -C {ShellQuote(action.RepoPath ?? "")} pull --ff-only {ShellQuote(action.Remote ?? "")} {ShellQuote(action.Branch ?? "")}";
             case AgentActionKind.OpenInT3:
                 return $"t3 app {ShellQuote(action.RepoPath ?? "")}";
+            case AgentActionKind.ArchiveProject:
+                return $"archive {(action.IncludeBuildOutput ? "--include-build-output " : "")}{ShellQuote(action.RepoPath ?? "")} && trash {ShellQuote(action.RepoPath ?? "")}";
+            case AgentActionKind.RestoreArchive:
+                return $"restore {ShellQuote(action.ArchivePath ?? "")} {ShellQuote(action.RepoPath ?? "")}";
             case AgentActionKind.StartT3Thread:
                 // The prompt goes on standard input, so the line says how long it is rather than repeating it.
                 return string.Join(' ',
@@ -524,6 +670,10 @@ public static partial class AgentActions
                     "--title", ShellQuote(action.Title ?? ""), "--worktree", ShellQuote(action.WorktreeBase ?? ""),
                     "--branch", ShellQuote(action.NewBranch ?? ""), "--json",
                     $"< prompt ({(action.Prompt ?? "").Length} characters)");
+            case AgentActionKind.CleanCache:
+                return DiskCaches.Find(action.CacheId) is { } cache ? DiskCaches.CommandLine(cache.Id) : $"clean {action.CacheId}";
+            case AgentActionKind.StopDevServer:
+                return $"kill -TERM {action.Pid}";
         }
 
         var (verb, values) = Parts(action);
@@ -546,6 +696,10 @@ public static partial class AgentActions
         AgentActionKind.CleanBuildDirs => "Deleted for good, not moved to the trash: a build or install recreates it. The agent refuses a folder that is not known build output, that git tracks files in, or that is reached through a link.",
         AgentActionKind.PullFastForward => "Fast-forward only: no merge commit, no rebase, no reset. The agent fetches first. A checked-out branch only moves when its working tree has no uncommitted changes; any other branch is moved with git fetch, which refuses anything but a fast-forward.",
         AgentActionKind.OpenInT3 => "Only opens the project in the T3 Code app on that machine. Nothing in the repository changes.",
+        AgentActionKind.CleanCache => "The agent finds the cache itself, checks it is there, and runs its own fixed recipe for it. Only caches that are downloaded or built again are ever cleaned: never Docker volumes, Xcode archives or SDKs.",
+        AgentActionKind.StopDevServer => "SIGTERM only, never SIGKILL (on Windows: a close request, then terminate): the server can shut down cleanly. The agent first checks it is still the same process (start time and command line) and that it runs inside a scanned repository, and refuses if not.",
+        AgentActionKind.ArchiveProject => "The agent fetches and checks the project again first, and refuses if anything has changed since this was shown. Everything goes in the archive (uncommitted, untracked and ignored files, and .git) except regenerable build output, unless you keep that too. The archive is read back and checked before the folder is moved to the trash; if anything fails, the archive is deleted and the folder is left as it was.",
+        AgentActionKind.RestoreArchive => "Only into a folder that does not exist. The agent checks the archive against the SHA-256 recorded when it was made, unpacks it beside the target under a temporary name, checks every file, and only then renames it into place. The archive is kept.",
         AgentActionKind.StartT3Thread => "T3 Code makes a new worktree on a new branch, so the checked-out working tree is not touched. The agent refuses a branch that already exists. The thread then runs with the permissions T3 Code gives its threads on that machine, which is often full access: read the prompt before you start it.",
         _ => "",
     };
@@ -567,6 +721,10 @@ public static partial class AgentActions
         AgentActionKind.PullFastForward => $"Fast-forward {action.Branch} from {action.Remote}",
         AgentActionKind.OpenInT3 => $"Open {action.RepoPath} in T3 Code",
         AgentActionKind.StartT3Thread => $"Start a T3 thread \"{action.Title}\" on {action.NewBranch}",
+        AgentActionKind.CleanCache => $"Clean {(DiskCaches.Find(action.CacheId)?.Title ?? action.CacheId)}",
+        AgentActionKind.StopDevServer => $"Stop process {action.Pid}",
+        AgentActionKind.ArchiveProject => $"Archive {action.RepoPath}{(action.IncludeBuildOutput ? " with its build output" : "")}",
+        AgentActionKind.RestoreArchive => $"Restore {action.ArchivePath} into {action.RepoPath}",
         _ => action.Kind.ToString(),
     };
 
@@ -716,4 +874,16 @@ public sealed record ActionResultRequest
 
     /// <summary><see cref="AgentActionKind.StartT3Thread"/>: the thread T3 Code started, when it said. Older hubs ignore it.</summary>
     public T3StartedThread? Thread { get; init; }
+
+    /// <summary><see cref="AgentActionKind.ArchiveProject"/>: where the archive went, and its manifest. Older hubs ignore it.</summary>
+    public ArchiveResult? Archive { get; init; }
+}
+
+/// <summary>
+/// How a long action is getting on, sent while it runs (<c>POST /api/v1/actions/{id}/progress</c>). The hub
+/// shows it until the result arrives. A hub from before 0.8.0 answers 404, and the agent carries on.
+/// </summary>
+public sealed record ActionProgressRequest
+{
+    public string Output { get; init; } = "";
 }

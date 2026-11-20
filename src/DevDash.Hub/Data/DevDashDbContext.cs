@@ -17,6 +17,10 @@ public sealed class DevDashDbContext(DbContextOptions<DevDashDbContext> options)
     public DbSet<T3ThreadEntity> T3Threads => Set<T3ThreadEntity>();
     public DbSet<IssueThreadEntity> IssueThreads => Set<IssueThreadEntity>();
     public DbSet<Mcp.McpTokenEntity> McpTokens => Set<Mcp.McpTokenEntity>();
+    public DbSet<RepoNoteEntity> RepoNotes => Set<RepoNoteEntity>();
+    public DbSet<History.MachineDayEntity> HistoryMachineDays => Set<History.MachineDayEntity>();
+    public DbSet<History.CloneDayEntity> HistoryCloneDays => Set<History.CloneDayEntity>();
+    public DbSet<History.RiskEpisodeEntity> RiskEpisodes => Set<History.RiskEpisodeEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -86,6 +90,10 @@ public sealed class DevDashDbContext(DbContextOptions<DevDashDbContext> options)
         T3ThreadEntity.Configure(modelBuilder);
         IssueThreadEntity.Configure(modelBuilder);
         modelBuilder.Entity<Mcp.McpTokenEntity>(Mcp.McpTokenEntity.Configure);
+        RepoNoteEntity.Configure(modelBuilder);
+        History.MachineDayEntity.Configure(modelBuilder);
+        History.CloneDayEntity.Configure(modelBuilder);
+        History.RiskEpisodeEntity.Configure(modelBuilder);
     }
 }
 
@@ -235,6 +243,28 @@ public sealed class RemovedProjectEntity
 
     /// <summary>When the agent reported the folder moved to the trash. Null while the removal is still on its way.</summary>
     public DateTimeOffset? RemovedAt { get; set; }
+
+    /// <summary>
+    /// <see cref="RemovedProjectKinds.Archived"/> when the project was archived before it went to the trash; null for a
+    /// plain removal (and for every row from before 0.8.0, which gained this column on start).
+    /// </summary>
+    public string? Kind { get; set; }
+
+    /// <summary>Archived: where the archive is on that machine. Set when the agent reports it done.</summary>
+    public string? ArchivePath { get; set; }
+
+    /// <summary>Archived: the archive's SHA-256, which a restore must match.</summary>
+    public string? ArchiveSha256 { get; set; }
+
+    /// <summary>Archived: the manifest the agent wrote beside the archive, as JSON (<see cref="ArchiveManifest"/>).</summary>
+    public string? ManifestJson { get; set; }
+
+    public bool IsArchived => Kind == RemovedProjectKinds.Archived;
+}
+
+public static class RemovedProjectKinds
+{
+    public const string Archived = "Archived";
 }
 
 /// <summary>

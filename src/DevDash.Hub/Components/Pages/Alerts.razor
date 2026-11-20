@@ -138,7 +138,8 @@
                     <option value="High">commits on no remote</option>
                     <option value="Medium">also uncommitted changes, stashes and tags</option>
                     <option value="Low">also untracked files</option>
-                </select>
+                </select>,
+                once the dashboard has seen it at risk <input type="number" min="0" max="3650" @bind="_edit.Triggers.AtRisk.ForDays" aria-label="Days seen at risk" /> days in a row (0: straight away)
             </span>
         </div>
         <div class="alert-trigger">

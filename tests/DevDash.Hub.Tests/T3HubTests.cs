@@ -100,6 +100,50 @@ public class T3HubTests
     }
 
     [Fact]
+    public void Start_from_lists_the_default_first_then_remote_then_local_branches_newest_first()
+    {
+        var now = DateTimeOffset.Parse("2026-11-20T12:00:00Z");
+        var git = new GitState
+        {
+            DefaultBranch = "main",
+            Remotes = [new RemoteInfo { Name = "origin", Url = "u" }],
+            Graph = new CommitGraph { TrunkRef = "origin/develop", RemoteRefs = [new GraphRef { Name = "origin/main", Sha = "a" }, new GraphRef { Name = "origin/HEAD", Sha = "a" }] },
+            Branches =
+            [
+                new BranchInfo { Name = "main", Upstream = "origin/main", IsCurrent = true, LastCommitDate = now.AddDays(-3) },
+                new BranchInfo { Name = "feature", Upstream = "origin/feature", Ahead = 2, LastCommitDate = now.AddDays(-1) },
+                new BranchInfo { Name = "spike", LastCommitDate = now },
+                new BranchInfo { Name = "old", Upstream = "origin/old", UpstreamGone = true, LastCommitDate = now.AddDays(-30) },
+            ],
+        };
+
+        var options = T3Prompts.BaseOptions(git);
+        Assert.Equal(["origin/main", "origin/develop", "origin/feature", "spike", "feature", "main", "old"], options.Select(o => o.Value));
+        Assert.Equal("origin/main (default)", options[0].Label);
+        Assert.Equal(["Remote", "Remote", "Remote", "Local", "Local", "Local", "Local"], options.Select(o => o.Group));
+        Assert.Equal("spike (local only)", options[3].Label);
+        Assert.Equal("feature (2 unpushed)", options[4].Label);
+        Assert.Equal("main (checked out)", options[5].Label);
+
+        // A base chosen elsewhere (an issue's settings, a tag) stays selectable.
+        Assert.Equal(new BaseOption("v1.2.0", "Other", "v1.2.0"), T3Prompts.BaseOptions(git, "v1.2.0")[^1]);
+        Assert.Equal(["HEAD"], T3Prompts.BaseOptions(null).Select(o => o.Value));
+
+        // A 0.8.0 agent lists every remote branch, newest first: those replace the upstream-only guess.
+        var listed = git with
+        {
+            RemoteBranches =
+            [
+                new RemoteBranchInfo { Name = "origin/untracked-new", Remote = "origin", Sha = "c" },
+                new RemoteBranchInfo { Name = "origin/feature", Remote = "origin", Sha = "b" },
+                new RemoteBranchInfo { Name = "origin/main", Remote = "origin", Sha = "a" },
+            ],
+        };
+        Assert.Equal(["origin/main", "origin/develop", "origin/untracked-new", "origin/feature"],
+            T3Prompts.BaseOptions(listed).Where(o => o.Group == "Remote").Select(o => o.Value));
+    }
+
+    [Fact]
     public void Branches_titles_and_bases_are_named_the_same_way_everywhere()
     {
         Assert.Equal("issue/12-login-rejects-valid-emails-on-safari", T3Prompts.IssueBranch(12, "Login rejects valid e-mails on Safari!".Replace("e-mails", "emails")));

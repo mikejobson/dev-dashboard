@@ -20,7 +20,7 @@ namespace DevDash.Hub.Tests;
 public class McpTests
 {
     private static readonly string[] ReadTools =
-        ["list_machines", "list_projects", "get_project", "at_risk_work", "safe_to_remove", "findings", "pull_requests", "compare_clones", "recent_activity", "action_status", "t3_threads", "list_issues"];
+        ["list_machines", "list_projects", "get_project", "at_risk_work", "safe_to_remove", "findings", "pull_requests", "compare_clones", "recent_activity", "action_status", "t3_threads", "list_issues", "history"];
 
     private static readonly string[] ActionToolNames = ["refresh_project", "fetch", "push_branch", "pull_fast_forward", "clean_build_dirs"];
 

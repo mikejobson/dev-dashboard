@@ -35,7 +35,8 @@ public sealed class UnpushedCommitsRule : ICleanupRule
             }
 
             var remote = RepoIdentity.PrimaryRemote(git)?.Name ?? git.Remotes[0].Name;
-            foreach (var branch in git.Branches)
+            // A branch whose change the agent found on the trunk (squash merged, rebased) is not unpushed work.
+            foreach (var branch in git.Branches.Where(b => b.SquashMergedInto is null))
             {
                 if (branch.Upstream is not null && !branch.UpstreamGone && branch.Ahead > 0)
                 {

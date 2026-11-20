@@ -20,6 +20,9 @@ public sealed record GraphRequest
     public IReadOnlyList<string> ExtraTips { get; init; } = [];
 
     public bool HasRemotes { get; init; }
+
+    /// <summary>Tips of the branches <see cref="SquashDetector"/> proved are on the trunk already: their unpushed commits are marked <see cref="GraphCommit.SquashMerged"/>.</summary>
+    public IReadOnlyList<string> SquashMergedTips { get; init; } = [];
 }
 
 /// <summary>
@@ -51,11 +54,18 @@ public sealed class CommitGraphCollector(GitRunner git)
     /// <summary>Most commits of the default branch's history read to find those connections.</summary>
     public const int JoinWindow = 6000;
 
-    /// <summary>Longest run of commits sent to connect one merged tip to its merge. Past it, only <see cref="GraphCommit.JoinsTrunkAt"/> is sent.</summary>
-    public const int MaxJoinPath = 40;
+    /// <summary>
+    /// Longest run of commits sent to connect one merged tip to its merge. Past it (or past
+    /// <see cref="MaxJoinCommits"/>), <see cref="GraphCommit.JoinsTrunkAt"/> and
+    /// <see cref="GraphCommit.JoinDistance"/> are sent instead and the hub draws a collapsed run.
+    /// </summary>
+    public const int MaxJoinPath = 150;
 
-    /// <summary>Most connecting commits sent for one repository.</summary>
-    public const int MaxJoinCommits = 200;
+    /// <summary>
+    /// Most connecting commits sent for one repository, shortest runs first. A commit is about 300 bytes
+    /// of JSON, so this bounds the joins at roughly 90 KB.
+    /// </summary>
+    public const int MaxJoinCommits = 300;
 
     private const int MaxExtraCommits = 400;
     private const int ShasPerCall = 300;
@@ -90,7 +100,7 @@ public sealed class CommitGraphCollector(GitRunner git)
             return null;
         }
 
-        var key = Hash($"{refList.StdOut}\n{request.TrunkRef}\n{string.Join(' ', request.ExtraTips)}\n{request.HasRemotes}");
+        var key = Hash($"{refList.StdOut}\n{request.TrunkRef}\n{string.Join(' ', request.ExtraTips)}\n{request.HasRemotes}\n{string.Join(' ', request.SquashMergedTips)}");
         if (_cache.TryGetValue(commonDir, out var cached) && cached.Key == key)
         {
             return cached.Graph;
@@ -249,6 +259,20 @@ public sealed class CommitGraphCollector(GitRunner git)
             }
         }
 
+        // Unpushed commits of a branch whose change is on the trunk already (squash merged, rebased).
+        var squashed = new HashSet<string>(StringComparer.Ordinal);
+        var walk = new Stack<string>(request.SquashMergedTips);
+        while (walk.TryPop(out var sha))
+        {
+            if (unpushed.Contains(sha) && squashed.Add(sha) && commits.TryGetValue(sha, out var commit))
+            {
+                foreach (var parent in commit.Parents)
+                {
+                    walk.Push(parent);
+                }
+            }
+        }
+
         var list = commits.Values
             .Select(c => c with
             {
@@ -257,6 +281,8 @@ public sealed class CommitGraphCollector(GitRunner git)
                 InTrunk = trunkSha is not null && !trunkPos.ContainsKey(c.Sha) && ((!truncated && !side.Contains(c.Sha)) || joins.Merged.Contains(c.Sha)),
                 Unpushed = unpushed.Contains(c.Sha),
                 JoinsTrunkAt = joins.JoinOf.GetValueOrDefault(c.Sha),
+                JoinDistance = joins.Distance.TryGetValue(c.Sha, out var distance) ? distance : null,
+                SquashMerged = squashed.Contains(c.Sha),
             })
             .ToList();
 
@@ -274,9 +300,10 @@ public sealed class CommitGraphCollector(GitRunner git)
     /// <param name="JoinOf">Merged commit to the first-parent commit of the default branch that first contains it.</param>
     /// <param name="Commits">Commits to send besides: those merges, and the commits between a merged commit and its merge.</param>
     /// <param name="Merged">Every commit seen that is in the default branch's history without being on its first-parent line.</param>
-    private sealed record JoinPaths(IReadOnlyDictionary<string, string> JoinOf, IReadOnlyList<string> Commits, IReadOnlySet<string> Merged)
+    /// <param name="Distance">Merged commit to how many commits lie between it and its merge, when those were not sent.</param>
+    private sealed record JoinPaths(IReadOnlyDictionary<string, string> JoinOf, IReadOnlyList<string> Commits, IReadOnlySet<string> Merged, IReadOnlyDictionary<string, int> Distance)
     {
-        public static readonly JoinPaths None = new(new Dictionary<string, string>(), [], new HashSet<string>());
+        public static readonly JoinPaths None = new(new Dictionary<string, string>(), [], new HashSet<string>(), new Dictionary<string, int>());
     }
 
     /// <summary>
@@ -345,7 +372,7 @@ public sealed class CommitGraphCollector(GitRunner git)
 
         var joinOf = new Dictionary<string, string>(StringComparer.Ordinal);
         var send = new List<string>();
-        var between = new HashSet<string>(StringComparer.Ordinal);
+        var ways = new List<(string Sha, (int Line, int Steps, string Via) Way)>();
         foreach (var sha in merged)
         {
             // Only a commit the log reached has all of its children read.
@@ -357,27 +384,37 @@ public sealed class CommitGraphCollector(GitRunner git)
             var join = chain[way.Line];
             joinOf[sha] = join;
             send.Add(join);
+            ways.Add((sha, way));
+        }
 
-            if (way.Steps - 1 > MaxJoinPath)
+        // Shortest runs first, so one long branch does not use up the budget many short ones need.
+        var between = new HashSet<string>(StringComparer.Ordinal);
+        var distance = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (sha, way) in ways.OrderBy(w => w.Way.Steps).ThenBy(w => w.Sha, StringComparer.Ordinal))
+        {
+            var count = way.Steps - 1;
+            if (count <= MaxJoinPath)
             {
-                continue;
+                var path = new List<string>();
+                for (var at = way.Via; !line.ContainsKey(at); at = best[at].Via)
+                {
+                    path.Add(at);
+                }
+
+                var fresh = path.Count(p => !between.Contains(p));
+                if (between.Count + fresh <= MaxJoinCommits)
+                {
+                    between.UnionWith(path);
+                    continue;
+                }
             }
 
-            var path = new List<string>();
-            for (var at = way.Via; !line.ContainsKey(at); at = best[at].Via)
-            {
-                path.Add(at);
-            }
-
-            var fresh = path.Count(p => !between.Contains(p));
-            if (between.Count + fresh <= MaxJoinCommits)
-            {
-                between.UnionWith(path);
-            }
+            // Too long to send: say how long, so the hub can draw it as one collapsed run.
+            distance[sha] = count;
         }
 
         send.AddRange(between);
-        return new JoinPaths(joinOf, send.Distinct(StringComparer.Ordinal).ToList(), seen);
+        return new JoinPaths(joinOf, send.Distinct(StringComparer.Ordinal).ToList(), seen, distance);
     }
 
     private CommitGraph Remember(string commonDir, string key, CommitGraph graph)

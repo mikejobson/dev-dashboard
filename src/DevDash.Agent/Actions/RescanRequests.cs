@@ -30,6 +30,12 @@ public sealed class RescanRequests(IOptionsMonitor<AgentOptions> options)
         return true;
     }
 
+    /// <summary>Raised when something about the machine rather than an entry has changed (§21): the scan loop pushes again.</summary>
+    public event Action? MachineChanged;
+
+    /// <summary>Asks the scan loop to push the machine's facts (disk report, dev servers) again soon.</summary>
+    public void RequestMachine() => MachineChanged?.Invoke();
+
     /// <summary>Raised with a batch of entries to refresh (forced sizes, a fetch if this machine fetches) and report on.</summary>
     public event Action<IReadOnlyList<RefreshRequest>>? RefreshRequested;
 

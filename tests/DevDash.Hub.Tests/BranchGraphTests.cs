@@ -729,6 +729,35 @@ public class BranchGraphTests
     }
 
     [Fact]
+    public async Task The_repo_page_shows_squash_merged_commits_muted_and_not_as_unpushed()
+    {
+        using var factory = new HubFactory();
+        var store = factory.Services.GetRequiredService<SnapshotStore>();
+        var snapshot = HubFactory.Snapshot("studio", version: "0.7.1");
+        var widget = snapshot.Entries[0];
+        var commits = Trunk(1, 3).Concat([C("done", "t2", unpushed: true) with { SquashMerged = true }]).ToList();
+        var git = widget.Git! with
+        {
+            HeadSha = Sha("t3"),
+            Staged = 0, Unstaged = 0, Untracked = 0, Conflicted = 0,
+            Branches =
+            [
+                Branch("main", "t3", "origin/main"),
+                Branch("feature/done", "done", "origin/feature/done", gone: true) with { OnRemote = false, UnpushedCount = 1, SquashMergedInto = Sha("t3") },
+            ],
+            Graph = new CommitGraph { TrunkRef = "origin/main", Commits = commits, RemoteRefs = [new GraphRef { Name = "origin/main", Sha = Sha("t3") }] },
+        };
+        await store.IngestAsync(snapshot with { Entries = [widget with { Git = git }] });
+
+        var html = WebUtility.HtmlDecode(await factory.CreateClient().GetStringAsync("/repo?key=github.com%2Facme%2Fwidget"));
+
+        Assert.Contains("bm-tag squash", html);
+        Assert.Contains("squash-merged", html);
+        Assert.DoesNotContain("title=\"On no remote yet\">unpushed", html);
+        Assert.DoesNotContain("1 unpushed", html);
+    }
+
+    [Fact]
     public void A_wide_history_stays_ordered_and_every_lane_line_is_accounted_for()
     {
         // Forty branches of three commits each, forking from different places on a trunk of sixty, from two devices.
@@ -766,6 +795,114 @@ public class BranchGraphTests
                 Assert.Equal(leaving, arriving);
             }
         }
+    }
+
+    [Fact]
+    public void A_merged_tip_whose_way_up_was_counted_but_not_sent_hangs_from_a_solid_collapsed_run()
+    {
+        // The agent found the merge (t4) and counted 63 commits between it and "old", too many to send.
+        var commits = new[] { C("t4", "t3 zz", pos: 4), C("t3", "t2", pos: 3), C("t2", "t1", pos: 2), C("t1", pos: 1), C("old", "o0", inTrunk: true) with { JoinsTrunkAt = Sha("t4"), JoinDistance = 63 } };
+        var map = BranchGraph.Build([Clone("mac", "t4", commits, [Branch("main", "t4", "origin/main"), Branch("done", "old", merged: true)], "origin/main=t4")], []);
+
+        Assert.Equal(["t4", "t3", "t2", "t1", "Collapsed", "old"], Names(map)); // the run sits right on top of its commit
+        var run = map.Rows.Single(r => r.Kind == MapRowKind.Collapsed);
+        Assert.Equal(63, run.Hidden);
+        Assert.True(run.Dim);
+        Assert.False(run.OnTrunk);
+        var link = Assert.Single(Row(map, "t4").Out);
+        Assert.Equal(MapLineStyle.Solid, link.Style);
+        Assert.Equal(run.Lane, link.Lane);
+        Assert.True(run.Up);
+        Assert.True(Row(map, "old").Up);
+        Assert.Equal(run.Lane, Row(map, "old").Lane);
+        Assert.False(map.HasJoinLinks); // nothing dashed
+        AssertChildrenFirst(map);
+    }
+
+    [Fact]
+    public void Commits_the_agent_proved_squash_merged_are_muted_and_not_counted_as_unpushed()
+    {
+        // "feature" was squash-merged as t3 and its remote branch deleted; "wip" is real unpushed work.
+        var commits = Trunk(1, 3).Concat([
+            C("f2", "f1", unpushed: true) with { SquashMerged = true },
+            C("f1", "t2", unpushed: true) with { SquashMerged = true },
+            C("w1", "t3", unpushed: true),
+        ]);
+        BranchInfo[] branches =
+        [
+            Branch("main", "t3", "origin/main"),
+            Branch("feature", "f2", "origin/feature", gone: true) with { SquashMergedInto = Sha("t3") },
+            Branch("wip", "w1"),
+        ];
+        var map = BranchGraph.Build([Clone("mac", "w1", commits, branches, "origin/main=t3")], []);
+
+        Assert.All((string[])["f2", "f1"], name =>
+        {
+            var row = Row(map, name);
+            Assert.False(row.Unpushed);
+            Assert.True(row.SquashMerged);
+            Assert.True(row.Dim);
+        });
+        Assert.True(Row(map, "w1").Unpushed);
+        Assert.False(Row(map, "w1").SquashMerged);
+        Assert.Equal(1, map.Sources[0].Unpushed);
+        Assert.Equal(2, map.Sources[0].SquashMerged);
+        Assert.True(map.HasSquashMerged);
+
+        var feature = Row(map, "f2").Refs.Single(r => r.Name == "feature");
+        Assert.True(feature is { Merged: true, SquashMerged: true });
+        Assert.Equal(1, map.MergedBranches);
+
+        // "Hide merged" hides it with its commits, like any merged branch.
+        var hidden = BranchGraph.Build([Clone("mac", "w1", commits, branches, "origin/main=t3")], [], new BranchMapOptions { HideMerged = true });
+        Assert.DoesNotContain("f2", Names(hidden));
+        Assert.DoesNotContain("f1", Names(hidden));
+        Assert.Contains("w1", Names(hidden));
+    }
+
+    [Fact]
+    public void A_branch_at_the_head_of_a_merged_pull_request_is_squash_merged_up_to_that_commit_only()
+    {
+        static PullRequestInfo Merged(int number, string at, bool fork = false) =>
+            new() { Repo = "acme/widget", Number = number, HeadRef = "feature", HeadSha = Sha(at), IsCrossRepository = fork, Url = $"https://github.com/acme/widget/pull/{number}", MergedAt = Now };
+
+        // An older agent: no squash proof of its own. "more" adds a commit after the pull request merged.
+        var commits = Trunk(1, 3).Concat([C("m1", "f2", unpushed: true), C("f2", "f1", unpushed: true), C("f1", "t2", unpushed: true)]);
+        BranchInfo[] branches = [Branch("main", "t3", "origin/main"), Branch("feature", "f2", "origin/feature", gone: true), Branch("more", "m1")];
+        var map = BranchGraph.Build([Clone("mac", "m1", commits, branches, "origin/main=t3")], [], new BranchMapOptions { MergedPullRequests = [Merged(7, "f2")] });
+
+        Assert.True(Row(map, "f2").SquashMerged);
+        Assert.Equal(7, Row(map, "f2").MergedPullRequest!.Number);
+        Assert.True(Row(map, "f1").SquashMerged);
+        Assert.False(Row(map, "f1").Unpushed);
+        Assert.True(Row(map, "m1").Unpushed); // made after the merge: still only here
+        Assert.Equal(1, map.Sources[0].Unpushed);
+        Assert.True(Row(map, "f2").Refs.Single(r => r.Name == "feature").SquashMerged);
+        Assert.False(Row(map, "m1").Refs.Single(r => r.Name == "more").Merged);
+
+        // A fork's pull request says nothing about this repository's commits.
+        var fork = BranchGraph.Build([Clone("mac", "m1", commits, branches, "origin/main=t3")], [], new BranchMapOptions { MergedPullRequests = [Merged(8, "f2", fork: true)] });
+        Assert.True(Row(fork, "f2").Unpushed);
+        Assert.False(Row(fork, "f2").SquashMerged);
+    }
+
+    [Fact]
+    public void Rows_come_a_page_at_a_time_and_a_short_last_page_is_not_left_over()
+    {
+        var map = BranchGraph.Build([Clone("mac", "t250", Trunk(1, 250), [Branch("main", "t250", "origin/main")], "origin/main=t250")], [], new BranchMapOptions { ExpandAll = true });
+        Assert.Equal(250, map.Rows.Count);
+
+        Assert.Equal(new MapPage(100, 150, 100, 0), BranchMapPaging.Page(map, BranchMapPaging.PageSize));
+        Assert.Equal(new MapPage(200, 50, 50, 0), BranchMapPaging.Page(map, 200));
+        Assert.Equal(new MapPage(250, 0, 0, 0), BranchMapPaging.Page(map, int.MaxValue));
+        Assert.Equal(new MapPage(250, 0, 0, 0), BranchMapPaging.Page(map, 240)); // ten more is not worth a button
+
+        // Lanes are worked out over every row first: what a page shows is a prefix of the same rows.
+        Assert.All(map.Rows, r => Assert.Equal(0, r.Lane));
+        var withBranch = BranchGraph.Build(
+            [Clone("mac", "t250", Trunk(1, 250).Append(C("old", "t3")), [Branch("main", "t250", "origin/main"), Branch("ancient", "old")], "origin/main=t250")],
+            [], new BranchMapOptions { ExpandAll = true });
+        Assert.Equal(1, BranchMapPaging.Page(withBranch, 100).RestBranches);
     }
 
     [Theory]

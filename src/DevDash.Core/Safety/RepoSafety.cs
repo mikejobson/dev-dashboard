@@ -357,6 +357,13 @@ public static class RepoSafety
                 continue;
             }
 
+            // Squash merged or rebased: the agent matched the branch's change against a commit of the
+            // remote trunk, so deleting it loses no work (only the commits' own messages and history).
+            if (branch is { OnRemote: false, SquashMergedInto: not null })
+            {
+                continue;
+            }
+
             if (branch.OnRemote is null && branch is not { Upstream: not null, UpstreamGone: false })
             {
                 // An agent that did not say whether the tip is on a remote: it may be a merged branch

@@ -1,0 +1,111 @@
+@page "/history"
+@inherits LivePage
+@inject HistoryStore History
+
+<PageTitle>History · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>History</h1>
+        <p>How your machines have changed, one point per day. The hub keeps @Fmt.Count(History.RetentionDays, "day") of these.</p>
+    </div>
+    <div class="chips history-range" role="group" aria-label="Range">
+        @foreach (var option in Ranges)
+        {
+            <a class="chip @(option == _days ? "info" : "muted")" href="@(option == DefaultDays ? "history" : $"history?days={option}")" aria-current="@(option == _days ? "true" : null)">@option days</a>
+        }
+    </div>
+</div>
+
+@if (!History.Options.Enabled)
+{
+    <div class="banner info">History is switched off (<code>Hub:History:Enabled</code>), so nothing new is recorded.</div>
+}
+
+@if (_rows.Count == 0)
+{
+    <div class="card muted">No history yet. It is recorded from each snapshot an agent sends, so the first point appears with the next one.</div>
+}
+else
+{
+    <div class="grid-2 charts">
+        <HistoryChart Title="Disk used by repos" Series="_disk" From="_from" To="_today" Format="HistoryCharts.Bytes" Note="Measured working trees, build output included." />
+        <HistoryChart Title="At risk" Series="_atRisk" From="_from" To="_today" Note="Working trees holding work that exists nowhere else, at any level." />
+        <HistoryChart Title="Unpushed commits" Series="_unpushed" From="_from" To="_today" Note="Commits on no remote, across every branch." />
+        <HistoryChart Title="Build output" Series="_build" From="_from" To="_today" Format="HistoryCharts.Bytes" Note="What Clean build output could free." />
+    </div>
+
+    <h2>Growing fastest <span class="muted small">over the last @GrowthDays days</span></h2>
+    @if (_growing.Count == 0)
+    {
+        <div class="card muted small">No working tree has grown in the last @GrowthDays days (or there is not a second day to compare yet).</div>
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="stack">
+                <thead><tr><th>Repo</th><th>Machine</th><th class="right">Grew by</th><th class="right">Now</th><th>Trend</th></tr></thead>
+                <tbody>
+                    @foreach (var g in _growing)
+                    {
+                        <tr @key="(g.MachineId, g.Path)">
+                            <td class="cell-main"><a class="title-link" href="@Fmt.RepoUrl(g.RepoKey)">@g.Name</a><div class="sub mono path">@g.Path</div></td>
+                            <td data-label="Machine">@g.Hostname</td>
+                            <td data-label="Grew by" class="right nowrap">+@Fmt.Size(g.Growth)</td>
+                            <td data-label="Now" class="right nowrap sub">@Fmt.Size(g.To)</td>
+                            <td data-label="Trend">@((MarkupString)HistoryCharts.Sparkline(g.Points, HistoryCharts.Bytes, $"{g.Name} on {g.Hostname}", SlotOf(g.MachineId)))</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+@code {
+    public const int DefaultDays = 30;
+    public const int GrowthDays = 30;
+    private static readonly int[] Ranges = [30, 90, 180];
+
+    [SupplyParameterFromQuery] public int? Days { get; set; }
+
+    private int _days = DefaultDays;
+    private DateOnly _today, _from;
+    private IReadOnlyList<MachineDayEntity> _rows = [];
+    private IReadOnlyList<ChartSeries> _disk = [], _atRisk = [], _unpushed = [], _build = [];
+    private IReadOnlyList<CloneGrowth> _growing = [];
+    private Dictionary<string, int> _slots = [];
+
+    private int SlotOf(string machineId) => _slots.GetValueOrDefault(machineId);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Loaded && Math.Clamp(Days ?? DefaultDays, 2, History.RetentionDays) != _days)
+        {
+            await LoadAsync();
+        }
+    }
+
+    protected override async Task LoadAsync()
+    {
+        _days = Math.Clamp(Days ?? DefaultDays, 2, History.RetentionDays);
+        _today = History.Today;
+        _from = _today.AddDays(-(_days - 1));
+        _rows = await History.MachineDaysAsync(_days);
+
+        // A machine keeps its colour on every chart: the order is by name, over everything in range.
+        var machines = _rows.GroupBy(r => r.MachineId).Select(g => (Id: g.Key, Name: g.MaxBy(r => r.Day)!.Hostname))
+            .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        _slots = machines.Select((m, i) => (m.Id, i)).ToDictionary(x => x.Id, x => x.i);
+
+        IReadOnlyList<ChartSeries> Series(Func<MachineDayEntity, double> value) => machines
+            .Select(m => new ChartSeries(m.Name, _slots[m.Id], _rows.Where(r => r.MachineId == m.Id).Select(r => (r.Day, value(r))).ToList()))
+            .ToList();
+
+        _disk = Series(r => r.RepoBytes);
+        _atRisk = Series(r => r.AtRisk);
+        _unpushed = Series(r => r.UnpushedCommits);
+        _build = Series(r => r.BuildBytes);
+        _growing = await History.TopGrowingAsync(GrowthDays, 10);
+    }
+}

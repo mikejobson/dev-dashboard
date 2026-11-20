@@ -19,7 +19,10 @@ public sealed record ActionOutcome(bool Succeeded, int? ExitCode, string Output,
     /// <summary>The thread a StartT3Thread action started, when T3 Code said which.</summary>
     public T3StartedThread? Thread { get; init; }
 
-    public ActionResultRequest ToResult() => new() { Succeeded = Succeeded, ExitCode = ExitCode, Output = Output, DurationMs = DurationMs, Thread = Thread };
+    /// <summary>The archive an ArchiveProject action wrote, and its manifest.</summary>
+    public ArchiveResult? Archive { get; init; }
+
+    public ActionResultRequest ToResult() => new() { Succeeded = Succeeded, ExitCode = ExitCode, Output = Output, DurationMs = DurationMs, Thread = Thread, Archive = Archive };
 }
 
 /// <summary>
@@ -44,7 +47,10 @@ public sealed class ActionExecutor(
     AgentUpdater? updater = null,
     RescanRequests? rescans = null,
     ProjectActions? projects = null,
-    T3Code.T3Actions? t3 = null)
+    T3Code.T3Actions? t3 = null,
+    Disk.DiskCleaner? caches = null,
+    DevServers.DevServerStopper? servers = null,
+    ArchiveActions? archives = null)
 {
     /// <summary>No background maintenance and no fsmonitor daemon as a side effect of an action.</summary>
     private static readonly string[] Prefix = ["-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
@@ -106,7 +112,10 @@ public sealed class ActionExecutor(
         return outcomes!;
     }
 
-    public async Task<ActionOutcome> ExecuteAsync(AgentAction? action, CancellationToken ct)
+    public Task<ActionOutcome> ExecuteAsync(AgentAction? action, CancellationToken ct) => ExecuteAsync(action, progress: null, ct);
+
+    /// <param name="progress">Told how a long action (an archive) is getting on, now and then. Never awaited.</param>
+    public async Task<ActionOutcome> ExecuteAsync(AgentAction? action, Action<string>? progress, CancellationToken ct)
     {
         var stopwatch = Stopwatch.StartNew();
         ActionOutcome Refuse(string why) => new(false, null, "Refused: " + why, [], stopwatch.ElapsedMilliseconds);
@@ -158,6 +167,20 @@ public sealed class ActionExecutor(
         var held = await _gate.EnterAsync(ct).ConfigureAwait(false);
         try
         {
+            // §21: a cache outside the repositories, or a process. Each has its own checks; neither is a git action.
+            if (action is { Kind: AgentActionKind.CleanCache or AgentActionKind.StopDevServer })
+            {
+                var outcome = action.Kind == AgentActionKind.CleanCache
+                    ? caches is null ? Refuse("this agent cannot clean caches.") : await caches.RunAsync(action, stopwatch, ct).ConfigureAwait(false)
+                    : servers is null ? Refuse("this agent cannot stop dev servers.") : await servers.RunAsync(action, stopwatch, ct).ConfigureAwait(false);
+                if (outcome.Refused)
+                {
+                    logger.LogWarning("Refused action {Kind}: {Reason}", action.Kind, outcome.Output);
+                }
+
+                return outcome;
+            }
+
             if (await validator.RefusalAsync(action, ct).ConfigureAwait(false) is { } refusal)
             {
                 logger.LogWarning("Refused action {Kind} in {Repo}: {Reason}", action?.Kind, action?.RepoPath, refusal);
@@ -187,6 +210,27 @@ public sealed class ActionExecutor(
                 if (outcome.Refused)
                 {
                     logger.LogWarning("Refused action {Kind} in {Repo}: {Reason}", action.Kind, repo, outcome.Output);
+                }
+
+                return outcome;
+            }
+
+            // Archive a project, or put an archive back: long, and the only kinds that write outside the scan roots.
+            if (AgentActions.IsArchiveAction(action.Kind))
+            {
+                if (archives is null)
+                {
+                    return Refuse("this agent cannot archive projects.");
+                }
+
+                var outcome = await archives.RunAsync(action, stopwatch, progress, ct).ConfigureAwait(false);
+                if (outcome.Refused)
+                {
+                    logger.LogWarning("Refused action {Kind} in {Repo}: {Reason}", action.Kind, repo, outcome.Output);
+                }
+                else
+                {
+                    logger.LogInformation("Action {Kind} in {Repo} {Outcome}", action.Kind, repo, outcome.Succeeded ? "succeeded" : "failed");
                 }
 
                 return outcome;

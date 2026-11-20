@@ -63,6 +63,16 @@ public sealed class ActionsClient(HttpClient http, IOptionsMonitor<AgentOptions>
         }
     }
 
+    /// <summary>How a long action is getting on. A hub before 0.8.0 has no such endpoint (404), which is not an error.</summary>
+    public async Task ProgressAsync(string actionId, string output, CancellationToken ct)
+    {
+        using var request = Request(HttpMethod.Post, $"api/v1/actions/{Uri.EscapeDataString(actionId)}/progress");
+        request.Content = JsonContent.Create(new ActionProgressRequest { Output = AgentActions.Truncate(output) }, options: SnapshotSchema.JsonOptions);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(ReportTimeout);
+        using var response = await http.SendAsync(request, deadline.Token).ConfigureAwait(false);
+    }
+
     private HttpRequestMessage Request(HttpMethod method, string path)
     {
         var current = options.CurrentValue;

@@ -1,0 +1,63 @@
+@* A repo's last 30 days per working tree: size and unpushed commits as sparklines (§22). Nothing until there is history. *@
+@inherits LivePage
+@inject HistoryStore History
+@inject SnapshotStore Snapshots
+
+@if (_trees.Count > 0)
+{
+    <h2 id="trends">Trends <span class="muted small">the last @Days days · <a href="history">History →</a></span></h2>
+    <div class="table-wrap">
+        <table class="stack trends-table">
+            <thead><tr><th>Machine</th><th>Size</th><th>Unpushed commits</th></tr></thead>
+            <tbody>
+                @foreach (var tree in _trees)
+                {
+                    var last = tree.Rows[^1];
+                    var name = Snapshots.Get(last.MachineId)?.Machine.Hostname ?? last.MachineId;
+                    <tr @key="(last.MachineId, last.Path)">
+                        <td class="cell-main nowrap">@name@(_trees.Count(t => t.Rows[0].MachineId == last.MachineId) > 1 ? $" · {last.Path}" : "")</td>
+                        <td data-label="Size">
+                            <span class="trend">
+                                @((MarkupString)HistoryCharts.Sparkline(tree.Rows.Where(r => r.SizeBytes is not null).Select(r => (r.Day, (double)r.SizeBytes!.Value)).ToList(), HistoryCharts.Bytes, $"Size on {name}", 0))
+                                <span class="sub">@Fmt.Size(tree.Rows.LastOrDefault(r => r.SizeBytes is not null)?.SizeBytes)</span>
+                            </span>
+                        </td>
+                        <td data-label="Unpushed commits">
+                            <span class="trend">
+                                @((MarkupString)HistoryCharts.Sparkline(tree.Rows.Select(r => (r.Day, (double)r.Unpushed)).ToList(), HistoryCharts.Number, $"Unpushed commits on {name}", 1))
+                                <span class="sub">@last.Unpushed@(last.MaxUnpushed > last.Unpushed ? $" (up to {last.MaxUnpushed} today)" : "")</span>
+                            </span>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    public const int Days = 30;
+
+    [Parameter, EditorRequired] public string RepoKey { get; set; } = "";
+
+    private List<(string MachineId, string Path, List<CloneDayEntity> Rows)> _trees = [];
+    private string? _loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Loaded && _loadedFor != RepoKey)
+        {
+            await LoadAsync();
+        }
+    }
+
+    protected override async Task LoadAsync()
+    {
+        _loadedFor = RepoKey;
+        var rows = string.IsNullOrEmpty(RepoKey) ? [] : await History.RepoDaysAsync(RepoKey, Days);
+        _trees = rows.GroupBy(r => (r.MachineId, r.Path))
+            .Select(g => (g.Key.MachineId, g.Key.Path, g.OrderBy(r => r.Day).ToList()))
+            .OrderBy(t => t.MachineId, StringComparer.Ordinal).ThenBy(t => t.Path, StringComparer.Ordinal)
+            .ToList();
+    }
+}

@@ -121,6 +121,29 @@ public sealed record MachineInfo
     /// CLI. False from agents before 0.7.0, which could not read the request.
     /// </summary>
     public bool AcceptsT3 { get; init; }
+
+    /// <summary>The developer caches outside the repositories (§21), measured every few hours. Null from an agent before 0.8.0 or with <c>Agent:Disk:Enabled</c> off.</summary>
+    public DiskReport? Disk { get; init; }
+
+    /// <summary>Listening development servers (§21), as of this scan. Null from an agent before 0.8.0 or with <c>Agent:DevServers:Enabled</c> off.</summary>
+    public DevServerReport? DevServers { get; init; }
+
+    /// <summary>True when this agent knows the CleanCache action, has actions on and the disk report on.</summary>
+    public bool AcceptsCleanCache { get; init; }
+
+    /// <summary>True when this agent knows the StopDevServer action, has actions on and the dev server list on.</summary>
+    public bool AcceptsStopDevServer { get; init; }
+    /// <summary>
+    /// Where this agent archives projects, with free space and whether it can write there. Null when
+    /// <c>Agent:Archive:Folder</c> is not set, and from agents before 0.8.0.
+    /// </summary>
+    public ArchiveInfo? Archive { get; init; }
+
+    /// <summary>True when this agent knows the ArchiveProject action, has actions on, and its archive folder is there and writable.</summary>
+    public bool AcceptsArchiveProject { get; init; }
+
+    /// <summary>True when this agent knows the RestoreArchive action, has actions on, and has an archive folder it can read.</summary>
+    public bool AcceptsRestoreArchive { get; init; }
 }
 
 /// <summary>The names used for <see cref="InstalledToolchain.Tool"/> and <see cref="ToolchainPin.Tool"/>.</summary>
@@ -411,6 +434,13 @@ public sealed record GitState
     /// <summary>Newest mtime among untracked files and folders.</summary>
     public DateTimeOffset? NewestUntrackedAt { get; init; }
 
+    /// <summary>
+    /// The most recently modified of the changed paths (tracked and untracked), newest first, at most
+    /// <see cref="RecentChange.MaxPerRepo"/>: what "Where I left off" shows. Paths as git prints them,
+    /// relative to the working tree; never contents. Null when nothing is changed, and from agents before it.
+    /// </summary>
+    public IReadOnlyList<RecentChange>? RecentChanges { get; init; }
+
     public CommitInfo? LastCommit { get; init; }
     public string? DefaultBranch { get; init; }
 
@@ -454,6 +484,15 @@ public sealed record GitState
     /// </summary>
     public CommitActivity? Activity { get; init; }
 
+    /// <summary>
+    /// The repository's remote-tracking branches (<c>refs/remotes</c>, without <c>*/HEAD</c>), newest
+    /// commit first, at most <see cref="RemoteBranchInfo.MaxCount"/>: what could be checked out or
+    /// started from, including branches nothing here tracks. Null from agents before 0.7.x, and on a
+    /// linked worktree whose main working tree is in the same snapshot (they share the refs).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<RemoteBranchInfo>? RemoteBranches { get; init; }
+
     [JsonIgnore]
     public int DirtyCount => Staged + Unstaged + Conflicted;
 
@@ -467,6 +506,20 @@ public sealed record CommitInfo
     public DateTimeOffset Date { get; init; }
     public string Subject { get; init; } = "";
     public string Author { get; init; } = "";
+}
+
+/// <summary>One changed path of a working tree and when it was last written. The name only.</summary>
+public sealed record RecentChange
+{
+    /// <summary>How many paths an agent sends per working tree.</summary>
+    public const int MaxPerRepo = 5;
+
+    /// <summary>Relative to the working tree, with <c>/</c> separators, as <c>git status</c> prints it.</summary>
+    public required string Path { get; init; }
+    public DateTimeOffset ModifiedAt { get; init; }
+
+    /// <summary>True for an untracked path; null for a tracked file with changes.</summary>
+    public bool? Untracked { get; init; }
 }
 
 public sealed record RemoteInfo
@@ -517,6 +570,32 @@ public sealed record BranchInfo
 
     /// <summary>The commit date of the oldest of those commits. Null when there are none or they were not counted.</summary>
     public DateTimeOffset? OldestUnpushedAt { get; init; }
+
+    /// <summary>
+    /// For a branch with commits on no remote that is not merged: the commit of the trunk that already
+    /// carries its change, when the agent proved it (a squash merge whose diff matches the branch's, or
+    /// every commit cherry-picked/rebased onto the trunk with the same patch). Its unpushed commits then
+    /// lose nothing if deleted. Null when not proven, or from agents that do not check.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SquashMergedInto { get; init; }
+}
+
+/// <summary>A remote-tracking branch, as last fetched.</summary>
+public sealed record RemoteBranchInfo
+{
+    /// <summary>Most remote branches sent for one repository.</summary>
+    public const int MaxCount = 200;
+
+    /// <summary>Short name, e.g. <c>origin/feature-x</c>.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>The remote it belongs to (<c>origin</c>), when it is one of the repository's remotes.</summary>
+    public string? Remote { get; init; }
+    public required string Sha { get; init; }
+
+    /// <summary>The committer date of the commit it points at.</summary>
+    public DateTimeOffset? Date { get; init; }
 }
 
 public sealed record WorktreeInfo
@@ -687,6 +766,21 @@ public sealed record GraphCommit
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? JoinsTrunkAt { get; init; }
+
+    /// <summary>
+    /// With <see cref="JoinsTrunkAt"/>, when the commits between this one and that merge were too many
+    /// to send: how many there are on the shortest way up (not counting either end). The hub draws them
+    /// as one collapsed run. Null when they were sent, or not counted (agents before 0.7.x).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? JoinDistance { get; init; }
+
+    /// <summary>
+    /// An <see cref="Unpushed"/> commit whose change is on the trunk already: it belongs to a branch the
+    /// agent proved was squash-merged (<see cref="BranchInfo.SquashMergedInto"/>). Older hubs still see it as unpushed.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool SquashMerged { get; init; }
 }
 
 /// <summary>A remote-tracking ref and the commit it points at, as this machine last fetched it.</summary>

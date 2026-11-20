@@ -1,0 +1,67 @@
+@* "What changed since yesterday" on the Overview: each machine now against its last day of history (§22).
+   Left out until there is a day before today to compare with. *@
+@inherits LivePage
+@inject HistoryStore History
+@inject SnapshotStore Snapshots
+
+@if (_result.HasBaseline)
+{
+    <h2 id="since-yesterday">Since yesterday <span class="muted small">@BaselineText · <a href="history">History →</a></span></h2>
+    <div class="card since">
+        @if (_result.Changes.Count == 0)
+        {
+            <span class="muted">Nothing changed.</span>
+        }
+        else
+        {
+            <ul class="list">
+                @foreach (var group in _result.Changes.GroupBy(c => c.Kind))
+                {
+                    var items = group.ToList();
+                    <li>
+                        <span class="dot @SinceYesterday.Class(group.Key)"></span><strong>@SinceYesterday.Label(group.Key)</strong> <span class="muted">@items.Count</span>
+                        <div class="sub small since-items">
+                            @foreach (var change in items.Take(PerKind))
+                            {
+                                <div>
+                                    @if (change.Kind == ChangeKind.Removed)
+                                    {
+                                        <span>@change.Tree.Name</span>
+                                    }
+                                    else
+                                    {
+                                        <a href="@Fmt.RepoUrl(change.Tree.RepoKey)">@change.Tree.Name</a>
+                                    }
+                                    <span class="muted"> on @change.Tree.Hostname@(change.Tree.IsLinkedWorktree ? " (worktree)" : "") · @change.Text</span>
+                                </div>
+                            }
+                            @if (items.Count > PerKind)
+                            {
+                                <div class="muted">and @(items.Count - PerKind) more</div>
+                            }
+                        </div>
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+}
+
+@code {
+    private const int PerKind = 5;
+    private SinceYesterdayResult _result = SinceYesterdayResult.None;
+
+    private string BaselineText
+    {
+        get
+        {
+            var days = _result.Baselines.Values.Distinct().ToList();
+            var today = History.Today;
+            return days.Count == 1 && days[0] == today.AddDays(-1)
+                ? "compared with yesterday's last scan"
+                : "compared with each machine's last day before today" + (days.Count == 1 ? $" ({HistoryCharts.DayLabel(days[0], today)})" : "");
+        }
+    }
+
+    protected override async Task LoadAsync() => _result = await History.SinceYesterdayAsync(Snapshots.Machines);
+}

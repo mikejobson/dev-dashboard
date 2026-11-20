@@ -1,0 +1,143 @@
+@* Archive a project on its machine: pack it into the machine's archive folder, check the archive, then move the
+   folder to the trash. Offered for any verdict, because the archive keeps everything. Only the typed action is sent. *@
+@inject ActionBoard Board
+@inject IOptionsMonitor<HubOptions> Options
+<span class="act">
+    @if (!Status.InFlight)
+    {
+        <button type="button" class="@Class @(Blocked is null ? "" : "is-disabled")" aria-disabled="@(Blocked is null ? "false" : "true")" title="@(Blocked ?? $"Archive {Name} on {Machine.Machine.Hostname}, then move the folder to the trash. You confirm first.")" @onclick="Ask">Archive</button>
+    }
+    @if (Status.Row is { } row)
+    {
+        <span class="chip @Status.Class" title="@(string.IsNullOrWhiteSpace(row.Output) ? $"Queued by {row.QueuedBy} at {Fmt.Date(row.QueuedAt)}" : row.Output)">@(row.Status == AgentActionStatus.Succeeded ? "archived, waiting for its rescan" : $"archive {Status.Text}")</span>
+        @if (Status.InFlight && !string.IsNullOrWhiteSpace(row.Output))
+        {
+            <div class="sub archive-progress">@row.Output</div>
+        }
+        else if (Status.Failed && !string.IsNullOrWhiteSpace(row.Output))
+        {
+            <div class="sub safety-refusal">@row.Output</div>
+        }
+    }
+    @if (_asking && Machine.Machine.Archive is { } archive)
+    {
+        var host = Machine.Machine.Hostname;
+        var estimate = Archives.Estimate(Safety, _includeBuild);
+        <div class="modal-backdrop" @onclick="Cancel">
+            <div class="modal" role="dialog" aria-modal="true" aria-labelledby="archive-@_id" @onclick:stopPropagation="true">
+                <h3 id="archive-@_id">Archive @Name on @host?</h3>
+                <dl class="kv">
+                    <dt>Machine</dt>
+                    <dd>@host <span class="muted mono">@Machine.MachineId</span></dd>
+                    <dt>Folder</dt>
+                    <dd class="mono">@Path</dd>
+                    <dt>Archive</dt>
+                    <dd class="mono">@Archives.Destination(archive, FolderName)</dd>
+                    <dt>Estimated size</dt>
+                    <dd>@(estimate is { } e ? $"up to {Fmt.Size(e)} before compression" : "not measured yet") <span class="muted">· @(archive.FreeBytes is { } free ? $"{Fmt.Size(free)} free there" : "free space unknown")</span></dd>
+                    <dt>State</dt>
+                    <dd><SafetyBadge Safety="Safety" /></dd>
+                </dl>
+                @if (Safety.Verdict == SafetyVerdict.AtRisk)
+                {
+                    <p><strong>This holds work that is nowhere else.</strong> The archive keeps it: @string.Join("; ", Safety.Reasons.Where(r => r.Effect == SafetyEffect.Risk).Select(r => r.Text)).</p>
+                }
+                <p>Everything in the folder goes in the archive: uncommitted and untracked files, ignored files, stashes and <code>.git</code>. Links are kept as links and never followed.</p>
+                <label class="check">
+                    <input type="checkbox" checked="@_includeBuild" @onchange="e => _includeBuild = e.Value is true" />
+                    Keep regenerable build output too (node_modules, bin/obj, .venv…)@(Safety.ReclaimableBytes is > 0 and var build ? $", {Fmt.Size(build)}" : "")
+                </label>
+                <p>
+                    The agent fetches and checks the project again first, and refuses if anything has changed since this page was drawn, or if there is not enough free space.
+                    It writes the archive under a temporary name, reads it back and checks every entry, then writes a manifest with its SHA-256 beside it.
+                    Only then is the folder <strong>moved to the trash</strong> on @host. If anything fails, the archive is deleted and the folder is left as it was.
+                </p>
+                <p>It is recorded as queued by <strong>@_login</strong>. If the agent has not picked it up within @Options.CurrentValue.Actions.ExpiryMinutes minutes it expires and never runs. A large project can take a while; progress shows here.</p>
+                @if (_error is not null)
+                {
+                    <div class="banner danger">@_error</div>
+                }
+                <div class="modal-actions">
+                    <button type="button" @onclick="Cancel">Cancel</button>
+                    <button type="button" class="primary" disabled="@_busy" @onclick="ConfirmAsync">Archive on @host</button>
+                </div>
+            </div>
+        </div>
+    }
+</span>
+
+@code {
+    private static int _next;
+    private readonly int _id = Interlocked.Increment(ref _next);
+
+    [Parameter, EditorRequired] public MachineView Machine { get; set; } = default!;
+
+    /// <summary>The working tree's path, as the agent reported it.</summary>
+    [Parameter, EditorRequired] public string Path { get; set; } = "";
+
+    /// <summary>The name to show (the repo's).</summary>
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+
+    /// <summary>The assessment this page drew: its fingerprint goes with the request.</summary>
+    [Parameter, EditorRequired] public SafetyAssessment Safety { get; set; } = default!;
+
+    [Parameter] public string Class { get; set; } = "run";
+
+    private bool _asking;
+    private bool _busy;
+    private bool _includeBuild;
+    private string _login = "";
+    private string? _error;
+
+    private string FolderName => System.IO.Path.GetFileName(Path.TrimEnd('/', '\\'));
+
+    private ActionStatus Status
+    {
+        get
+        {
+            var status = Board.StatusOf(Machine.MachineId, AgentActionKind.ArchiveProject, Path);
+            // Archived before the machine's current scan: what is listed now came back since (restored, or cloned).
+            return status.Row is { Status: AgentActionStatus.Succeeded, CompletedAt: { } done } && done < Machine.Snapshot.ScannedAt ? ActionStatus.None : status;
+        }
+    }
+
+    private string? Blocked => Board.For(Machine, AgentActionKind.ArchiveProject).WhyNot ?? Archives.Blocked(Safety);
+
+    private async Task Ask()
+    {
+        if (Blocked is not null)
+        {
+            return;
+        }
+
+        _login = await Board.LoginAsync();
+        _error = null;
+        _includeBuild = false;
+        _asking = true;
+    }
+
+    private void Cancel()
+    {
+        _asking = false;
+        _error = null;
+    }
+
+    private async Task ConfirmAsync()
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _error = await Board.QueueAsync(Machine.MachineId, AgentAction.ArchiveProject(Path, Safety.Fingerprint, _includeBuild));
+            _asking = _error is not null;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

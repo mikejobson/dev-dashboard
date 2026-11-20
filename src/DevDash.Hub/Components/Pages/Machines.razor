@@ -170,6 +170,12 @@ else
                                 {
                                     <div class="sub" title="@AgentActions.WhyNotAccepted(machine.Machine, AgentActionKind.RemoveProject)">no remove, clean or pull yet</div>
                                 }
+                                @if (machine.Machine.Archive is { } archive)
+                                {
+                                    <div class="sub mono truncate" title="@(archive.Problem ?? $"Archives go to {archive.Folder} ({archive.Format})")">
+                                        archive: @Fmt.Tilde(archive.Folder, home)@(archive.Problem is null ? archive.FreeBytes is { } free ? $" · {Fmt.Size(free)} free" : "" : " · not usable")
+                                    </div>
+                                }
                                 @if (_removed.Count(r => string.Equals(r.Tombstone.MachineId, machine.MachineId, StringComparison.OrdinalIgnoreCase)) is > 0 and var gone)
                                 {
                                     <div class="sub"><a href="machines#removed">@gone removed</a></div>
@@ -297,6 +303,16 @@ else
             </tbody>
         </table>
     </div>
+}
+
+@if (_machines.Any(m => m.Machine.DevServers is not null))
+{
+    <h2 id="devservers">Dev servers <span class="muted small">listening processes in your repos, and development tools elsewhere</span></h2>
+    @foreach (var machine in _machines.Where(m => m.Machine.DevServers?.Problem is not null))
+    {
+        <p class="muted small">@machine.Machine.Hostname: @machine.Machine.DevServers!.Problem</p>
+    }
+    <DevServerList Rows="_servers" Now="Now" Empty="No dev server is listening on any machine." />
 }
 
 @if (_removed.Count > 0)
@@ -501,6 +517,7 @@ else
 
     private const int ActionsPage = 10, ActionsLoaded = 200, RefreshesShown = 20, UnmetShown = 4;
     private IReadOnlyList<MachineToolchains> _toolchains = [];
+    private IReadOnlyList<DevServerRow> _servers = [];
     private const string ReinstallWhy = "This agent predates self-update, so it cannot be updated from here. Run the install one-liner on that machine once; after that it updates itself or on request.";
 
     private int _actionsShown = ActionsPage;
@@ -522,6 +539,7 @@ else
     {
         _machines = Snapshots.Machines;
         _toolchains = ToolchainView.For(_machines);
+        _servers = DevServerView.Rows(_machines, Now);
         _keys = await Keys.ListAsync();
         // Refreshes are read-only and frequent: listing each one with the fixes and updates would bury those.
         _actions = await Actions.RecentAsync(refreshes: false, ActionsLoaded);

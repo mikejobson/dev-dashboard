@@ -7,6 +7,8 @@
 @inject AgentUpdates Updates
 @inject NavCounts Counts
 @inject T3Starts Starts
+@inject RepoNotes Notes
+@inject ActionBoard Actions
 
 <PageTitle>Overview · DevDash</PageTitle>
 
@@ -143,6 +145,8 @@
             }
         </div>
 
+        <SinceYesterdayCard />
+
         <h2>Tidy-up</h2>
         <div class="card tidy">
             @if (_active.Count == 0)
@@ -179,6 +183,16 @@
     </section>
 
     <section>
+        <h2 id="left-off">Where I left off <span class="muted small">@(_leftOffTag is null ? "" : "#" + _leftOffTag)</span> <a class="small" href="@LeftOffUrl">All →</a></h2>
+        <div class="card">
+            <LeftOffList Items="_leftOff" Now="Now" Compact="true" TagUrl="@(t => "?tag=" + Uri.EscapeDataString(t) + "#left-off")" QuietTags="_notes.QuietTags"
+                         Empty="@($"Nothing committed, edited or worked on in T3 in the last {LeftOffQuery.DefaultDays} days{(_leftOffTag is null ? "" : $" in repos tagged #{_leftOffTag}")}.")" />
+            @if (_leftOffMore > 0)
+            {
+                <div class="more small"><a href="@LeftOffUrl">@_leftOffMore more on Where I left off →</a></div>
+            }
+        </div>
+
         <h2>Machines</h2>
         <div class="card">
             @if (_machines.Count == 0)
@@ -203,6 +217,41 @@
                 </ul>
             }
         </div>
+
+        @if (_servers.Count > 0)
+        {
+            <h2 id="running">Running <span class="muted small">dev servers in your repos</span></h2>
+            <div class="card">
+                <ul class="list">
+                    @foreach (var server in _servers.Take(8))
+                    {
+                        <li>
+                            @if (server.RepoKey is not null)
+                            {
+                                <a href="@Fmt.RepoUrl(server.RepoKey)#running">@DevServerView.Line(server, Now)</a>
+                            }
+                            else
+                            {
+                                @DevServerView.Line(server, Now)
+                            }
+                            <span class="muted small"> · @server.Machine.Machine.Hostname</span>
+                            @if (server.Clashes.Count > 0)
+                            {
+                                <span class="chip warn gap" title="@DevServerView.ClashText(server)">port clash</span>
+                            }
+                            @if (server.Old)
+                            {
+                                <span class="chip warn gap" title="Running for more than a week: perhaps forgotten.">old</span>
+                            }
+                        </li>
+                    }
+                </ul>
+                @if (_servers.Count > 8)
+                {
+                    <div class="sub"><a href="machines#devservers">and @(_servers.Count - 8) more →</a></div>
+                }
+            </div>
+        }
 
         @if (_t3Shown)
         {
@@ -249,12 +298,34 @@
 
     private string ActivityCaption => $"{(Mine ? "of mine " : "")}in the last year, across {Fmt.Count(_activityRepos, "repo")}";
 
+    /// <summary><c>?tag=</c>: the Where I left off card shows only repos with this tag.</summary>
+    [SupplyParameterFromQuery] public string? Tag { get; set; }
+
+    /// <summary>Projects the Overview card shows.</summary>
+    private const int LeftOffRows = 6;
+
+    private RepoNoteSet _notes = RepoNoteSet.Empty;
+    private IReadOnlyList<LeftOffItem> _leftOff = [];
+    private int _leftOffMore;
+    private string? _leftOffTag;
+
+    private string LeftOffUrl => "left-off" + (_leftOffTag is null ? "" : "?tag=" + Uri.EscapeDataString(_leftOffTag));
+
     protected override void OnParametersSet()
     {
         if (Loaded)
         {
             LoadActivity();
+            LoadLeftOff();
         }
+    }
+
+    private void LoadLeftOff()
+    {
+        _leftOffTag = RepoTags.Normalize(Tag);
+        var all = LeftOff.Build(_repos, _notes, new LeftOffQuery { Tag = _leftOffTag, IncludeQuiet = _leftOffTag is { } t && _notes.QuietTags.Contains(t) }, Now, Time.LocalTimeZone);
+        _leftOff = all.Take(LeftOffRows).ToList();
+        _leftOffMore = all.Count - _leftOff.Count;
     }
 
     private void LoadActivity()
@@ -300,9 +371,13 @@
     private IReadOnlyList<T3ThreadRow> _t3 = [];
     private bool _t3Shown;
 
+    // §21: listening dev servers inside repos (a stray tool outside them is listed on the Machines page only).
+    private IReadOnlyList<DevServerRow> _servers = [];
+
     protected override async Task LoadAsync()
     {
         _machines = Snapshots.Machines;
+        _servers = DevServerView.Rows(_machines, Now).Where(r => r.RepoKey is not null).ToList();
         _online = _machines.Count(Snapshots.IsOnline);
         _behind = Updates.BehindCount();
         _repos = await Catalog.GetAsync();
@@ -310,6 +385,9 @@
         _t3 = _t3Shown ? T3View.All(_machines, await Starts.RecentAsync()).Where(r => r.State is T3ThreadState.NeedsInput or T3ThreadState.Running).ToList() : [];
         _dirty = _repos.Count(r => r.AnyDirty);
         LoadActivity();
+        _notes = await Notes.GetAsync();
+        await Actions.LoadAsync();
+        LoadLeftOff();
         _onlyCopy = Counts.Safety();
 
         var gh = GitHub.Current;

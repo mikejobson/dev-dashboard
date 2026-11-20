@@ -2,6 +2,8 @@ using System.Text.Json;
 using DevDash.Agent;
 using DevDash.Agent.Actions;
 using DevDash.Agent.Dependencies;
+using DevDash.Agent.DevServers;
+using DevDash.Agent.Disk;
 using DevDash.Agent.Git;
 using DevDash.Agent.Logging;
 using DevDash.Agent.Scanning;
@@ -87,6 +89,7 @@ builder.Services.AddSingleton<RepoScanner>();
 builder.Services.AddSingleton<SizeCache>(_ => new SizeCache());
 builder.Services.AddToolchains(); // what is installed, what each repo pins, and the last dependency results
 builder.Services.AddT3Code(); // T3 Code's threads per repo, and the actions that open it or start a thread (Agent:T3:Enabled)
+builder.Services.AddDiskAndDevServers(); // developer caches outside the repos, and listening dev servers (§21)
 builder.Services.AddSingleton<MachineScanner>();
 builder.Services.AddHttpClient<HubClient>(c => c.Timeout = TimeSpan.FromSeconds(60));
 
@@ -120,6 +123,7 @@ if (cli.Command == "run")
     builder.Services.AddAgentUpdates(updateContext, guard, runningAsService);
     builder.Services.AddAgentActions(); // polls only if Agent:Actions:Enabled, or updates are notify/auto
     builder.Services.AddDependencyChecks(); // slow, in the background, and only if Agent:Dependencies:Enabled
+    builder.Services.AddDiskWorker(); // measures the developer caches every few hours, never on the scan's path
     builder.Services.AddHostedService<AgentWorker>();
     var runHost = builder.Build();
     var restart = runHost.Services.GetRequiredService<RestartSignal>();
@@ -183,6 +187,7 @@ switch (cli.Command)
         Console.Out.WriteLine($"toolchains {(options.Toolchains.Enabled ? $"reported, checked every {options.Toolchains.IntervalHours} h" : "off")}");
         Console.Out.WriteLine($"deps       {(options.Dependencies.Enabled ? $"dotnet list package and npm audit, each repo every {options.Dependencies.IntervalHours} h (never restores or installs)" : "off")}");
         Console.Out.WriteLine($"actions    {(options.Actions.Enabled ? "on (allowlisted fixes queued from the dashboard)" : "off (report only)")}");
+        Console.Out.WriteLine($"disk       {(options.Disk.Enabled ? $"developer caches measured every {options.Disk.IntervalHours} h" : "off")}; dev servers {(options.DevServers.Enabled ? "listed every scan" : "off")}");
         Console.Out.WriteLine($"t3         {(options.T3.Enabled ? $"on (threads reported; T3 home {options.T3.ResolveHome()})" : "off")}");
         Console.Out.WriteLine($"updates    {UpdateCli.DescribeMode(options.Updates, updateContext)}");
         Console.Out.WriteLine($"release key {updateContext.Trust.Describe()}");

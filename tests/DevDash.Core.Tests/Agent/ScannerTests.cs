@@ -39,6 +39,34 @@ public sealed class ScannerTests : IDisposable
     private string Widget => Path.Combine(_dev, "widget");
 
     [Fact]
+    public void Recent_changes_are_the_newest_few_changed_paths_by_mtime_without_deleted_files()
+    {
+        var repo = Directory.CreateDirectory(Path.Combine(_root, "mtimes")).FullName;
+        var start = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        var paths = new List<DevDash.Core.Git.ChangedPath>();
+        for (var i = 0; i < 8; i++)
+        {
+            var name = $"src/file{i}.cs";
+            Directory.CreateDirectory(Path.Combine(repo, "src"));
+            File.WriteAllText(Path.Combine(repo, "src", $"file{i}.cs"), "x");
+            File.SetLastWriteTimeUtc(Path.Combine(repo, "src", $"file{i}.cs"), start.AddMinutes(i));
+            paths.Add(new(name, Tracked: i % 2 == 0));
+        }
+
+        paths.Add(new("gone.txt", Tracked: true)); // deleted: no mtime, left out
+
+        var (tracked, untracked, recent) = RepoScanner.NewestChange(repo, paths);
+
+        Assert.Equal(new DateTimeOffset(start.AddMinutes(6)), tracked);
+        Assert.Equal(new DateTimeOffset(start.AddMinutes(7)), untracked);
+        Assert.Equal(["src/file7.cs", "src/file6.cs", "src/file5.cs", "src/file4.cs", "src/file3.cs"], recent!.Select(c => c.Path));
+        Assert.Equal(RecentChange.MaxPerRepo, recent!.Count);
+        Assert.True(recent[0].Untracked);
+        Assert.Null(recent[1].Untracked);
+        Assert.Null(RepoScanner.NewestChange(repo, [new("gone.txt", Tracked: true)]).Recent);
+    }
+
+    [Fact]
     public async Task Scans_repos_worktrees_folders_and_loose_files()
     {
         // Local state: a dirty file, an untracked file, a stash, an unpushed branch, a merged branch, a linked worktree.
@@ -83,6 +111,10 @@ public sealed class ScannerTests : IDisposable
         Assert.Equal(1, git.Untracked);
         Assert.NotNull(git.NewestTrackedChangeAt);
         Assert.NotNull(git.NewestUntrackedAt);
+        // The changed paths by name (never contents), newest first: package.json (tracked) and scratch.txt (untracked).
+        Assert.Equal(["package.json", "scratch.txt"], git.RecentChanges!.Select(c => c.Path).Order(StringComparer.Ordinal));
+        Assert.True(git.RecentChanges!.Single(c => c.Path == "scratch.txt").Untracked);
+        Assert.Null(git.RecentChanges!.Single(c => c.Path == "package.json").Untracked);
         Assert.Equal("feature work", git.LastCommit!.Subject);
         Assert.Null(Assert.Single(git.Remotes).Normalized); // a local path remote has no hosted identity
         Assert.Equal("parked", Assert.Single(git.Stashes).Message.Split(": ")[^1]);
@@ -525,9 +557,150 @@ public sealed class ScannerTests : IDisposable
         Assert.NotNull(commits[landed].TrunkPos);
         Assert.Contains(tip, commits[landed].Parents); // "long" itself is a parent of the merge: connected
 
-        // The run between "early" and the tip is too long to send.
+        // The run between "early" and the tip is too long to send: it is counted instead, for a collapsed row.
         Assert.DoesNotContain(graph.Commits, c => c.Subject.StartsWith("more ", StringComparison.Ordinal) && c.Sha != tip);
+        Assert.Equal(CommitGraphCollector.MaxJoinPath + 5, commits[early].JoinDistance);
+        Assert.Null(commits[tip].JoinDistance);
         Assert.False(graph.Truncated);
+    }
+
+    [Fact]
+    public async Task A_merged_branch_of_sixty_commits_is_sent_whole()
+    {
+        // Longer than the 40 commits 0.7.0 sent before falling back to a dashed "joins there" line.
+        Git(Widget, "checkout", "-q", "-b", "long");
+        Git(Widget, "commit", "-q", "--allow-empty", "-m", "early work");
+        var early = Git(Widget, "rev-parse", "HEAD");
+        Git(Widget, "branch", "early");
+        for (var i = 0; i < 60; i++)
+        {
+            Git(Widget, "commit", "-q", "--allow-empty", "-m", $"more {i}");
+        }
+
+        Git(Widget, "checkout", "-q", "main");
+        Git(Widget, "merge", "-q", "--no-ff", "long", "-m", "Merge long");
+        var landed = Git(Widget, "rev-parse", "HEAD");
+        Git(Widget, "push", "-q", "origin", "main");
+
+        var graph = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!.Graph!;
+        var commits = graph.Commits.ToDictionary(c => c.Sha);
+
+        Assert.Equal(60, graph.Commits.Count(c => c.Subject.StartsWith("more ", StringComparison.Ordinal)));
+        Assert.Equal(landed, commits[early].JoinsTrunkAt);
+        Assert.Null(commits[early].JoinDistance);
+        Assert.All(graph.Commits.Where(c => c.Subject.StartsWith("more ", StringComparison.Ordinal)), c => Assert.True(c.InTrunk));
+    }
+
+    [Fact]
+    public async Task Branches_squash_merged_or_rebased_onto_the_trunk_are_proven_and_real_unpushed_work_is_not()
+    {
+        string Write(string file, string text)
+        {
+            File.WriteAllText(Path.Combine(Widget, file), text);
+            Git(Widget, "add", file);
+            return file;
+        }
+
+        string Commit(string subject)
+        {
+            Git(Widget, "commit", "-q", "-m", subject);
+            return Git(Widget, "rev-parse", "HEAD");
+        }
+
+        var lines = Enumerable.Range(1, 20).Select(i => $"line {i}").ToList();
+        Write("shared.txt", string.Join('\n', lines) + "\n");
+        Commit("shared file");
+        Git(Widget, "push", "-q", "origin", "main");
+
+        // "feature": two commits, pushed, squash-merged on the remote as one commit, then deleted there.
+        Git(Widget, "checkout", "-q", "-b", "feature");
+        Write("shared.txt", string.Join('\n', lines.Select(l => l == "line 15" ? "line 15, changed by the feature" : l)) + "\n");
+        Commit("feature: change line 15");
+        Write("feature.txt", "new\n");
+        Commit("feature: add a file");
+        Git(Widget, "push", "-q", "-u", "origin", "feature");
+
+        // "more": the feature plus one commit made after the merge. Not proven.
+        Git(Widget, "checkout", "-q", "-b", "more");
+        Write("more.txt", "after the merge\n");
+        Commit("more: after the merge");
+
+        // "picked": one commit, never pushed, cherry-picked onto main (as a rebase merge does).
+        Git(Widget, "checkout", "-q", "main");
+        Git(Widget, "checkout", "-q", "-b", "picked");
+        Write("picked.txt", "picked\n");
+        var pickedCommit = Commit("picked: one change");
+
+        // "spike": real work that is nowhere else.
+        Git(Widget, "checkout", "-q", "main");
+        Git(Widget, "checkout", "-q", "-b", "spike");
+        Write("spike.txt", "only here\n");
+        Commit("spike");
+
+        // Meanwhile main moves on in the same file, then takes the squash and the pick.
+        Git(Widget, "checkout", "-q", "main");
+        Write("shared.txt", string.Join('\n', lines.Select(l => l == "line 3" ? "line 3, changed on main" : l)) + "\n");
+        Commit("main: change line 3");
+        Git(Widget, "merge", "-q", "--squash", "feature");
+        var squash = Commit("Feature (#12)");
+        Git(Widget, "cherry-pick", pickedCommit);
+        var picked = Git(Widget, "rev-parse", "HEAD");
+        Git(Widget, "push", "-q", "origin", "main");
+        Git(Widget, "push", "-q", "origin", "--delete", "feature");
+        Git(Widget, "fetch", "-q", "--prune");
+
+        var entry = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget");
+        var git = entry.Git!;
+        BranchInfo Of(string name) => git.Branches.Single(b => b.Name == name);
+
+        Assert.True(Of("feature") is { OnRemote: false, UpstreamGone: true, UnpushedCount: 2 });
+        Assert.Equal(squash, Of("feature").SquashMergedInto);
+        Assert.Equal(picked, Of("picked").SquashMergedInto);
+        Assert.Null(Of("more").SquashMergedInto);
+        Assert.Null(Of("spike").SquashMergedInto);
+        Assert.Null(Of("main").SquashMergedInto);
+
+        // On the map, the feature's commits are marked; the commit made after the merge is not.
+        var graph = git.Graph!.Commits.Where(c => c.Sha != picked).ToDictionary(c => c.Subject); // the pick on main has the same subject
+        Assert.True(graph["feature: change line 15"] is { Unpushed: true, SquashMerged: true });
+        Assert.True(graph["feature: add a file"] is { Unpushed: true, SquashMerged: true });
+        Assert.True(graph["picked: one change"] is { Unpushed: true, SquashMerged: true });
+        Assert.True(graph["more: after the merge"] is { Unpushed: true, SquashMerged: false });
+        Assert.True(graph["spike"] is { Unpushed: true, SquashMerged: false });
+
+        // Safety: only what is really only here is at risk.
+        var safety = DevDash.Core.Safety.RepoSafety.Assess(entry, DateTimeOffset.UtcNow);
+        Assert.Equal(["more", "spike"], safety.Risks.Select(r => r.Subject).Order());
+    }
+
+    [Fact]
+    public async Task Remote_branches_are_listed_newest_first_without_the_remote_head()
+    {
+        GitAt("2026-01-01T10:00:00Z", Widget, "checkout", "-q", "-b", "older");
+        GitAt("2026-01-01T10:00:00Z", Widget, "commit", "-q", "--allow-empty", "-m", "older");
+        GitAt("2026-03-01T10:00:00Z", Widget, "checkout", "-q", "-b", "newer");
+        GitAt("2026-03-01T10:00:00Z", Widget, "commit", "-q", "--allow-empty", "-m", "newer");
+        Git(Widget, "push", "-q", "origin", "older", "newer");
+        Git(Widget, "fetch", "-q", "origin");
+        Git(Widget, "remote", "set-head", "origin", "main");
+        Git(Widget, "checkout", "-q", "main");
+        Git(Widget, "branch", "-q", "-D", "older"); // nothing tracks it locally any more
+
+        var git = (await CreateScanner(autoFetch: false).ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.CachedOnly), CancellationToken.None)).Entries.Single(e => e.Name == "widget").Git!;
+
+        var remote = git.RemoteBranches!;
+        var names = remote.Select(r => r.Name).ToList();
+        Assert.Equal(3, names.Count);
+        Assert.Contains("origin/main", names);
+        Assert.True(names.IndexOf("origin/newer") < names.IndexOf("origin/older"));
+        Assert.Equal(remote.OrderByDescending(r => r.Date).Select(r => r.Name), names);
+        Assert.DoesNotContain(remote, r => r.Name.EndsWith("/HEAD", StringComparison.Ordinal));
+        Assert.All(remote, r => Assert.Equal("origin", r.Remote));
+        Assert.Equal(new DateTimeOffset(2026, 3, 1, 10, 0, 0, TimeSpan.Zero), remote.Single(r => r.Name == "origin/newer").Date);
+        Assert.Equal(Git(Widget, "rev-parse", "origin/older"), remote.Single(r => r.Name == "origin/older").Sha);
+
+        // Optional on the wire: an older agent's snapshot reads as before.
+        Assert.Null(System.Text.Json.JsonSerializer.Deserialize<GitState>("{}", SnapshotSchema.JsonOptions)!.RemoteBranches);
     }
 
     private MachineScanner CreateScanner(bool autoFetch)

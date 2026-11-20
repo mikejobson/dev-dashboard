@@ -18,12 +18,14 @@ public sealed class RepoScanner
     private readonly CommitGraphCollector _graphs;
     private readonly SafetyCollector _safety;
     private readonly ActivityCollector _activity;
+    private readonly SquashDetector _squash;
 
     public RepoScanner(GitRunner git, FetchService fetch, IOptionsMonitor<AgentOptions> options, TimeProvider? time = null)
     {
         _activity = new ActivityCollector(git, time);
         _git = git;
         _graphs = new CommitGraphCollector(git);
+        _squash = new SquashDetector(git);
         _safety = new SafetyCollector(git, options);
         _fetch = fetch;
         _options = options;
@@ -133,6 +135,9 @@ public sealed class RepoScanner
             ct).ConfigureAwait(false);
         branches = checkedBranches;
 
+        // Branches whose unpushed commits are on the trunk under other names (squash merged, rebased).
+        branches = await _squash.DetectAsync(path, graphTrunk, branches, timeout, ct).ConfigureAwait(false);
+
         var worktrees = WorktreeListParser.Parse((await Run("worktree", "list", "--porcelain").ConfigureAwait(false)).StdOut);
 
         // T3 Code's own worktrees (~/.t3/worktrees/…) are reported here, on the repository they belong to, and marked as T3's.
@@ -175,6 +180,7 @@ public sealed class RepoScanner
                     .. stashes.Where(s => s.BaseSha is not null).Select(s => s.BaseSha!),
                 ],
                 HasRemotes = remotes.Count > 0,
+                SquashMergedTips = branches.Where(b => b.SquashMergedInto is not null).Select(b => b.Sha).ToList(),
             },
             timeout,
             ct).ConfigureAwait(false);
@@ -184,7 +190,8 @@ public sealed class RepoScanner
             ? await _activity.CollectAsync(path, commonDir, timeout, ct).ConfigureAwait(false)
             : null;
 
-        var (trackedAt, untrackedAt) = NewestChange(path, status.Paths);
+        var (trackedAt, untrackedAt, recent) = NewestChange(path, status.Paths);
+        var remoteBranches = remotes.Count == 0 ? [] : await RemoteBranchesAsync(args => Run(args), remotes).ConfigureAwait(false);
 
         return new GitState
         {
@@ -201,6 +208,7 @@ public sealed class RepoScanner
             Conflicted = status.Conflicted,
             NewestTrackedChangeAt = trackedAt,
             NewestUntrackedAt = untrackedAt,
+            RecentChanges = recent,
             LastCommit = lastCommit,
             DefaultBranch = defaultBranch,
             IsLinkedWorktree = isLinked,
@@ -214,12 +222,59 @@ public sealed class RepoScanner
             Graph = graph,
             Safety = safety,
             Activity = activity,
+            RemoteBranches = remoteBranches,
         };
     }
 
-    private static (DateTimeOffset? Tracked, DateTimeOffset? Untracked) NewestChange(string repo, IReadOnlyList<ChangedPath> paths)
+    /// <summary>
+    /// Every remote-tracking branch but <c>*/HEAD</c>, newest commit first, capped at
+    /// <see cref="RemoteBranchInfo.MaxCount"/>. One <c>for-each-ref</c>.
+    /// </summary>
+    internal static async Task<IReadOnlyList<RemoteBranchInfo>> RemoteBranchesAsync(Func<string[], Task<GitResult>> run, IReadOnlyList<RemoteInfo> remotes)
+    {
+        var listed = await run(["for-each-ref", "--sort=-committerdate", "--format=%(objectname)%1f%(refname)%1f%(committerdate:iso-strict)%1f%(symref)", "refs/remotes"]).ConfigureAwait(false);
+        if (!listed.Ok)
+        {
+            return [];
+        }
+
+        const string prefix = "refs/remotes/";
+        var names = remotes.Select(r => r.Name).Distinct(StringComparer.Ordinal).OrderByDescending(n => n.Length).ToList();
+        var result = new List<RemoteBranchInfo>();
+        foreach (var line in listed.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var f = line.TrimEnd('\r').Split(Sep);
+            if (f.Length != 4 || !CommitLogParser.IsSha(f[0]) || !f[1].StartsWith(prefix, StringComparison.Ordinal) || f[3].Length > 0 || f[1].EndsWith("/HEAD", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var name = f[1][prefix.Length..];
+            result.Add(new RemoteBranchInfo
+            {
+                Name = name,
+                Remote = names.FirstOrDefault(r => name.StartsWith(r + "/", StringComparison.Ordinal)),
+                Sha = f[0],
+                Date = DateTimeOffset.TryParse(f[2], CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ? date : null,
+            });
+            if (result.Count == RemoteBranchInfo.MaxCount)
+            {
+                break;
+            }
+        }
+
+        return result;
+    }
+
+
+    /// <summary>
+    /// The newest mtime of the changed tracked and untracked paths, and the few most recently written
+    /// paths (names only, for "Where I left off"). A deleted file has no mtime and is left out.
+    /// </summary>
+    internal static (DateTimeOffset? Tracked, DateTimeOffset? Untracked, IReadOnlyList<RecentChange>? Recent) NewestChange(string repo, IReadOnlyList<ChangedPath> paths)
     {
         DateTimeOffset? tracked = null, untracked = null;
+        var seen = new List<RecentChange>();
         foreach (var changed in paths.Take(MaxStatPaths))
         {
             DateTime time;
@@ -253,9 +308,14 @@ public sealed class RepoScanner
             {
                 untracked = untracked is null || value > untracked ? value : untracked;
             }
+
+            seen.Add(new RecentChange { Path = changed.Path, ModifiedAt = value, Untracked = changed.Tracked ? null : true });
         }
 
-        return (tracked, untracked);
+        IReadOnlyList<RecentChange>? recent = seen.Count == 0
+            ? null
+            : seen.OrderByDescending(c => c.ModifiedAt).ThenBy(c => c.Path, StringComparer.Ordinal).Take(RecentChange.MaxPerRepo).ToList();
+        return (tracked, untracked, recent);
     }
 
     /// <summary>

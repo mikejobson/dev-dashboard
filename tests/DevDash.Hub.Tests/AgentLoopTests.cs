@@ -199,6 +199,83 @@ public sealed class AgentLoopTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_dev, "evil")));
     }
 
+    /// <summary>
+    /// Archive and restore end to end: a project with no remote (at risk, so never removable) is archived into a
+    /// temporary archive folder, the tombstone records the archive and its checksum from the agent's result, and
+    /// the tombstone's own restore action brings every file back.
+    /// </summary>
+    [Fact]
+    public async Task Archive_an_at_risk_project_then_restore_it()
+    {
+        var widget = Path.Combine(_dev, "widget");
+        File.WriteAllText(Path.Combine(widget, "notes.txt"), "not committed anywhere\n");
+        var trash = Path.Combine(_root, "trash");
+        var archiveFolder = Directory.CreateDirectory(Path.Combine(_root, "archive")).FullName;
+
+        using var factory = new HubFactory();
+        var options = new StaticOptions(new AgentOptions
+        {
+            Roots = [_dev],
+            MachineId = "loop-box",
+            HubUrl = "http://localhost/",
+            ApiKey = await factory.IssueKeyAsync("loop"),
+            Actions = new ActionsOptions { Enabled = true },
+            Archive = new ArchiveOptions { Folder = archiveFolder, MarginMegabytes = 0 },
+        });
+        var git = new GitRunner();
+        var scanner = new MachineScanner(
+            new RepoScanner(git, new FetchService(git, options, NullLogger<FetchService>.Instance), options),
+            new SizeCache(Path.Combine(_root, "sizes.json")), options, NullLogger<MachineScanner>.Instance);
+        var agentHttp = factory.CreateClient();
+        var removals = new RemovalLog(Path.Combine(_root, "removed.json"));
+
+        async Task PushSnapshotAsync()
+        {
+            var snapshot = await scanner.ScanAsync(new ScanRequest(AllowFetch: false, SizeMode.Force), CancellationToken.None);
+            await new HubClient(agentHttp, options).PushAsync(snapshot, CancellationToken.None);
+        }
+
+        var validator = new ActionValidator(git, options, removals);
+        var worker = new ActionWorker(
+            new ActionsClient(agentHttp, options),
+            new ActionExecutor(git, validator, options, NullLogger<ActionExecutor>.Instance,
+                archives: new ArchiveActions(git, options, NullLogger<ArchiveActions>.Instance, scanner, new FolderTrash(trash), removals)),
+            new RescanRequests(options), options, NullLogger<ActionWorker>.Instance);
+
+        await PushSnapshotAsync();
+        var queue = factory.Services.GetRequiredService<ActionQueue>();
+        var tombstones = factory.Services.GetRequiredService<TombstoneStore>();
+        var row = factory.Services.GetRequiredService<SafetyService>().Get().Single(r => r.Entry.Name == "widget");
+        Assert.True(row.Safety.IsAtRisk);
+        Assert.Equal(archiveFolder, row.Machine.Machine.Archive?.Folder);
+        Assert.True(queue.Availability(row.Machine, AgentActionKind.ArchiveProject).Available);
+
+        var queued = await queue.QueueAsync("loop-box", AgentAction.ArchiveProject(row.Entry.Path, row.Safety.Fingerprint), "me@example.com");
+        Assert.True(queued.Ok, queued.Error);
+        Assert.Equal(1, await worker.PollOnceAsync(CancellationToken.None));
+
+        var archived = (await queue.RecentAsync()).Single(a => a.Kind == AgentActionKind.ArchiveProject);
+        Assert.True(archived.Status == AgentActionStatus.Succeeded, archived.Output);
+        Assert.False(Directory.Exists(widget));
+
+        await PushSnapshotAsync();
+        var tombstone = Assert.Single(await tombstones.ListAsync());
+        Assert.True(tombstone.IsArchived);
+        Assert.StartsWith(archiveFolder, tombstone.Tombstone.ArchivePath);
+        Assert.True(File.Exists(tombstone.Tombstone.ArchivePath));
+        Assert.Equal(tombstone.Tombstone.ArchiveSha256, tombstone.Manifest!.ArchiveSha256);
+        Assert.Null(tombstone.CloneAction); // no remote to clone from: the archive is the only way back
+
+        var restore = await queue.QueueAsync("loop-box", tombstone.RestoreAction(widget)!, "me@example.com");
+        Assert.True(restore.Ok, restore.Error);
+        Assert.Equal(1, await worker.PollOnceAsync(CancellationToken.None));
+        var restored = (await queue.RecentAsync()).Single(a => a.Kind == AgentActionKind.RestoreArchive);
+        Assert.True(restored.Status == AgentActionStatus.Succeeded, restored.Output);
+        Assert.Equal("not committed anywhere\n", File.ReadAllText(Path.Combine(widget, "notes.txt")));
+        Assert.Contains("old-fix", Git(widget, "branch", "--list"));
+        Assert.Empty(await tombstones.ListAsync());
+    }
+
     private static string Git(string workingDirectory, params string[] args)
     {
         var psi = new ProcessStartInfo("git") { WorkingDirectory = workingDirectory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };

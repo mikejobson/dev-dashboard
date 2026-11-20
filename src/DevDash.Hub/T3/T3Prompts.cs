@@ -6,6 +6,9 @@ using DevDash.Core.GitHub;
 
 namespace DevDash.Hub.T3;
 
+/// <summary>One entry of the "Start from" list: the ref passed to T3 Code, its group, and the text shown.</summary>
+public sealed record BaseOption(string Value, string Group, string Label);
+
 /// <summary>An issue and its latest comments, as the prompt template sees them. Everything but the repo and number is untrusted.</summary>
 public sealed record IssuePromptInput
 {
@@ -199,6 +202,62 @@ public static partial class T3Prompts
         }
 
         return git!.Remotes.Any(r => r.Name == "origin") ? $"origin/{branch}" : branch;
+    }
+
+    /// <summary>
+    /// What a new thread's worktree can start from, for the "Start from" list: the default base first, then the
+    /// remote branches the scan knows (upstreams and the trunk), then local branches, newest commit first.
+    /// <paramref name="current"/> is kept as an option when it is none of these (a tag, a sha, a caller's choice).
+    /// </summary>
+    public static IReadOnlyList<BaseOption> BaseOptions(GitState? git, string? current = null)
+    {
+        var options = new List<BaseOption>();
+        void Add(string? value, string group, string? note = null)
+        {
+            if (!string.IsNullOrWhiteSpace(value) && options.All(o => o.Value != value))
+            {
+                options.Add(new BaseOption(value, group, note is null ? value : $"{value} ({note})"));
+            }
+        }
+
+        Add(DefaultBase(git), "Remote", "default");
+        if (git is not null)
+        {
+            Add(git.Graph?.TrunkRef, "Remote", "trunk");
+            // Every remote branch, newest first, when the agent lists them (0.8.0+); else the upstreams the graph knows.
+            var remote = git.RemoteBranches is { Count: > 0 }
+                ? git.RemoteBranches.Select(r => r.Name)
+                : (git.Graph?.RemoteRefs ?? []).Select(r => r.Name)
+                    .Concat(git.Branches.Where(b => b is { Upstream: not null, UpstreamGone: false }).Select(b => b.Upstream!))
+                    .Order(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in remote.Where(n => !n.EndsWith("/HEAD", StringComparison.Ordinal)))
+            {
+                Add(r, "Remote");
+            }
+
+            foreach (var b in git.Branches.OrderByDescending(b => b.LastCommitDate ?? DateTimeOffset.MinValue))
+            {
+                var notes = new List<string>();
+                if (b.IsCurrent)
+                {
+                    notes.Add("checked out");
+                }
+
+                if (b.Upstream is null || b.UpstreamGone)
+                {
+                    notes.Add("local only");
+                }
+                else if (b.Ahead > 0)
+                {
+                    notes.Add($"{b.Ahead} unpushed");
+                }
+
+                Add(b.Name, "Local", notes.Count == 0 ? null : string.Join(", ", notes));
+            }
+        }
+
+        Add(current, "Other");
+        return options;
     }
 
     /// <summary>For a pull request whose checks fail: the run to look at, and what to do.</summary>

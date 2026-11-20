@@ -10,6 +10,9 @@ public enum DashboardChange
 
     /// <summary>An alert opened, cleared or was sent, or the alert settings changed.</summary>
     Alerts,
+
+    /// <summary>A repo's tags, note or pin changed.</summary>
+    Notes,
 }
 
 /// <summary>

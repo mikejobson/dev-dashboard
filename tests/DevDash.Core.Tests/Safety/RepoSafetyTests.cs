@@ -94,6 +94,19 @@ public class RepoSafetyTests
     }
 
     [Fact]
+    public void A_branch_the_agent_proved_squash_merged_is_not_at_risk_but_one_without_proof_still_is()
+    {
+        var squashed = Local("feature/done", unpushed: 4, oldestDays: 20, upstream: "origin/feature/done", gone: true) with { SquashMergedInto = new string('a', 40) };
+        var safe = Assess(Clean(g => g with { Branches = [.. g.Branches, squashed] }));
+        Assert.Equal(SafetyVerdict.Safe, safe.Verdict);
+
+        // Without the proof (an older agent, or no matching change on the trunk) the same branch is at risk.
+        var unproven = Assess(Clean(g => g with { Branches = [.. g.Branches, squashed with { SquashMergedInto = null }] }));
+        Assert.Equal(SafetyVerdict.AtRisk, unproven.Verdict);
+        Assert.Equal(SafetyReasonKind.LocalOnlyBranch, Assert.Single(unproven.Reasons).Kind);
+    }
+
+    [Fact]
     public void Uncommitted_changes_untracked_files_and_stashes_are_at_risk_worst_first()
     {
         var safety = Assess(Clean(

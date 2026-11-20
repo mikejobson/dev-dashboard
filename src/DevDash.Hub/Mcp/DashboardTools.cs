@@ -29,7 +29,8 @@ public sealed class DashboardTools(
     GitHubStore github,
     AgentUpdates updates,
     IDbContextFactory<DevDashDbContext> dbFactory,
-    TimeProvider time)
+    TimeProvider time,
+    RepoNotes notes)
 {
     private DateTimeOffset Now => time.GetUtcNow();
 
@@ -79,10 +80,12 @@ public sealed class DashboardTools(
     [McpServerTool(Name = "list_projects", Title = "List projects", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description("Lists working trees across all machines, one row per clone (a repo cloned on two machines is two rows; linked worktrees are rows " +
                  "marked worktree=true). Each row: project name, repo key, machine, path, branch, uncommitted (staged+unstaged+conflicted), untracked, " +
-                 "ahead/behind its upstream, safety verdict (at risk / safe to remove / safe with caveats / not sure) and last activity. " +
+                 "ahead/behind its upstream, safety verdict (at risk / safe to remove / safe with caveats / not sure), last activity, " +
+                 "and the user's own tags, one-line note and pinned flag for the project when set. " +
                  "Use the filters to narrow it; use get_project for one project in depth.")]
     public async Task<string> ListProjects(
         [Description("Only this machine (hostname or machine id).")] string? machine = null,
+        [Description("Only projects the user tagged with this tag (with or without a leading #), e.g. 'client'.")] string? tag = null,
         [Description("Only projects whose name, key, path or branch contains this text.")] string? text = null,
         [Description("Only clones whose safety verdict is 'at risk' (holding work that exists nowhere else).")] bool only_at_risk = false,
         [Description("Only clones with uncommitted or untracked changes.")] bool only_dirty = false,
@@ -91,7 +94,9 @@ public sealed class DashboardTools(
         CancellationToken ct = default)
     {
         var verdicts = safety.ByClone();
+        var noteSet = await notes.GetAsync(ct);
         var rows = (await catalog.GetAsync(ct))
+            .Where(r => noteSet.Matches(r.Key, tag))
             .SelectMany(r => r.Clones.Select(c => (Row: r, Clone: c)))
             .Where(x => McpLookup.MachineMatches(x.Clone.Machine, machine))
             .Where(x => string.IsNullOrWhiteSpace(text)
@@ -130,6 +135,9 @@ public sealed class DashboardTools(
                 behind = x.Clone.Git?.Behind,
                 safety = x.Safety is null ? null : SafetyView.VerdictLabel(x.Safety.Verdict),
                 lastActivity = LastActivity(x.Clone),
+                tags = noteSet.For(x.Row.Key).Tags is { Count: > 0 } tags ? tags : null,
+                note = noteSet.For(x.Row.Key).Note is { Length: > 0 } text ? text : null,
+                pinned = noteSet.IsPinned(x.Row.Key) ? true : (bool?)null,
             }),
         });
     }
@@ -153,6 +161,7 @@ public sealed class DashboardTools(
         var active = (await findings.GetAsync(ct))
             .Where(v => v.IsActive && (string.Equals(v.Finding.RepoKey, row.Key, StringComparison.OrdinalIgnoreCase) || (v.Finding.Path is { } p && paths.Contains(p))))
             .ToList();
+        var note = (await notes.GetAsync(ct)).For(row.Key);
 
         return McpOutput.Json(new
         {
@@ -162,6 +171,9 @@ public sealed class DashboardTools(
             owner = row.Owner,
             kind = row.Kind,
             description = row.Description?.Text,
+            tags = note.Tags.Count > 0 ? note.Tags : null,
+            note = note.Note.Length > 0 ? note.Note : null,
+            pinned = note.Pinned ? true : (bool?)null,
             github = row.GitHub is not { } gh ? null : new
             {
                 gh.NameWithOwner,
@@ -222,6 +234,7 @@ public sealed class DashboardTools(
                     merged = b.MergedIntoDefault,
                     onRemote = b.OnRemote,
                     unpushed = b.UnpushedCount,
+                    squashMergedInto = b.SquashMergedInto,
                     lastCommit = b.LastCommitDate,
                     b.Subject,
                 }),

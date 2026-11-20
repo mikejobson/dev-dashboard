@@ -21,8 +21,11 @@
                 <dl class="kv">
                     <dt>Machine</dt>
                     <dd>@machine <span class="muted mono">@Machine.MachineId</span></dd>
-                    <dt>@(Action.Kind == AgentActionKind.Clone ? "Folder" : "Repo")</dt>
-                    <dd class="mono">@Action.RepoPath</dd>
+                    @if (Action.RepoPath is not null)
+                    {
+                        <dt>@(Action.Kind == AgentActionKind.Clone ? "Folder" : "Repo")</dt>
+                        <dd class="mono">@Action.RepoPath</dd>
+                    }
                     <dt>Action</dt>
                     <dd>@AgentActions.Summary(Action)</dd>
                 </dl>

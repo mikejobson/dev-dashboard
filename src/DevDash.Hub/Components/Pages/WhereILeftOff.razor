@@ -1,0 +1,98 @@
+@page "/left-off"
+@inherits LivePage
+@inject RepoCatalog Catalog
+@inject RepoNotes Notes
+@inject ActionBoard Actions
+@inject NavigationManager Nav
+
+<PageTitle>Where I left off · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Where I left off</h1>
+        <p>The projects you touched most recently, on any machine: last commit, uncommitted edits or T3 thread activity.</p>
+    </div>
+    <span class="muted small">@Fmt.Count(_items.Count(i => i.Group != LeftOffGroup.Pinned), "project") in the last @Fmt.Count(ActiveDays, "day")</span>
+</div>
+
+<div class="toolbar">
+    <span class="sort-links small">
+        <span class="muted">Window</span>
+        @foreach (var days in new[] { 3, 7, 14, 30 })
+        {
+            <a class="sort @(days == ActiveDays ? "active" : "")" href="@Url(days, Tag, Quiet)">@(days) days</a>
+        }
+    </span>
+    @if (_tags.Count > 0)
+    {
+        <select aria-label="Tag" value="@(ActiveTag ?? "")" @onchange="e => Nav.NavigateTo(Url(ActiveDays, e.Value?.ToString(), Quiet), replace: true)">
+            <option value="">All tags</option>
+            @foreach (var (tag, count) in _tags)
+            {
+                <option value="@tag">#@tag (@count)</option>
+            }
+        </select>
+    }
+    @if (_quietTags.Count > 0)
+    {
+        <a class="btn toggle @(Quiet ? "on" : "")" href="@Url(ActiveDays, Tag, !Quiet)"
+           title="Repos tagged @string.Join(", ", _quietTags.Select(t => "#" + t)) are left out unless this is on">Show @string.Join(", ", _quietTags.Select(t => "#" + t))</a>
+    }
+</div>
+
+@if (ActiveTag is { } shownTag)
+{
+    <div class="banner info">Only repos tagged <strong>#@shownTag</strong>. <a href="@Url(ActiveDays, null, Quiet)">Show all</a></div>
+}
+
+@if (Loaded)
+{
+    <LeftOffList Items="_items" Now="Now" TagUrl="@(t => Url(ActiveDays, t, Quiet))" QuietTags="_quietTags"
+                 Empty="@($"Nothing was committed, edited or worked on in T3 in the last {Fmt.Count(ActiveDays, "day")}{(ActiveTag is null ? "" : $" in repos tagged #{ActiveTag}")}.")" />
+}
+
+@code {
+    /// <summary><c>?days=</c>: how far back to look. 14 by default, 1 to 90.</summary>
+    [SupplyParameterFromQuery] public int? Days { get; set; }
+
+    /// <summary><c>?tag=</c>: only repos with this tag.</summary>
+    [SupplyParameterFromQuery] public string? Tag { get; set; }
+
+    /// <summary><c>?quiet=1</c>: also list repos with a quiet tag (<c>archived</c>).</summary>
+    [SupplyParameterFromQuery(Name = "quiet")] public string? QuietParam { get; set; }
+
+    private IReadOnlyList<LeftOffItem> _items = [];
+    private IReadOnlyList<(string Tag, int Count)> _tags = [];
+    private IReadOnlySet<string> _quietTags = new HashSet<string>();
+
+    private int ActiveDays => Math.Clamp(Days ?? LeftOffQuery.DefaultDays, 1, 90);
+
+    private string? ActiveTag => RepoTags.Normalize(Tag);
+
+    private bool Quiet => QuietParam is "1" or "true";
+
+    private string Url(int days, string? tag, bool quiet) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("left-off").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    {
+        ["days"] = days == LeftOffQuery.DefaultDays ? null : days,
+        ["tag"] = RepoTags.Normalize(tag),
+        ["quiet"] = quiet ? "1" : null,
+    });
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Loaded)
+        {
+            await LoadAsync();
+        }
+    }
+
+    protected override async Task LoadAsync()
+    {
+        var rows = await Catalog.GetAsync();
+        var notes = await Notes.GetAsync();
+        await Actions.LoadAsync();
+        _tags = notes.TagCounts();
+        _quietTags = notes.QuietTags;
+        _items = LeftOff.Build(rows, notes, new LeftOffQuery { Days = ActiveDays, Tag = ActiveTag, IncludeQuiet = Quiet || (ActiveTag is { } t && _quietTags.Contains(t)) }, Now, Time.LocalTimeZone);
+    }
+}

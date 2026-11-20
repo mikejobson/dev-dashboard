@@ -132,7 +132,7 @@ public sealed class ActionWorker(
         var restartNeeded = false;
         foreach (var item in pending.Where(p => p.Action is not { Kind: AgentActionKind.Refresh }))
         {
-            var outcome = await executor.ExecuteAsync(item.Action, ct).ConfigureAwait(false);
+            var outcome = await executor.ExecuteAsync(item.Action, text => _ = ProgressAsync(item.Id, text, ct), ct).ConfigureAwait(false);
             await ReportAsync(item.Id, outcome, ct).ConfigureAwait(false);
             restartNeeded |= outcome.RestartRequired;
             foreach (var path in outcome.AffectedPaths)
@@ -160,6 +160,19 @@ public sealed class ActionWorker(
         }
 
         return new PollResult(pending.Count, Failed: false);
+    }
+
+    /// <summary>Tells the hub how a long action is getting on. Best effort: a hub that does not take it (before 0.8.0), or a failed call, changes nothing.</summary>
+    private async Task ProgressAsync(string id, string text, CancellationToken ct)
+    {
+        try
+        {
+            await hub.ProgressAsync(id, text, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or OperationCanceledException)
+        {
+            logger.LogDebug("Could not report progress of action {Id}: {Error}", id, ex.Message);
+        }
     }
 
     private async Task ReportAsync(string id, ActionOutcome outcome, CancellationToken ct)
@@ -197,6 +210,7 @@ public static class ActionServices
         services.AddSingleton<ITrash>(sp => Trash.ForThisMachine(sp.GetRequiredService<IOptionsMonitor<AgentOptions>>().CurrentValue.Actions));
         services.AddSingleton<ActionValidator>();
         services.AddSingleton<ProjectActions>();
+        services.AddSingleton<ArchiveActions>();
         services.AddSingleton<ActionExecutor>();
         // No client-wide timeout: a poll is held open by the hub, and ActionsClient gives every call its own deadline.
         services.AddHttpClient<ActionsClient>(c => c.Timeout = Timeout.InfiniteTimeSpan);

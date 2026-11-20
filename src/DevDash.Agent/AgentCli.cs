@@ -36,6 +36,8 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
           --no-watch          Do not watch for file changes between scans
           --no-deps           Do not run `dotnet list package` / `npm audit` in the background (on by default, once a day per repo)
           --no-t3             Do not look for T3 Code: no threads in the snapshot, no T3 actions, ~/.t3/projects not scanned
+          --no-disk           Do not measure developer caches (NuGet, npm, Docker, Xcode…) in the background (on by default, every 6 h)
+          --no-dev-servers    Do not list listening dev servers with each scan
           --enable-actions    Let the dashboard queue allowlisted git fixes for this machine (off by default)
           --updates <mode>    Self-update: off, notify (default: when asked from the dashboard) or auto
 
@@ -87,6 +89,12 @@ public sealed record AgentCli(string Command, bool DryRun, bool Sizes, Dictionar
                     break;
                 case "--no-t3":
                     overrides["Agent:T3:Enabled"] = "false";
+                    break;
+                case "--no-disk":
+                    overrides["Agent:Disk:Enabled"] = "false";
+                    break;
+                case "--no-dev-servers":
+                    overrides["Agent:DevServers:Enabled"] = "false";
                     break;
                 case "--enable-actions":
                     overrides["Agent:Actions:Enabled"] = "true";

@@ -203,9 +203,32 @@ public sealed class ActionQueue(
                 return new QueueOutcome(null, noClone);
             }
         }
+        else if (action.Kind == AgentActionKind.CleanCache)
+        {
+            // §21: only a cache the machine reported, with a recipe, that its agent said it can clean.
+            if (machine.Machine.Disk?.Items.FirstOrDefault(i => i.Id == action.CacheId) is not { Cleanable: true } item || !DiskCaches.HasRecipe(DiskCaches.Find(item.Id)!.Id))
+            {
+                return new QueueOutcome(null, $"{machine.Machine.Hostname} does not report {DiskCaches.Find(action.CacheId)?.Title ?? action.CacheId} as something it can clean.");
+            }
+        }
+        else if (action.Kind == AgentActionKind.RestoreArchive)
+        {
+            // Only an archive this hub saw made, with the checksum it reported, into a free folder in a scan root.
+            if (await RestoreRefusalAsync(machine, action, ct) is { } noRestore)
+            {
+                return new QueueOutcome(null, noRestore);
+            }
+        }
         else if (!ReportedRepoPaths(machine.Snapshot).Contains(action.RepoPath!))
         {
             return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports a repository at {action.RepoPath}.");
+        }
+        else if (action.Kind == AgentActionKind.StopDevServer
+            && machine.Machine.DevServers?.Servers.Any(s => s.Pid == action.Pid && s.RepoPath == action.RepoPath && s.Command == action.ExpectedCommand
+                && s.StartedAt is { } started && DevServerText.SameStart(started, action.ExpectedStartedAt!.Value)) != true)
+        {
+            // The agent checks the process again itself. This catches a page that has been open while the server restarted.
+            return new QueueOutcome(null, $"{machine.Machine.Hostname} no longer reports that server (process {action.Pid}) running in {action.RepoPath}.");
         }
 
         var now = time.GetUtcNow();
@@ -217,6 +240,15 @@ public sealed class ActionQueue(
             if (RemoveRefusal(machine, action, removing) is { } noRemove)
             {
                 return new QueueOutcome(null, noRemove);
+            }
+        }
+        else if (action.Kind == AgentActionKind.ArchiveProject)
+        {
+            // The same re-check as a removal, but any verdict will do: the archive keeps everything.
+            removing = RepoSafety.AssessAll(machine.Snapshot, now).FirstOrDefault(c => c.Entry.Path == action.RepoPath);
+            if (Archives.Refusal(machine, action, removing) is { } noArchive)
+            {
+                return new QueueOutcome(null, noArchive);
             }
         }
         else if (action.Kind == AgentActionKind.CleanBuildDirs)
@@ -274,7 +306,8 @@ public sealed class ActionQueue(
                 DefaultBranch = git.DefaultBranch,
                 Branch = git.Branch,
                 HeadSha = git.HeadSha,
-                SizeBytes = removing.Safety.FreedBytes,
+                SizeBytes = action.Kind == AgentActionKind.ArchiveProject ? removing.Safety.TotalBytes : removing.Safety.FreedBytes,
+                Kind = action.Kind == AgentActionKind.ArchiveProject ? RemovedProjectKinds.Archived : null,
                 ActionId = entity.Id,
                 RemovedBy = entity.QueuedBy,
                 QueuedAt = now,
@@ -361,11 +394,16 @@ public sealed class ActionQueue(
                 .OrderBy(a => a.Id)
                 .ToListAsync(ct))
             .Where(a => Allows(machine, a.Kind))
-            .Take(MaxPerClaim)
+            .Where(a => a.ExpiresAt > now)
             .ToList();
 
+        // A long action (a clone, an archive) is the last one handed out in a claim: the agent runs a claim's actions
+        // one after another, and anything claimed behind an hour-long archive would outrun its lease while it waited.
+        var cut = queued.FindIndex(a => AgentActions.IsLongRunning(a.Kind));
+        queued = queued.Take(Math.Min(MaxPerClaim, cut < 0 ? int.MaxValue : cut + 1)).ToList();
+
         var claimed = new List<PendingAgentAction>();
-        foreach (var row in queued.Where(a => a.ExpiresAt > now))
+        foreach (var row in queued)
         {
             AgentAction? action;
             try
@@ -422,7 +460,7 @@ public sealed class ActionQueue(
             return false;
         }
 
-        await SettleTombstonesAsync(db, id, result.Succeeded, now, ct);
+        await SettleTombstonesAsync(db, id, result, now, ct);
         await T3.T3Settlement.SettleAsync(db, id, result.Succeeded, result.Thread, output, now, ct);
         logger.LogInformation("Action {Id} on {Machine} {Status} (exit {Exit})", id, owner, status, result.ExitCode);
         notifier.Notify(DashboardChange.Actions);
@@ -438,6 +476,7 @@ public sealed class ActionQueue(
         {
             AgentActionKind.UpdateAgent => UpdateOptions.LeaseMinutes,
             AgentActionKind.Clone => Math.Max(Options.CloneLeaseMinutes, Options.LeaseMinutes),
+            AgentActionKind.ArchiveProject or AgentActionKind.RestoreArchive => Math.Max(Options.ArchiveLeaseMinutes, Options.LeaseMinutes),
             _ => Options.LeaseMinutes,
         }));
 
@@ -545,20 +584,26 @@ public sealed class ActionQueue(
     /// What a finished action means for the removed-projects list: a removal that worked confirms its
     /// tombstone, one that did not drops it, and a clone that worked ends the tombstone for that folder.
     /// </summary>
-    private static async Task SettleTombstonesAsync(DevDashDbContext db, int actionId, bool succeeded, DateTimeOffset now, CancellationToken ct)
+    private static async Task SettleTombstonesAsync(DevDashDbContext db, int actionId, ActionResultRequest result, DateTimeOffset now, CancellationToken ct)
     {
+        var succeeded = result.Succeeded;
         if (await db.AgentActions.AsNoTracking().FirstOrDefaultAsync(a => a.Id == actionId, ct) is not { } row)
         {
             return;
         }
 
-        if (row.Kind == AgentActionKind.RemoveProject)
+        if (row.Kind is AgentActionKind.RemoveProject or AgentActionKind.ArchiveProject)
         {
             if (succeeded)
             {
-                // An older tombstone for the same folder is replaced by this one.
-                await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.Path == row.RepoPath && r.ActionId != actionId).ExecuteDeleteAsync(ct);
-                await db.RemovedProjects.Where(r => r.ActionId == actionId).ExecuteUpdateAsync(s => s.SetProperty(r => r.RemovedAt, now), ct);
+                // An older removal's tombstone for the same folder is replaced by this one. An archive's is kept: its archive is still there.
+                await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.Path == row.RepoPath && r.ActionId != actionId && r.Kind == null).ExecuteDeleteAsync(ct);
+                var archive = row.Kind == AgentActionKind.ArchiveProject ? Archives.Recorded(result.Archive) : null;
+                await db.RemovedProjects.Where(r => r.ActionId == actionId).ExecuteUpdateAsync(s => s
+                    .SetProperty(r => r.RemovedAt, now)
+                    .SetProperty(r => r.ArchivePath, archive == null ? null : archive.ArchivePath)
+                    .SetProperty(r => r.ArchiveSha256, archive == null ? null : archive.Manifest.ArchiveSha256)
+                    .SetProperty(r => r.ManifestJson, archive == null ? null : JsonSerializer.Serialize(archive.Manifest, SnapshotSchema.JsonOptions)), ct);
             }
             else
             {
@@ -567,7 +612,13 @@ public sealed class ActionQueue(
         }
         else if (row.Kind == AgentActionKind.Clone && succeeded)
         {
-            await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.Path == row.RepoPath).ExecuteDeleteAsync(ct);
+            await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.Path == row.RepoPath && r.Kind == null).ExecuteDeleteAsync(ct);
+        }
+        else if (row.Kind == AgentActionKind.RestoreArchive && succeeded
+            && JsonSerializer.Deserialize<AgentAction>(row.ActionJson, SnapshotSchema.JsonOptions)?.ArchivePath is { } restored)
+        {
+            // The project is back: the archive stays on disk, the dashboard stops listing it.
+            await db.RemovedProjects.Where(r => r.MachineId == row.MachineId && r.ArchivePath == restored).ExecuteDeleteAsync(ct);
         }
     }
 
@@ -624,6 +675,63 @@ public sealed class ActionQueue(
         return TombstoneStore.AllowedUrls(tombstone, snapshots.Machines).Contains(action.Url!, StringComparer.Ordinal)
             ? null
             : "That URL is not a remote of the project that was removed.";
+    }
+
+    /// <summary>
+    /// Why the hub will not ask for this restore, or null: it must be an archive this hub saw made on that machine,
+    /// with the checksum the agent reported then, into a folder the machine does not report, inside one of its scan roots.
+    /// The agent checks the archive and the folder again itself.
+    /// </summary>
+    private async Task<string?> RestoreRefusalAsync(MachineView machine, AgentAction action, CancellationToken ct)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var tombstone = await db.RemovedProjects.AsNoTracking()
+            .Where(r => r.MachineId == machine.MachineId && r.Kind == RemovedProjectKinds.Archived && r.ArchivePath == action.ArchivePath && r.RemovedAt != null)
+            .OrderByDescending(r => r.Id)
+            .FirstOrDefaultAsync(ct);
+        if (tombstone is null)
+        {
+            return $"This hub has no record of an archive at {action.ArchivePath} on {machine.Machine.Hostname}.";
+        }
+
+        if (tombstone.ArchiveSha256 != action.ArchiveSha256)
+        {
+            return "That is not the checksum the archive was made with.";
+        }
+
+        if (RepoIdentity.Flatten(machine.Snapshot.Entries).Any(e => e.Path == action.RepoPath))
+        {
+            return $"{machine.Machine.Hostname} reports something at {action.RepoPath}. Choose a folder that does not exist.";
+        }
+
+        return Archives.InsideARoot(machine.Snapshot.Roots, action.RepoPath!)
+            ? null
+            : $"{action.RepoPath} is not inside one of the folders {machine.Machine.Hostname} scans ({string.Join(", ", machine.Snapshot.Roots)}).";
+    }
+
+    /// <summary>
+    /// What an agent says about a long action while it runs. Kept in the row's output until the result replaces it.
+    /// False when the action is not that machine's, or not running.
+    /// </summary>
+    public async Task<bool> ProgressAsync(string machineId, string actionId, string output, CancellationToken ct = default)
+    {
+        if (!int.TryParse(actionId, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var id))
+        {
+            return false;
+        }
+
+        var owner = snapshots.Get(machineId)?.MachineId ?? machineId;
+        var text = AgentActions.Truncate(output);
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var updated = await db.AgentActions
+            .Where(a => a.Id == id && a.MachineId == owner && a.Status == AgentActionStatus.Claimed)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.Output, text), ct);
+        if (updated == 1)
+        {
+            notifier.Notify(DashboardChange.Actions);
+        }
+
+        return updated == 1;
     }
 
     public static string Wire(int id) => id.ToString(System.Globalization.CultureInfo.InvariantCulture);

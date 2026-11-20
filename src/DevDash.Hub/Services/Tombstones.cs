@@ -15,6 +15,16 @@ public sealed record RemovedProjectView(RemovedProjectEntity Tombstone, MachineV
 
     /// <summary>The typed action that clones it back into the folder it was removed from. Null when there is no URL to clone.</summary>
     public AgentAction? CloneAction => Remote is { } remote ? AgentAction.CloneInto(Tombstone.Path, remote.Url, remote.Name) : null;
+
+    /// <summary>True when it was archived before it went to the trash.</summary>
+    public bool IsArchived => Tombstone.IsArchived;
+
+    /// <summary>The manifest the agent wrote beside the archive. Null for a plain removal, or before the agent reported it.</summary>
+    public ArchiveManifest? Manifest => TombstoneStore.ManifestOf(Tombstone);
+
+    /// <summary>The typed action that unpacks the archive into <paramref name="target"/>. Null when there is no archive to restore.</summary>
+    public AgentAction? RestoreAction(string target) =>
+        Tombstone is { ArchivePath: { } archive, ArchiveSha256: { } sha } ? AgentAction.RestoreArchive(archive, sha, target) : null;
 }
 
 /// <summary>
@@ -36,7 +46,8 @@ public sealed class TombstoneStore(IDbContextFactory<DevDashDbContext> dbFactory
         foreach (var row in rows)
         {
             var machine = snapshots.Get(row.MachineId);
-            if (machine is not null && RepoIdentity.Flatten(machine.Snapshot.Entries).Any(e => e.Path == row.Path))
+            // An archived project stays listed whatever is at its old path: the archive is still there to restore elsewhere.
+            if (machine is not null && !row.IsArchived && RepoIdentity.Flatten(machine.Snapshot.Entries).Any(e => e.Path == row.Path))
             {
                 continue;
             }
@@ -53,6 +64,18 @@ public sealed class TombstoneStore(IDbContextFactory<DevDashDbContext> dbFactory
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         await db.RemovedProjects.Where(r => r.Id == id).ExecuteDeleteAsync(ct);
         notifier.Notify(DashboardChange.Actions);
+    }
+
+    public static ArchiveManifest? ManifestOf(RemovedProjectEntity row)
+    {
+        try
+        {
+            return row.ManifestJson is { } json ? JsonSerializer.Deserialize<ArchiveManifest>(json, SnapshotSchema.JsonOptions) : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     public static IReadOnlyList<RemoteInfo> RemotesOf(RemovedProjectEntity row)
@@ -140,6 +163,15 @@ public sealed class ActionBoard(ActionQueue queue, AuthenticationStateProvider a
     public ActionStatus StatusOf(string machineId, AgentActionKind kind, string path) =>
         _shown.Values.Where(r => r.Kind == kind && r.RepoPath == path && string.Equals(r.MachineId, machineId, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(r => r.Id).FirstOrDefault() is { } row ? new ActionStatus(row) : ActionStatus.None;
+
+    /// <summary>The newest shown restore of one archive on a machine, wherever it was restored to.</summary>
+    public ActionStatus StatusOfRestore(string machineId, string archivePath) =>
+        _shown.Values
+            .Where(r => r.Kind == AgentActionKind.RestoreArchive && string.Equals(r.MachineId, machineId, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(r => r.Id)
+            .FirstOrDefault(r => JsonSerializer.Deserialize<AgentAction>(r.ActionJson, SnapshotSchema.JsonOptions)?.ArchivePath == archivePath) is { } row
+            ? new ActionStatus(row)
+            : ActionStatus.None;
 
     public async Task<string> LoginAsync() =>
         (await auth.GetAuthenticationStateAsync()).User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";

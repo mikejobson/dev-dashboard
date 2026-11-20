@@ -16,6 +16,7 @@ public static class MachineInfoProvider
     public static async Task<MachineInfo> GetAsync(AgentOptions options, CancellationToken ct)
     {
         var hostname = Environment.MachineName;
+        var archive = Actions.ArchiveSetup.Describe(options);
         var (tsName, tsIp) = await TailscaleAsync(ct).ConfigureAwait(false);
         return new MachineInfo
         {
@@ -33,6 +34,11 @@ public static class MachineInfoProvider
             AcceptsClone = options.Actions.Enabled,
             AcceptsCleanBuildDirs = options.Actions.Enabled,
             AcceptsPull = options.Actions.Enabled,
+            AcceptsCleanCache = options.Actions.Enabled && options.Disk.Enabled,
+            AcceptsStopDevServer = options.Actions.Enabled && options.DevServers.Enabled,
+            Archive = archive,
+            AcceptsArchiveProject = options.Actions.Enabled && archive is { Available: true, Writable: true },
+            AcceptsRestoreArchive = options.Actions.Enabled && archive is { Available: true },
             UpdateMode = ReportedUpdateMode(options, UpdateInstallation.Current, ReleaseSigning.Embedded),
             DependencyChecks = options.Dependencies.Enabled,
             LastUpdate = UpdateInstallation.Current is { } installation ? new UpdateStateStore(installation.StateFile).Read().Last : null,

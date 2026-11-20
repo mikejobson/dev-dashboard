@@ -18,7 +18,8 @@ public sealed class SnapshotStore(
     IDbContextFactory<DevDashDbContext> dbFactory,
     DashboardNotifier notifier,
     IOptionsMonitor<HubOptions> options,
-    TimeProvider time)
+    TimeProvider time,
+    History.HistoryStore history)
 {
     private readonly ConcurrentDictionary<string, MachineView> _machines = new(StringComparer.OrdinalIgnoreCase);
 
@@ -74,6 +75,7 @@ public sealed class SnapshotStore(
 
         var view = new MachineView(snapshot, entity.FirstSeenAt, now);
         _machines[id] = view;
+        await history.RecordAsync(snapshot, now, ct);
         notifier.Notify(DashboardChange.Snapshot);
         return view;
     }
@@ -83,6 +85,7 @@ public sealed class SnapshotStore(
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         await db.Machines.Where(m => m.MachineId == machineId).ExecuteDeleteAsync(ct);
         _machines.TryRemove(machineId, out _);
+        await history.ForgetAsync(machineId, ct);
         notifier.Notify(DashboardChange.Machines);
     }
 }

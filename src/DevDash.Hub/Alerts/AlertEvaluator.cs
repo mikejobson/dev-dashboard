@@ -70,6 +70,9 @@ public sealed record AlertCandidate
     /// </summary>
     public bool IsEvent { get; init; }
 
+    /// <summary>The repo it is about, when it is about one: a repo with a quiet tag (<c>archived</c>) does not alert (§20).</summary>
+    public string? RepoKey { get; init; }
+
     public static string MakeKey(string trigger, params string?[] parts) => $"{trigger}:{Finding.MakeFingerprint(trigger, parts)}";
 }
 
@@ -94,6 +97,12 @@ public sealed record AlertInputs
 
     /// <summary>Keys of the alerts already open, so an open "offline" stays open across a hub restart.</summary>
     public IReadOnlySet<string> OpenKeys { get; init; } = new HashSet<string>();
+
+    /// <summary>Repos carrying a quiet tag (<see cref="Services.RepoNoteSet.QuietKeys"/>): nothing about them alerts.</summary>
+    public IReadOnlySet<string> QuietRepos { get; init; } = new HashSet<string>();
+    /// <summary>Since when the hub has seen each working tree at risk without a break (§22), by machine and path.</summary>
+    public IReadOnlyDictionary<(string MachineId, string Path), History.RiskEpisodeEntity> RiskEpisodes { get; init; } =
+        new Dictionary<(string MachineId, string Path), History.RiskEpisodeEntity>();
 }
 
 /// <summary>Turns the hub's current state into the list of things that should be alerting. Pure.</summary>
@@ -135,8 +144,13 @@ public static class AlertEvaluator
             result.AddRange(T3(inputs, triggers));
         }
 
-        // One alert per key, whatever the inputs repeat.
-        return result.GroupBy(c => c.Key, StringComparer.Ordinal).Select(g => g.First()).ToList();
+        // A repo tagged quiet (archived) alerts about nothing: the one place that is checked. Its open alerts
+        // clear like any condition that has gone. Then one alert per key, whatever the inputs repeat.
+        return result
+            .Where(c => c.RepoKey is null || !inputs.QuietRepos.Contains(c.RepoKey))
+            .GroupBy(c => c.Key, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .ToList();
     }
 
     /// <summary>One alert per working tree with a risk of the configured level that has been there long enough.</summary>
@@ -157,17 +171,55 @@ public static class AlertEvaluator
                 continue;
             }
 
+            // The hub's own record of how long it has been at risk, which survives restarts (§22).
+            var episode = inputs.RiskEpisodes.GetValueOrDefault((row.Machine.MachineId, row.Entry.Path));
+            if (options.ForDays > 0 && (episode?.SinceFor(min) is not { } seenSince || now - seenSince < TimeSpan.FromDays(options.ForDays)))
+            {
+                continue;
+            }
+
             var host = row.Machine.Machine.Hostname;
+            string[] duration = AtRiskFor(old[0], episode, now) is { } lasted ? [lasted + "."] : [];
             yield return new AlertCandidate
             {
                 Key = AlertCandidate.MakeKey(AlertTriggers.AtRisk, row.Machine.MachineId, row.Entry.Path),
                 Trigger = AlertTriggers.AtRisk,
                 Title = $"{row.RepoName} on {host}: {old[0].Text}",
-                Body = string.Join("\n", [.. old.Skip(1).Select(r => r.Text), $"Only on {host}, in {row.Entry.Path}."]),
+                Body = string.Join("\n", [.. duration, .. old.Skip(1).Select(r => r.Text), $"Only on {host}, in {row.Entry.Path}."]),
                 Path = "safety",
                 Severity = old[0].Level == RiskLevel.High ? AlertSeverity.High : AlertSeverity.Warning,
+                RepoKey = row.RepoKey,
             };
         }
+    }
+
+    /// <summary>
+    /// How long a risk has lasted, for people: "Unpushed for 7 days". From the earlier of the hub's own
+    /// episode (since when it has seen the tree at this level) and, for work whose date says when it
+    /// started (the oldest unpushed commit, the oldest stash), that date. Null when neither is known.
+    /// </summary>
+    public static string? AtRiskFor(SafetyReason risk, History.RiskEpisodeEntity? episode, DateTimeOffset now)
+    {
+        var dated = risk.Kind is SafetyReasonKind.UnpushedCommits or SafetyReasonKind.LocalOnlyBranch or SafetyReasonKind.SubmoduleUnpushed or SafetyReasonKind.Stashes
+            ? risk.Since
+            : null;
+        DateTimeOffset?[] candidates = [episode?.SinceFor(risk.Level), dated];
+        if (candidates.Where(c => c is not null).Min() is not { } since)
+        {
+            return null;
+        }
+
+        var what = risk.Kind switch
+        {
+            SafetyReasonKind.UnpushedCommits or SafetyReasonKind.LocalOnlyBranch or SafetyReasonKind.NoRemote or SafetyReasonKind.DetachedHead
+                or SafetyReasonKind.SubmoduleUnpushed or SafetyReasonKind.LocalOnlyTags => "Unpushed",
+            SafetyReasonKind.UncommittedChanges or SafetyReasonKind.SubmoduleDirty => "Uncommitted",
+            SafetyReasonKind.Stashes => "Stashed",
+            SafetyReasonKind.UntrackedFiles => "Untracked",
+            _ => "At risk",
+        };
+        var days = (int)Math.Floor((now - since).TotalDays);
+        return days < 1 ? $"{what} for less than a day" : $"{what} for {Fmt.Count(days, "day")}";
     }
 
     private static IEnumerable<AlertCandidate> Offline(AlertInputs inputs, MachineOfflineTriggerOptions options, DateTimeOffset now)
@@ -212,6 +264,7 @@ public static class AlertEvaluator
                 Body = v.Finding.Explanation,
                 Path = v.Finding.RepoKey is { } repo ? Fmt.RepoUrl(repo) : "cleanup",
                 Severity = AlertSeverity.High,
+                RepoKey = v.Finding.RepoKey,
             });
 
     /// <summary>My pull requests whose checks are failing. Snoozing or dismissing the cleanup finding for one silences it here too.</summary>
@@ -239,6 +292,7 @@ public static class AlertEvaluator
                 Path = "github",
                 ExternalUrl = pr.Url.Length > 0 ? pr.Url : null,
                 Severity = AlertSeverity.High,
+                RepoKey = pr.RepoKey,
             };
         }
     }
@@ -290,6 +344,7 @@ public static class AlertEvaluator
                     Path = path,
                     ExternalUrl = thread.Link,
                     Severity = AlertSeverity.Warning,
+                    RepoKey = row.RepoKey.Length > 0 ? row.RepoKey : null,
                 };
             }
 
@@ -307,6 +362,7 @@ public static class AlertEvaluator
                     Path = path,
                     ExternalUrl = prs.FirstOrDefault()?.Url ?? thread.Link,
                     Severity = AlertSeverity.Info,
+                    RepoKey = row.RepoKey.Length > 0 ? row.RepoKey : null,
                 };
             }
         }

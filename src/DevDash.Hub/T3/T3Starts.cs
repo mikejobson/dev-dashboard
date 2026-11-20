@@ -158,6 +158,13 @@ public sealed class T3Starts(IDbContextFactory<DevDashDbContext> dbFactory, Acti
     }
 
     /// <summary>The threads the dashboard started, newest first.</summary>
+    /// <summary>One recorded start, as it is now.</summary>
+    public async Task<T3ThreadEntity?> GetAsync(int id, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.T3Threads.AsNoTracking().FirstOrDefaultAsync(t => t.Id == id, ct);
+    }
+
     public async Task<IReadOnlyList<T3ThreadEntity>> RecentAsync(int take = 200, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);

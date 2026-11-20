@@ -29,6 +29,12 @@ public enum MapRowKind
 
     /// <summary>Uncommitted changes sitting on a checked out commit.</summary>
     Ghost,
+
+    /// <summary>
+    /// Commits of a merged branch between a commit and the merge that brought it in, which no agent sent
+    /// (too many): "63 commits". Drawn as a solid run, since how they connect is known.
+    /// </summary>
+    Collapsed,
 }
 
 public enum MapLineStyle
@@ -77,6 +83,9 @@ public sealed record MapSource
     /// <summary>Commits on this device that are on no remote.</summary>
     public int Unpushed { get; init; }
 
+    /// <summary>Commits on no remote whose change is on the trunk already (squash merged, rebased): not counted in <see cref="Unpushed"/>.</summary>
+    public int SquashMerged { get; init; }
+
     /// <summary>Working trees with uncommitted changes.</summary>
     public int Dirty { get; init; }
 
@@ -120,6 +129,9 @@ public sealed record MapRef
     public IReadOnlyList<int> HeadOf { get; init; } = [];
     public bool IsDefault { get; init; }
     public bool Merged { get; init; }
+
+    /// <summary>Merged by a squash or rebase (the agent matched the change on the trunk, or GitHub merged a pull request at this commit): <see cref="Merged"/> is true too.</summary>
+    public bool SquashMerged { get; init; }
     public bool UpstreamGone { get; init; }
     public bool NoUpstream { get; init; }
     public int Ahead { get; init; }
@@ -152,6 +164,12 @@ public sealed record MapRow
     /// <summary>One entry per source, in <see cref="BranchMap.Sources"/> order.</summary>
     public IReadOnlyList<MapPresence> Presence { get; init; } = [];
     public bool Unpushed { get; init; }
+
+    /// <summary>On no remote, but its change is on the trunk already: squash merged or rebased. Drawn muted, never as unpushed.</summary>
+    public bool SquashMerged { get; init; }
+
+    /// <summary>For a squash-merged commit: the merged pull request whose head it is, when GitHub says so.</summary>
+    public PullRequestInfo? MergedPullRequest { get; init; }
     public bool IsMerge { get; init; }
     public bool OnTrunk { get; init; }
 
@@ -167,7 +185,7 @@ public sealed record MapRow
     /// <summary>For a ghost row: the working tree with the changes.</summary>
     public MapTree? Tree { get; init; }
 
-    /// <summary>For a gap or fold: how many commits it stands for. 0 when unknown.</summary>
+    /// <summary>For a gap, fold or collapsed run: how many commits it stands for. 0 when unknown.</summary>
     public int Hidden { get; init; }
 
     /// <summary>For a gap: it is the end of the map ("older commits").</summary>
@@ -209,6 +227,13 @@ public sealed record BranchMapOptions
 
     /// <summary>All machine ids the hub knows, in display order: the palette follows it. Defaults to the machines of this repo.</summary>
     public IReadOnlyList<string>? MachineOrder { get; init; }
+
+    /// <summary>
+    /// Recently merged pull requests of this repository. A local branch at a merged pull request's head
+    /// commit was merged on GitHub (squash, rebase or merge): its unpushed commits are on GitHub's
+    /// pull request ref and their change is on the trunk, so they are drawn squash-merged, not unpushed.
+    /// </summary>
+    public IReadOnlyList<PullRequestInfo> MergedPullRequests { get; init; } = [];
 }
 
 public sealed record BranchMap
@@ -227,6 +252,9 @@ public sealed record BranchMap
 
     /// <summary>Some merged commit is tied to its merge by a dashed line: the commits in between were not sent.</summary>
     public bool HasJoinLinks { get; init; }
+
+    /// <summary>Some commits on no remote are drawn squash-merged.</summary>
+    public bool HasSquashMerged { get; init; }
 
     /// <summary>
     /// The branch the map is drawn along, without its remote: usually the default branch, or
@@ -254,6 +282,7 @@ public static class BranchGraph
         Commit,
         Gap,
         Ghost,
+        Collapsed,
     }
 
     private sealed class Node
@@ -272,6 +301,19 @@ public static class BranchGraph
 
         /// <summary>The trunk commit that first contains this one, as an agent reported it.</summary>
         public string? Join;
+
+        /// <summary>How many commits lie between this one and <see cref="Join"/> when the agent did not send them.</summary>
+        public int? JoinDistance;
+
+        /// <summary>An agent proved this commit's change is on the trunk (squash merged, rebased).</summary>
+        public bool SquashProven;
+
+        /// <summary>A commit nothing says is on a remote.</summary>
+        public bool LooksUnpushed;
+
+        /// <summary>Looks unpushed, but its change is on the trunk already.</summary>
+        public bool Squashed;
+        public PullRequestInfo? MergedPr;
 
         /// <summary>Parents this node is only known to lead to: the commits in between were not sent. Drawn dashed.</summary>
         public HashSet<Node>? Links;
@@ -314,6 +356,9 @@ public static class BranchGraph
 
         /// <summary>The remote-tracking refs to show: all of the graph's, less the upstreams of hidden merged branches.</summary>
         public List<GraphRef> RemoteRefs = [];
+
+        /// <summary>Head commits of merged pull requests (same repository): a branch there was merged on GitHub.</summary>
+        public IReadOnlySet<string> MergedPrHeads = new HashSet<string>();
         public int Unplaced;
     }
 
@@ -335,6 +380,11 @@ public static class BranchGraph
         }
 
         var shown = sources.Where(s => s.Visible).ToList();
+        var mergedPrHeads = options.MergedPullRequests
+            .Where(p => !p.IsCrossRepository && p.HeadSha is { Length: > 0 })
+            .Select(p => p.HeadSha!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        sources.ForEach(s => s.MergedPrHeads = mergedPrHeads);
         int mergedBranches = sources.Sum(s => s.Git.Branches.Count(b => IsMergedAway(s, b)));
         foreach (var source in sources)
         {
@@ -356,6 +406,8 @@ public static class BranchGraph
                 node.Pos = commit.TrunkPos is { } pos ? Math.Max(pos, node.Pos ?? 0) : node.Pos;
                 node.InTrunk |= commit.InTrunk;
                 node.Join ??= commit.JoinsTrunkAt;
+                node.JoinDistance ??= commit.JoinDistance;
+                node.SquashProven |= commit.SquashMerged;
                 node.ReportedBy.Add(source.Index);
                 if (commit.Unpushed)
                 {
@@ -555,7 +607,39 @@ public static class BranchGraph
                 : owners.Count == 0 ? MapColor.Remote
                 : owners.Count == 1 ? owners[0]
                 : MapColor.Shared;
-            node.Unpushed = node.Kind == NodeKind.Commit && node.UnpushedBy > 0 && node.PushedBy == 0 && !onRemote.Contains(node);
+            node.LooksUnpushed = node.Kind == NodeKind.Commit && node.UnpushedBy > 0 && node.PushedBy == 0 && !onRemote.Contains(node);
+        }
+
+        // Unpushed commits whose change is on the trunk already: an agent matched it (squash merge,
+        // rebase), or GitHub merged a pull request at a commit that leads to them.
+        foreach (var node in nodes.Where(n => n is { LooksUnpushed: true, SquashProven: true }))
+        {
+            node.Squashed = true;
+        }
+
+        foreach (var pr in options.MergedPullRequests.Where(p => !p.IsCrossRepository).OrderByDescending(p => p.UpdatedAt))
+        {
+            if (Find(pr.HeadSha) is not { Visible: true, LooksUnpushed: true } head)
+            {
+                continue;
+            }
+
+            head.MergedPr ??= pr;
+            var walk = new Stack<Node>([head]);
+            var seen = new HashSet<Node>();
+            while (walk.TryPop(out var node))
+            {
+                if (node.LooksUnpushed && seen.Add(node))
+                {
+                    node.Squashed = true;
+                    node.Parents.ForEach(walk.Push);
+                }
+            }
+        }
+
+        foreach (var node in nodes)
+        {
+            node.Unpushed = node.LooksUnpushed && !node.Squashed;
         }
 
         // Commits a device made on top of the default branch and has not pushed continue the trunk's own lane.
@@ -616,6 +700,7 @@ public static class BranchGraph
                 LastFetchAt = s.Git.LastFetchAt,
                 Branches = s.Git.Branches.Count,
                 Unpushed = nodes.Count(n => n.Unpushed && n.Presence[s.Index] == MapPresence.Local),
+                SquashMerged = nodes.Count(n => n.Squashed && n.Presence[s.Index] == MapPresence.Local),
                 Dirty = s.Trees.Count(t => t.Changes > 0),
                 Unplaced = s.Unplaced,
                 Truncated = s.Graph?.Truncated ?? false,
@@ -629,6 +714,7 @@ public static class BranchGraph
             UnplacedPullRequests = unplacedPrs,
             HasFolds = hasFolds,
             HasJoinLinks = nodes.Any(n => n.Links is not null),
+            HasSquashMerged = nodes.Any(n => n.Squashed),
         };
     }
 
@@ -695,7 +781,8 @@ public static class BranchGraph
 
     /// <summary>
     /// A merged commit with no line up to the trunk (its merge is many commits away, so the agent sent
-    /// only where it joins) is hung under that trunk commit.
+    /// only where it joins) is hung under that trunk commit: through a collapsed run of the commits in
+    /// between when the agent counted them, else by a dashed line (agents before 0.7.x).
     /// </summary>
     private static void LinkToJoins(List<Node> nodes, List<Node> trunk, Func<string?, Node?> find)
     {
@@ -712,8 +799,20 @@ public static class BranchGraph
                 continue;
             }
 
-            join.Parents.Add(node);
-            (join.Links ??= []).Add(node);
+            if (node.JoinDistance is { } distance)
+            {
+                // The agent counted the commits in between: one collapsed run, joined solidly at both ends.
+                var run = new Node { Id = "run:" + node.Id, Kind = NodeKind.Collapsed, Hidden = distance, InTrunk = true, Date = node.Date, Visible = true };
+                run.Parents.Add(node);
+                nodes.Add(run);
+                join.Parents.Add(run);
+            }
+            else
+            {
+                join.Parents.Add(node);
+                (join.Links ??= []).Add(node);
+            }
+
             anchored.UnionWith(Reach([node]));
         }
     }
@@ -728,9 +827,14 @@ public static class BranchGraph
     /// Neither the default branch nor the trunk itself ever counts as a merged branch.
     /// </summary>
     private static bool IsMerged(Source source, BranchInfo branch) =>
-        (branch.MergedIntoTrunk ?? branch.MergedIntoDefault) == true
+        ((branch.MergedIntoTrunk ?? branch.MergedIntoDefault) == true || IsSquashMerged(source, branch))
         && branch.Name != source.Git.DefaultBranch
         && branch.Name != source.TrunkName;
+
+    /// <summary>Merged without being an ancestor of the trunk: the agent matched its change there, or GitHub merged a pull request at its tip.</summary>
+    private static bool IsSquashMerged(Source source, BranchInfo branch) =>
+        (branch.MergedIntoTrunk ?? branch.MergedIntoDefault) != true
+        && (branch.SquashMergedInto is not null || source.MergedPrHeads.Contains(branch.Sha));
 
     /// <summary>The trunk most devices reported, as a branch name: <c>origin/develop</c> becomes <c>develop</c>.</summary>
     public static string? TrunkNameOf(IEnumerable<string?> trunkRefs)
@@ -872,6 +976,7 @@ public static class BranchGraph
                     HeadOf = tip.Where(x => x.Source.Trees.Any(t => t.Branch == name.Key)).Select(x => x.Source.Index).ToList(),
                     IsDefault = tip.Any(x => x.Source.Git.DefaultBranch == name.Key),
                     Merged = tip.All(x => IsMerged(x.Source, x.Branch)),
+                    SquashMerged = tip.All(x => IsMerged(x.Source, x.Branch)) && tip.Any(x => IsSquashMerged(x.Source, x.Branch)),
                     UpstreamGone = tip.Any(x => x.Branch.UpstreamGone),
                     NoUpstream = tip.All(x => x.Branch.Upstream is null),
                     Ahead = tip.Max(x => x.Branch.Ahead),
@@ -963,11 +1068,11 @@ public static class BranchGraph
 
         return new MapWarning(branch, true, $"is at {tips.Count} different commits: {string.Join("; ", tips.Select(t => Names(t.Labels)))}.");
 
-        static int Weight(Node node) => node.Kind == NodeKind.Gap ? node.Hidden : node.Kind == NodeKind.Commit ? 1 : 0;
+        static int Weight(Node node) => node.Kind is NodeKind.Gap or NodeKind.Collapsed ? node.Hidden : node.Kind == NodeKind.Commit ? 1 : 0;
 
         // A commit is all there when each of its parents is in the map too. A gap stands for the
         // first-parent commits only: whatever those merged is not counted.
-        bool Whole(Node node) => node.Kind != NodeKind.Gap && (node.Commit is null || node.Commit.Parents.All(p => find(p) is { Visible: true }));
+        bool Whole(Node node) => node.Kind is not (NodeKind.Gap or NodeKind.Collapsed) && (node.Commit is null || node.Commit.Parents.All(p => find(p) is { Visible: true }));
     }
 
     /// <summary>
@@ -1019,7 +1124,7 @@ public static class BranchGraph
         DateTimeOffset Due(Node n) => n.Kind == NodeKind.Commit
             ? n.Date
             : n.Parents.Where(inMap.Contains).Select(p => p.Date).DefaultIfEmpty(n.Date).Max();
-        static int Rank(Node n) => n.Kind switch { NodeKind.Ghost => 0, NodeKind.Gap => 1, _ => 2 };
+        static int Rank(Node n) => n.Kind switch { NodeKind.Ghost => 0, NodeKind.Gap or NodeKind.Collapsed => 1, _ => 2 };
 
         var waiting = new Dictionary<Node, int>();
         foreach (var node in inMap)
@@ -1183,16 +1288,18 @@ public static class BranchGraph
             rows.Add(new MapRow
             {
                 Key = node.Id,
-                Kind = node.Kind switch { NodeKind.Gap => MapRowKind.Gap, NodeKind.Ghost => MapRowKind.Ghost, _ => MapRowKind.Commit },
+                Kind = node.Kind switch { NodeKind.Gap => MapRowKind.Gap, NodeKind.Ghost => MapRowKind.Ghost, NodeKind.Collapsed => MapRowKind.Collapsed, _ => MapRowKind.Commit },
                 Lane = lane,
                 Color = node.Color,
                 Commit = node.Commit,
-                Date = node.Kind == NodeKind.Gap ? null : node.Date,
+                Date = node.Kind is NodeKind.Gap or NodeKind.Collapsed ? null : node.Date,
                 Presence = node.Presence,
                 Unpushed = node.Unpushed,
+                SquashMerged = node.Squashed,
+                MergedPullRequest = node.MergedPr,
                 IsMerge = node.Commit is { Parents.Count: > 1 },
                 OnTrunk = node.OnTrunk,
-                Dim = node is { InTrunk: true, Pos: null } || (node.Refs.Count > 0 && node.Refs.All(r => r.Merged) && node.Heads.Count == 0),
+                Dim = node is { InTrunk: true, Pos: null } || node.Squashed || (node.Refs.Count > 0 && node.Refs.All(r => r.Merged) && node.Heads.Count == 0),
                 Refs = SortRefs(node.Refs),
                 Stashes = node.Stashes,
                 PullRequests = node.Prs,
@@ -1240,7 +1347,8 @@ public static class BranchGraph
         }
 
         bool Continues(int i) => i + 1 < rows.Count && order[i].Parents[0] == order[i + 1] && Plain(i + 1)
-            && rows[i].Lane == rows[i + 1].Lane && rows[i].Color == rows[i + 1].Color && rows[i].Unpushed == rows[i + 1].Unpushed;
+            && rows[i].Lane == rows[i + 1].Lane && rows[i].Color == rows[i + 1].Color && rows[i].Unpushed == rows[i + 1].Unpushed
+            && rows[i].SquashMerged == rows[i + 1].SquashMerged;
 
         var result = new List<MapRow>(rows.Count);
         for (var i = 0; i < rows.Count; i++)
@@ -1275,6 +1383,8 @@ public static class BranchGraph
                     Color = first.Color,
                     Presence = first.Presence,
                     Unpushed = first.Unpushed,
+                    SquashMerged = first.SquashMerged,
+                    Dim = first.Dim,
                     OnTrunk = first.OnTrunk,
                     Hidden = length - FoldHead - FoldTail,
                     Up = true,

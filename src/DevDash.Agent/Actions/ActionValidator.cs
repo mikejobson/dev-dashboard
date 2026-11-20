@@ -36,6 +36,12 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             return CloneRefusal(action);
         }
 
+        // So is a restore: the archive is unpacked into a folder that is not there yet.
+        if (action.Kind == AgentActionKind.RestoreArchive)
+        {
+            return FreeFolderRefusal(repoPath, "restore");
+        }
+
         if (await RepoRefusalAsync(repoPath, ct).ConfigureAwait(false) is { } repo)
         {
             return repo;
@@ -48,7 +54,7 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
             AgentActionKind.Push => await PushRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.DropStash => await DropStashRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.PruneWorktrees or AgentActionKind.Fetch => null,
-            AgentActionKind.RemoveProject => RemoveProjectRefusal(action),
+            AgentActionKind.RemoveProject or AgentActionKind.ArchiveProject => RemoveProjectRefusal(action),
             AgentActionKind.CleanBuildDirs => await CleanBuildDirsRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.PullFastForward => await PullRefusalAsync(action, ct).ConfigureAwait(false),
             AgentActionKind.OpenInT3 => null,
@@ -251,10 +257,26 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
     /// </summary>
     private string? CloneRefusal(AgentAction action)
     {
-        var path = action.RepoPath!;
+        if (FreeFolderRefusal(action.RepoPath!, "clone") is { } where)
+        {
+            return where;
+        }
+
+        var url = action.Url!;
+        return removals?.Allows(action.RepoPath!, url) == true || knownRemotes?.Contains(url) == true
+            ? null
+            : "This agent does not know that URL: it is not a remote of a project it removed from that folder, nor of a repository it scans. Clone it by hand.";
+    }
+
+    /// <summary>
+    /// A folder that does not exist yet, where the scanner would find a repository: straight under a scan root
+    /// (or inside a worktree folder there), not a dot-folder, in a parent that exists and is not a repository.
+    /// </summary>
+    private string? FreeFolderRefusal(string path, string verb)
+    {
         if (!Path.IsPathFullyQualified(path) || PathSafety.HasDotSegments(path))
         {
-            return "The clone path is not a plain absolute path.";
+            return $"The {verb} path is not a plain absolute path.";
         }
 
         var current = options.CurrentValue;
@@ -280,18 +302,15 @@ public sealed class ActionValidator(GitRunner git, IOptionsMonitor<AgentOptions>
         // Exists covers files and folders; the link check covers a link that points nowhere.
         if (Path.Exists(path) || new FileInfo(path).LinkTarget is not null)
         {
-            return $"{path} already exists. The agent only clones into a folder that is not there.";
+            return $"{path} already exists. The agent only {(verb == "clone" ? "clones" : "restores")} into a folder that is not there.";
         }
 
         if (Directory.Exists(Path.Combine(parent, ".git")) || File.Exists(Path.Combine(parent, ".git")))
         {
-            return $"{parent} is itself a repository; the agent does not clone inside one.";
+            return $"{parent} is itself a repository; the agent does not {verb} inside one.";
         }
 
-        var url = action.Url!;
-        return removals?.Allows(path, url) == true || knownRemotes?.Contains(url) == true
-            ? null
-            : "This agent does not know that URL: it is not a remote of a project it removed from that folder, nor of a repository it scans. Clone it by hand.";
+        return null;
     }
 
     /// <summary>

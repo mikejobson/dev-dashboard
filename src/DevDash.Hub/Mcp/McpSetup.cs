@@ -35,7 +35,7 @@ public static class McpSetup
     /// Every class of tools, in one place. To add tools, add a class with <c>[McpServerToolType]</c>
     /// here; mark tools that change anything <c>[Authorize(Policy = McpSetup.ActionsPolicy)]</c>.
     /// </summary>
-    public static readonly Type[] ToolTypes = [typeof(DashboardTools), typeof(T3Tools), typeof(ActionTools)];
+    public static readonly Type[] ToolTypes = [typeof(DashboardTools), typeof(T3Tools), typeof(ActionTools), typeof(HistoryTools)];
 
     public static IServiceCollection AddDevDashMcp(this IServiceCollection services)
     {

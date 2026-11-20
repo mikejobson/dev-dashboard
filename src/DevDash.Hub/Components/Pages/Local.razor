@@ -4,6 +4,7 @@
 @inject RepoCatalog Catalog
 @inject NavigationManager Nav
 @inject RefreshBoard Refreshes
+@inject RepoNotes Notes
 
 <PageTitle>Local · DevDash</PageTitle>
 
@@ -16,7 +17,7 @@
 </div>
 
 <div class="toolbar">
-    <input type="search" placeholder="Search name, owner, branch…" aria-label="Search repos" @bind="_search" @bind:event="oninput" />
+    <input type="search" placeholder="Search name, owner, branch, #tag…" aria-label="Search repos" @bind="_search" @bind:event="oninput" />
     <select aria-label="Owner" value="@(Owner ?? "")" @onchange="e => SetOwner(e.Value?.ToString())">
         <option value="">All owners</option>
         @foreach (var (owner, count) in _owners)
@@ -24,6 +25,16 @@
             <option value="@owner">@owner (@count)</option>
         }
     </select>
+    @if (_tags.Count > 0)
+    {
+        <select aria-label="Tag" value="@(ActiveTag ?? "")" @onchange="e => SetTag(e.Value?.ToString())">
+            <option value="">All tags</option>
+            @foreach (var (tag, count) in _tags)
+            {
+                <option value="@tag">#@tag (@count)</option>
+            }
+        </select>
+    }
     <button type="button" class="toggle @(_dirty ? "on" : "")" aria-pressed="@_dirty" @onclick="() => _dirty = !_dirty">Dirty</button>
     <button type="button" class="toggle @(_ahead ? "on" : "")" aria-pressed="@_ahead" @onclick="() => _ahead = !_ahead">Ahead</button>
     <button type="button" class="toggle @(_behind ? "on" : "")" aria-pressed="@_behind" @onclick="() => _behind = !_behind">Behind</button>
@@ -89,7 +100,20 @@ else
         _ => LocalView.DefaultDescending(ActiveSort),
     };
 
-    private List<RepoRow> Sorted => LocalView.Sort(_rows.Where(Matches), ActiveSort, Descending);
+    /// <summary><c>?tag=…</c> keeps the repos with that tag (§20).</summary>
+    [SupplyParameterFromQuery] public string? Tag { get; set; }
+
+    private RepoNoteSet _notes = RepoNoteSet.Empty;
+    private IReadOnlyList<(string Tag, int Count)> _tags = [];
+
+    private string? ActiveTag => RepoTags.Normalize(Tag);
+
+    /// <summary>Pinned repos first, whatever the sort; within each part the chosen order.</summary>
+    private List<RepoRow> Sorted => RepoTags.PinnedFirst(LocalView.Sort(_rows.Where(Matches), ActiveSort, Descending), r => _notes.IsPinned(r.Key));
+
+    private string TagUrl(string tag) => Url(ActiveSort, Descending, Owner, tag);
+
+    private void SetTag(string? tag) => Nav.NavigateTo(Url(ActiveSort, Descending, Owner, tag), replace: true);
 
     /// <summary>The main table: git repos, or only the non-git entries when that filter is on.</summary>
     private List<RepoRow> Repos => Sorted.Where(r => _notGit ? r.Kind != EntryKind.GitRepo : r.Kind == EntryKind.GitRepo).ToList();
@@ -102,6 +126,8 @@ else
         _rows = await Catalog.GetAsync();
         _hints = LocalView.Disambiguators(_rows);
         _owners = LocalView.Owners(_rows);
+        _notes = await Notes.GetAsync();
+        _tags = _notes.TagCounts();
         _refreshable = _machines.ToDictionary(m => m.MachineId, Refreshes.For, StringComparer.OrdinalIgnoreCase);
         await Refreshes.LoadAsync();
         TickWhile(() => Refreshes.Ticking);
@@ -113,17 +139,18 @@ else
         TickWhile(() => Refreshes.Ticking);
     }
 
-    private string Url(LocalSort sort, bool descending, string? owner) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("local").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
+    private string Url(LocalSort sort, bool descending, string? owner, string? tag) => Nav.GetUriWithQueryParameters(Nav.ToAbsoluteUri("local").GetLeftPart(UriPartial.Path), new Dictionary<string, object?>
     {
         ["sort"] = sort == LocalSort.Activity ? null : sort.ToString().ToLowerInvariant(),
         ["dir"] = descending == LocalView.DefaultDescending(sort) ? null : descending ? "desc" : "asc",
         ["owner"] = string.IsNullOrEmpty(owner) ? null : owner,
+        ["tag"] = RepoTags.Normalize(tag),
     });
 
     /// <summary>Clicking the active column flips its direction; another column starts in its natural one.</summary>
-    private string SortUrl(LocalSort sort) => Url(sort, sort == ActiveSort ? !Descending : LocalView.DefaultDescending(sort), Owner);
+    private string SortUrl(LocalSort sort) => Url(sort, sort == ActiveSort ? !Descending : LocalView.DefaultDescending(sort), Owner, ActiveTag);
 
-    private void SetOwner(string? owner) => Nav.NavigateTo(Url(ActiveSort, Descending, owner), replace: true);
+    private void SetOwner(string? owner) => Nav.NavigateTo(Url(ActiveSort, Descending, owner, ActiveTag), replace: true);
 
     private string? AriaSort(LocalSort sort) => sort != ActiveSort ? null : Descending ? "descending" : "ascending";
 
@@ -165,6 +192,10 @@ else
                             else if (row.Owner is not null)
                             {
                                 <span class="owner muted small">@row.Owner</span>
+                            }
+                            @if (_notes.For(row.Key) is { IsEmpty: false } note)
+                            {
+                                <div><RepoTagChips Note="note" TagUrl="TagUrl" QuietTags="_notes.QuietTags" /></div>
                             }
                             @if (row.Description is not null)
                             {
@@ -241,14 +272,18 @@ else
         if (_behind && !row.AnyBehind) { return false; }
         if (_stale && !(row.LastActivity is { } last && (Now - last).TotalDays >= StaleDays)) { return false; }
         if (!string.IsNullOrEmpty(Owner) && !string.Equals(LocalView.OwnerOf(row), Owner, StringComparison.OrdinalIgnoreCase)) { return false; }
+        if (!_notes.Matches(row.Key, ActiveTag)) { return false; }
 
-        var term = _search.Trim();
+        // "#client" in the search box is a tag filter too.
+        var (searchTag, term) = RepoTags.SplitSearch(_search);
+        if (!_notes.Matches(row.Key, searchTag)) { return false; }
         if (term.Length == 0)
         {
             return true;
         }
 
-        return Contains(row.Name) || Contains(row.Owner) || Contains(row.Key) || Contains(row.Description?.Text)
+        var note = _notes.For(row.Key);
+        return Contains(row.Name) || Contains(row.Owner) || Contains(row.Key) || Contains(row.Description?.Text) || Contains(note.Note)
             || row.Clones.Any(c => Contains(c.Git?.Branch) || Contains(c.Entry.Name));
 
         bool Contains(string? value) => value is not null && value.Contains(term, StringComparison.OrdinalIgnoreCase);

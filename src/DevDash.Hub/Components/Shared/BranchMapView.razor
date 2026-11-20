@@ -64,7 +64,7 @@
         {
             <div class="bm-scroll">
                 <div class="bm-rows">
-                    @foreach (var row in _map.Rows.Take(_showAllRows ? int.MaxValue : RowLimit))
+                    @foreach (var row in _map.Rows.Take(_page.Shown))
                     {
                         var open = _selected == row.Key && row.Kind == MapRowKind.Commit;
                         <div class="bm-row @RowClass(row) @(open ? "open" : "")" @key="row.Key">
@@ -101,7 +101,8 @@
                                                 <span class="bm-ref-name">@r.Name</span>
                                                 @if (r.Ahead > 0) { <span class="bm-ref-n">↑@r.Ahead</span> }
                                                 @if (r.Behind > 0) { <span class="bm-ref-n">↓@r.Behind</span> }
-                                                @if (r.Merged) { <span class="bm-ref-n">merged</span> }
+                                                @if (r.SquashMerged) { <span class="bm-ref-n">squash-merged</span> }
+                                                else if (r.Merged) { <span class="bm-ref-n">merged</span> }
                                                 @if (r.UpstreamGone) { <span class="bm-ref-n gone">gone</span> }
                                                 @if (r.Diverged) { <span class="bm-ref-n split">diverged</span> }
                                                 else if (r.Split && r.Kind == MapRefKind.Local) { <span class="bm-ref-n">≠</span> }
@@ -119,6 +120,10 @@
                                         @if (row.Unpushed)
                                         {
                                             <span class="bm-tag" title="On no remote yet">unpushed</span>
+                                        }
+                                        else if (row.SquashMerged && (row.MergedPullRequest is not null || !row.Refs.Any(r => r.SquashMerged)))
+                                        {
+                                            <span class="bm-tag squash" title="@SquashTitle(row)">@(row.MergedPullRequest is { } merged ? $"merged in #{merged.Number}" : "squash-merged")</span>
                                         }
                                         <span class="bm-subject">@row.Commit!.Subject</span>
                                     </div>
@@ -154,6 +159,16 @@
                                             {
                                                 <div class="bm-detail-line"><span class="bm-tag">unpushed</span> This commit is on no remote: it exists only where the list above says.</div>
                                             }
+                                            else if (row.SquashMerged)
+                                            {
+                                                <div class="bm-detail-line">
+                                                    <span class="bm-tag squash">squash-merged</span> @SquashTitle(row)
+                                                    @if (row.MergedPullRequest is { } merged)
+                                                    {
+                                                        <a href="@merged.Url" target="_blank" rel="noopener">#@merged.Number</a>
+                                                    }
+                                                </div>
+                                            }
                                             @foreach (var stash in row.Stashes)
                                             {
                                                 <div class="bm-detail-line muted">Stash on @_map.Sources[stash.Source].Label: @stash.Stash.Message · @Fmt.Ago(stash.Stash.Date, Now)</div>
@@ -177,6 +192,13 @@
                                     </div>
                                     break;
 
+                                case MapRowKind.Collapsed:
+                                    <div class="bm-c quiet">
+                                        <span class="muted small" title="The agent counted these commits of a merged branch but did not send them">@Fmt.Count(row.Hidden, "more commit") of a merged branch</span>
+                                    </div>
+                                    <div class="bm-m"></div>
+                                    break;
+
                                 case MapRowKind.Fold:
                                     <div class="bm-c quiet">
                                         <button type="button" class="link bm-fold" @onclick="() => Expand(row.Key)">@Fmt.Count(row.Hidden, "more commit") · show</button>
@@ -198,13 +220,15 @@
                             }
                         </div>
                     }
-                    @if (!_showAllRows && _map.Rows.Count > RowLimit)
+                    @if (_page.Rest > 0)
                     {
-                        var rest = _map.Rows.Skip(RowLimit).ToList();
-                        var names = rest.SelectMany(r => r.Refs).Where(r => r.Kind == MapRefKind.Local).Select(r => r.Name).Distinct().Count();
                         <div class="bm-more">
-                            <button type="button" @onclick="() => _showAllRows = true">Show @Fmt.Count(rest.Count, "more row")</button>
-                            <span class="muted small">older history@(names > 0 ? $", with {Fmt.Count(names, "branch", "branches")}" : "")</span>
+                            <button type="button" @onclick="ShowMore">Show @Fmt.Count(_page.Next, "more row")</button>
+                            @if (_page.Next < _page.Rest)
+                            {
+                                <button type="button" class="link" @onclick="ShowAll">all @_page.Rest.ToString("N0", CultureInfo.InvariantCulture)</button>
+                            }
+                            <span class="muted small">older history@(_page.RestBranches > 0 ? $", with {Fmt.Count(_page.RestBranches, "branch", "branches")}" : "")</span>
                         </div>
                     }
                 </div>
@@ -214,6 +238,10 @@
                 <span><svg viewBox="0 0 14 14"><circle class="n cs" cx="7" cy="7" r="4.5" /></svg>on more than one device</span>
                 <span><svg viewBox="0 0 14 14"><circle class="n c0" cx="7" cy="7" r="4.5" /></svg>on one device only, in its colour</span>
                 <span><svg viewBox="0 0 14 14"><circle class="n c0 hollow" cx="7" cy="7" r="4" /></svg>unpushed</span>
+                @if (_map.HasSquashMerged)
+                {
+                    <span><span class="bm-tag squash">squash-merged</span>on no remote, but already on @Trunk</span>
+                }
                 <span><svg viewBox="0 0 14 14"><circle class="n cr" cx="7" cy="7" r="3.2" /></svg>only on the remote</span>
                 <span><svg viewBox="0 0 20 20"><circle class="head c0" cx="10" cy="10" r="8" /><circle class="n c0" cx="10" cy="10" r="4.5" /></svg>checked out</span>
                 <span><svg viewBox="0 0 14 14"><circle class="n c0 ghost" cx="7" cy="7" r="4.5" /></svg>uncommitted changes</span>
@@ -263,8 +291,10 @@
     /// <summary>The line the map is drawn along, for the "N commits further down …" rows.</summary>
     private string Trunk => _map?.TrunkName ?? "the default branch";
 
-    /// <summary>Rows drawn before "show more": the top of the map is what is recent.</summary>
-    private const int RowLimit = 120;
+    /// <summary>Rows asked for so far: a page at first, more with each "show more". Kept across rebuilds.</summary>
+    private int _rowLimit = BranchMapPaging.PageSize;
+
+    private MapPage _page = new(0, 0, 0, 0);
 
     /// <summary>Lanes sit closer together when there are many, so the text keeps most of the width.</summary>
     private int LaneWidth => _map.LaneCount <= 8 ? 16 : _map.LaneCount <= 14 ? 12 : 9;
@@ -289,6 +319,9 @@
     /// <summary>The repository's name: a working tree is only named when it is not simply that.</summary>
     [Parameter] public string? Name { get; set; }
 
+    /// <summary>Recently merged pull requests of this repository: a branch at one's head commit is drawn squash-merged.</summary>
+    [Parameter] public IReadOnlyList<PullRequestInfo> MergedPullRequests { get; set; } = [];
+
     private BranchMap _map = new();
 
     /// <summary>Where a push or a fast-forward pull would bring a device level with the remote.</summary>
@@ -299,7 +332,6 @@
     private bool _hideMerged;
     private bool _expandAll;
     private string? _selected;
-    private bool _showAllRows;
 
     private int GraphWidth => Pad * 2 + Math.Max(0, _map.LaneCount - 1) * LaneWidth;
 
@@ -317,6 +349,7 @@
             ExpandAll = _expandAll,
             Expanded = _expanded,
             MachineOrder = Snapshots.Machines.Select(m => m.MachineId).ToList(),
+            MergedPullRequests = MergedPullRequests,
         };
 
         if (_hideMergedChoice is null)
@@ -327,6 +360,7 @@
             if (!_hideMerged)
             {
                 _map = probe;
+                _page = BranchMapPaging.Page(_map, _rowLimit);
                 return;
             }
         }
@@ -336,7 +370,24 @@
         }
 
         _map = BranchGraph.Build(Clones, PullRequests, options with { HideMerged = _hideMerged });
+        _page = BranchMapPaging.Page(_map, _rowLimit);
     }
+
+    private void ShowMore()
+    {
+        _rowLimit = _page.Shown + _page.Next;
+        _page = BranchMapPaging.Page(_map, _rowLimit);
+    }
+
+    private void ShowAll()
+    {
+        _rowLimit = int.MaxValue;
+        _page = BranchMapPaging.Page(_map, _rowLimit);
+    }
+
+    private string SquashTitle(MapRow row) => row.MergedPullRequest is { } pr
+        ? $"On no remote branch, but pull request #{pr.Number} was merged at this commit: its change is on {Trunk}"
+        : $"On no remote branch, but the same change is on {Trunk} (squash merged or rebased): deleting it loses nothing";
 
     private void ToggleSource(string id)
     {
@@ -419,6 +470,11 @@
             parts.Add($"{source.Unpushed} unpushed");
         }
 
+        if (source.SquashMerged > 0)
+        {
+            parts.Add($"{source.SquashMerged} squash-merged");
+        }
+
         if (source.Dirty > 0)
         {
             parts.Add("uncommitted");
@@ -484,7 +540,7 @@
             text += r.UpstreamGone ? " · its upstream is gone" : r.NoUpstream ? " · no upstream" : "";
             text += r.Ahead > 0 ? $" · {r.Ahead} ahead of its upstream" : "";
             text += r.Behind > 0 ? $" · {r.Behind} behind its upstream" : "";
-            text += r.Merged ? " · merged into the default branch" : "";
+            text += r.SquashMerged ? $" · squash-merged: its change is on {Trunk}" : r.Merged ? " · merged into the default branch" : "";
             text += r.Diverged ? " · has diverged from the same branch on another device" : r.Split ? " · at a different commit on another device" : "";
         }
         else if (r.Split)
@@ -516,7 +572,7 @@
             Line(line, $"M{X(line.Lane)} 0V{Far}");
         }
 
-        var broken = row.Kind is MapRowKind.Gap or MapRowKind.Fold;
+        var broken = row.Kind is MapRowKind.Gap or MapRowKind.Fold or MapRowKind.Collapsed;
         if (row.Up)
         {
             sb.Append(CultureInfo.InvariantCulture, $"<path class=\"l {ColorClass(row.Color)}{(row.Kind == MapRowKind.Ghost ? " dash" : "")} up\" d=\"M{x} 0V{(broken ? 5 : Mid)}\"/>");
@@ -548,7 +604,7 @@
         var color = ColorClass(row.Color);
         switch (row.Kind)
         {
-            case MapRowKind.Gap or MapRowKind.Fold:
+            case MapRowKind.Gap or MapRowKind.Fold or MapRowKind.Collapsed:
                 foreach (var y in (int[])[Mid - 5, Mid, Mid + 5])
                 {
                     sb.Append(CultureInfo.InvariantCulture, $"<circle class=\"n {color} pip\" cx=\"{x}\" cy=\"{y}\" r=\"1.3\"/>");

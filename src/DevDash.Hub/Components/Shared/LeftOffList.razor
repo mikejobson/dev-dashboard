@@ -1,0 +1,105 @@
+@* "Where I left off" (§20): projects grouped by the day they were last touched, each with what it takes to pick it up again.
+   The list itself is LeftOff.Build; this only draws it. Compact is the Overview card. *@
+@if (Items.Count == 0)
+{
+    <p class="muted small">@Empty</p>
+}
+else
+{
+    @foreach (var group in Items.GroupBy(i => i.Group))
+    {
+        <h3 class="leftoff-day">@LeftOff.Label(group.Key) <span class="muted small">@group.Count()</span></h3>
+        <ul class="list leftoff @(Compact ? "compact" : "")">
+            @foreach (var item in group)
+            {
+                var clone = item.WorkingTree;
+                var machine = clone.Machine.Machine.Hostname;
+                var cd = $"cd {AgentActions.ShellQuote(clone.Entry.Path)}";
+                var gh = LeftOff.GitHubUrl(item);
+                <li @key="item.Row.Key" class="leftoff-item">
+                    <div class="leftoff-head">
+                        <a class="title-link" href="@Fmt.RepoUrl(item.Row.Key)"><strong>@item.Row.Name</strong></a>
+                        @if (item.Row.Owner is not null) { <span class="owner muted small">@item.Row.Owner</span> }
+                        <span class="chip branch mono" title="@(item.Branch ?? "detached HEAD")">@(item.Branch ?? $"detached @ {Fmt.Sha(clone.Git?.HeadSha)}")</span>
+                        <span class="muted small">@machine@(clone.IsLinkedWorktree ? " · " + clone.DisplayName : "")</span>
+                        <span class="leftoff-when sub" title="@(item.Touched is { } t ? $"{What(t.Kind)} {Fmt.Date(t.At)}" : "")">@(item.Touched is { } at ? $"{What(at.Kind)} {Fmt.Ago(at.At, Now)}" : "not touched lately")</span>
+                    </div>
+                    <RepoTagChips Note="item.Note" TagUrl="TagUrl" QuietTags="QuietTags" />
+                    @if (clone.Git?.LastCommit is { } commit)
+                    {
+                        <div class="sub clamp-1" title="@commit.Subject">
+                            <span class="mono sha">@Fmt.Sha(commit.Sha)</span>@commit.Subject <span class="muted">· @Fmt.Ago(commit.Date, Now)</span>
+                        </div>
+                    }
+                    <div class="chips leftoff-state">
+                        @if (item.Uncommitted > 0) { <span class="chip warn" title="Staged, unstaged and conflicted">@item.Uncommitted uncommitted</span> }
+                        @if (item.Untracked > 0) { <span class="chip muted">@item.Untracked untracked</span> }
+                        @if (item.Unpushed > 0) { <span class="chip info" title="Commits on this branch that are on no remote">↑@item.Unpushed unpushed</span> }
+                        @if (item.Stashes > 0) { <span class="chip muted">@Fmt.Count(item.Stashes, "stash", "stashes")</span> }
+                        @if (item.Uncommitted == 0 && item.Untracked == 0 && item.Unpushed == 0) { <span class="chip ok">clean</span> }
+                        @if (item.PullRequest is { } pr) { <PrChip PullRequest="pr" ShowTitle="!Compact" /> }
+                        @foreach (var thread in item.Threads.Take(Compact ? 1 : 3))
+                        {
+                            <a class="chip @T3Threads.ChipClass(thread.State)" href="@thread.Link" target="_blank" rel="noopener" title="T3 thread: @thread.Title">T3 · @T3Threads.Label(thread.State)@(Compact ? "" : $" · {Short(thread.Title)}")</a>
+                        }
+                    </div>
+                    @if (item.RecentFiles.Count > 0)
+                    {
+                        <div class="leftoff-files sub" title="The most recently edited of the uncommitted files">
+                            @foreach (var file in item.RecentFiles.Take(Compact ? 3 : RecentChange.MaxPerRepo))
+                            {
+                                <span class="mono" title="@(file.Untracked == true ? "untracked, " : "")edited @Fmt.Date(file.ModifiedAt)">@file.Path</span>
+                            }
+                        </div>
+                    }
+                    @if (!Compact && item.AlsoTouched.Count > 0)
+                    {
+                        <div class="sub muted">
+                            Also: @string.Join(" · ", item.AlsoTouched.Select(a => $"{a.Clone.Machine.Machine.Hostname}{(a.Clone.IsLinkedWorktree ? " " + a.Clone.DisplayName : "")} ({a.Clone.Git?.Branch ?? "detached"}, {Fmt.Ago(a.Touched.At, Now)})"))
+                        </div>
+                    }
+                    <div class="leftoff-actions">
+                        @if (ShowActions && clone.Machine.Machine.T3 is not null && clone.Entry.Kind == EntryKind.GitRepo)
+                        {
+                            <ActionButton Machine="clone.Machine" Action="AgentAction.OpenInT3(clone.Entry.Path)" Label="Open in T3" Class="chip-btn"
+                                          Ask="@($"Open {clone.DisplayName} in T3 Code on {machine}?")" Confirm="Open"
+                                          What="@($"Open {clone.Entry.Path} in the T3 Code app on {machine}")" />
+                        }
+                        <button type="button" class="chip-btn" data-copy="@cd" title="Copy: @cd">cd</button>
+                        @if (gh is not null)
+                        {
+                            <a class="chip-btn" href="@gh" target="_blank" rel="noopener" title="Open on GitHub">GitHub</a>
+                        }
+                        <a class="chip-btn" href="@Fmt.RepoUrl(item.Row.Key)">Details</a>
+                    </div>
+                </li>
+            }
+        </ul>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<LeftOffItem> Items { get; set; } = [];
+
+    [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+
+    [Parameter] public bool Compact { get; set; }
+
+    /// <summary>Open in T3 needs the page to have loaded the action board.</summary>
+    [Parameter] public bool ShowActions { get; set; } = true;
+
+    [Parameter] public Func<string, string>? TagUrl { get; set; }
+
+    [Parameter] public IReadOnlySet<string>? QuietTags { get; set; }
+
+    [Parameter] public string Empty { get; set; } = "Nothing touched in this window.";
+
+    private static string What(TouchKind kind) => kind switch
+    {
+        TouchKind.Commit => "committed",
+        TouchKind.Edit => "edited",
+        _ => "T3",
+    };
+
+    private static string Short(string text) => text.Length <= 40 ? text : text[..39] + "…";
+}

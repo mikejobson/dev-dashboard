@@ -1,4 +1,5 @@
-@* Projects the dashboard had an agent move to the trash, with a way to clone each back into its folder. *@
+@* Projects the dashboard had an agent move to the trash, with a way to clone each back into its folder, and the
+   ones it archived first, with a way to restore the archive. *@
 @inject TombstoneStore Tombstones
 @if (Items.Count > 0)
 {
@@ -14,7 +15,19 @@
                     <tr @key="t.Id">
                         <td class="cell-main">
                             <strong>@t.Name</strong> <span class="owner muted small">@t.MachineName</span>
+                            @if (item.IsArchived)
+                            {
+                                <span class="chip info gap" title="Archived before it was moved to the trash">archived</span>
+                            }
                             <div class="sub mono path" title="@t.Path">@Fmt.Tilde(t.Path, item.Machine is null ? null : Fmt.HomeOf(item.Machine.Snapshot.Roots))</div>
+                            @if (item.IsArchived && t.ArchivePath is { } archive)
+                            {
+                                <div class="sub mono path" title="SHA-256 @t.ArchiveSha256">→ @archive@(item.Manifest is { } m ? $" · {Fmt.Count(m.FileCount, "file")}, {Fmt.Size(m.ArchiveBytes)}" : "")</div>
+                            }
+                            else if (item.IsArchived)
+                            {
+                                <div class="sub">archiving…</div>
+                            }
                         </td>
                         <td data-label="Clones from" class="@(item.Remote is null ? "blank" : "")">
                             @if (item.Remote is { } remote)
@@ -26,6 +39,10 @@
                         <td data-label="Removed" class="cell-when right nowrap sub" title="@Fmt.Date(t.RemovedAt) by @t.RemovedBy">@Fmt.Ago(t.RemovedAt, Now)</td>
                         <td data-label="Size" class="right nowrap sub @(t.SizeBytes is null ? "blank" : "")">@Fmt.Size(t.SizeBytes)</td>
                         <td class="right cell-buttons">
+                            @if (item.IsArchived && item.Machine is { } archivedOn)
+                            {
+                                <RestoreButton Item="item" Machine="archivedOn" />
+                            }
                             @if (item.CloneAction is { } clone && item.Machine is { } machine)
                             {
                                 <ActionButton Machine="machine" Action="clone" Label="Re-clone" Ask="@($"Clone {t.Name} back on {machine.Machine.Hostname}?")" Confirm="@($"Clone on {machine.Machine.Hostname}")"
@@ -37,7 +54,7 @@
                             {
                                 <span class="muted small">machine not reporting</span>
                             }
-                            <button type="button" title="Stop listing this. Nothing on the machine changes." @onclick="() => Tombstones.ForgetAsync(t.Id)">Forget</button>
+                            <button type="button" title="@(item.IsArchived ? "Stop listing this. Nothing on the machine changes: the archive stays where it is." : "Stop listing this. Nothing on the machine changes.")" @onclick="() => Tombstones.ForgetAsync(t.Id)">Forget</button>
                         </td>
                     </tr>
                 }

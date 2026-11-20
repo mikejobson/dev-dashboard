@@ -9,6 +9,15 @@ public static class UpdateCli
 {
     public static async Task<int> RunAsync(AgentCli cli, AgentUpdater updater, UpdateContext context, TextWriter output, TextWriter error, CancellationToken ct)
     {
+        // Work out the restart before installing. The release binary is a compressed single file: an assembly
+        // it has not loaded yet (System.Xml.XDocument for the launchd plist, say) is unpacked from the bundle
+        // on first use, and once the update has replaced that file on disk the old process can no longer load it.
+        var restart = !cli.Check && !cli.NoRestart && context.Installation is { } planned
+            ? PlanRestart(planned, ServiceEnvironment.Current())
+            : null;
+        var runner = new ProcessCommandRunner();
+        _ = typeof(System.Diagnostics.Process).Assembly;
+
         // Someone at the keyboard asked for this, so it goes ahead whatever Agent:Updates:Mode says:
         // the mode governs what the dashboard may ask for and what the agent does unprompted.
         var result = await updater.RunAsync(new UpdateRequest(cli.UpdateVersion, cli.Check, ReplacePending: true), ct).ConfigureAwait(false);
@@ -29,9 +38,9 @@ public static class UpdateCli
                 {
                     output.WriteLine("--no-restart: a running agent keeps the old version until it is restarted (`devdash-agent restart`).");
                 }
-                else if (context.Installation is { } installation)
+                else if (restart is not null)
                 {
-                    output.WriteLine(await RestartServiceAsync(installation, ServiceEnvironment.Current(), new ProcessCommandRunner(), ct).ConfigureAwait(false));
+                    output.WriteLine(await restart.RunAsync(runner, ct).ConfigureAwait(false));
                 }
 
                 return 0;
@@ -46,7 +55,11 @@ public static class UpdateCli
     /// Restarts the installed service, but only when it is the service for the program that was just
     /// updated: updating a second copy of the agent somewhere else must not bounce the real one.
     /// </summary>
-    public static async Task<string> RestartServiceAsync(UpdateInstallation installation, ServiceEnvironment environment, ICommandRunner runner, CancellationToken ct)
+    public static Task<string> RestartServiceAsync(UpdateInstallation installation, ServiceEnvironment environment, ICommandRunner runner, CancellationToken ct) =>
+        PlanRestart(installation, environment).RunAsync(runner, ct);
+
+    /// <summary>Everything the restart needs, decided now; running it later loads nothing new from the agent's own bundle.</summary>
+    public static RestartPlan PlanRestart(UpdateInstallation installation, ServiceEnvironment environment)
     {
         var manager = ServiceManagers.For(environment);
         var definition = manager.Definition.Path;
@@ -55,33 +68,49 @@ public static class UpdateCli
         {
             if (!File.Exists(definition))
             {
-                return "No background service is installed, so nothing was restarted.";
+                return RestartPlan.Done("No background service is installed, so nothing was restarted.");
             }
 
             text = File.ReadAllText(definition); // the Windows task file is UTF-16 with a byte-order mark, which this detects
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return $"Could not read {definition} ({ex.Message}); restart the service with `devdash-agent restart`.";
+            return RestartPlan.Done($"Could not read {definition} ({ex.Message}); restart the service with `devdash-agent restart`.");
         }
 
         var comparison = installation.Platform == ServicePlatform.Windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         string[] programs = [.. installation.FileNames.Select(installation.PathOf), environment.ExecutablePath, environment.ServiceExecutablePath];
         if (!programs.Any(p => text.Contains(p, comparison)))
         {
-            return $"The installed {manager.Name} runs a different copy of the agent, so it was not restarted.";
+            return RestartPlan.Done($"The installed {manager.Name} runs a different copy of the agent, so it was not restarted.");
         }
 
-        foreach (var command in manager.RestartCommands)
+        return new RestartPlan(manager.Name, [.. manager.RestartCommands], null);
+    }
+
+    /// <summary>A restart decided before the update: the commands to run, or why there are none.</summary>
+    public sealed record RestartPlan(string Name, IReadOnlyList<ServiceCommand> Commands, string? Outcome)
+    {
+        public static RestartPlan Done(string outcome) => new("", [], outcome);
+
+        public async Task<string> RunAsync(ICommandRunner runner, CancellationToken ct)
         {
-            var result = await runner.RunAsync(command, ct).ConfigureAwait(false);
-            if (!result.Ok && !command.IgnoreFailure)
+            if (Outcome is not null)
             {
-                return $"Updated, but `{command}` failed ({result.Output}). Restart the service with `devdash-agent restart`.";
+                return Outcome;
             }
-        }
 
-        return $"Restarted the {manager.Name}.";
+            foreach (var command in Commands)
+            {
+                var result = await runner.RunAsync(command, ct).ConfigureAwait(false);
+                if (!result.Ok && !command.IgnoreFailure)
+                {
+                    return $"Updated, but `{command}` failed ({result.Output}). Restart the service with `devdash-agent restart`.";
+                }
+            }
+
+            return $"Restarted the {Name}.";
+        }
     }
 
     public static string DescribeMode(UpdateOptions options, UpdateContext context)

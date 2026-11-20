@@ -22,14 +22,17 @@ public sealed class GoneUpstreamRule : ICleanupRule
             {
                 var isCheckedOut = checkedOut.Contains(branch.Name);
                 var merged = branch.MergedIntoDefault == true;
+                var squashed = !merged && branch.SquashMergedInto is not null;
                 var explanation = $"{branch.Upstream} no longer exists on the remote. "
                     + (merged
                         ? $"The branch is merged into {git.DefaultBranch}, so deleting it loses nothing."
-                        : "It is not merged into the default branch locally (a squash merge looks like this too), so check before forcing the delete.")
+                        : squashed
+                            ? $"It was squash-merged: its change is on the trunk as {branch.SquashMergedInto![..7]}, so deleting it loses nothing although git does not see it as merged."
+                            : "It is not merged into the default branch locally (a squash merge looks like this too), so check before forcing the delete.")
                     + (isCheckedOut ? " It is currently checked out; switch away first." : "");
 
                 yield return this.ForClone(repo,
-                    merged ? FindingSeverity.Low : FindingSeverity.Medium,
+                    merged || squashed ? FindingSeverity.Low : FindingSeverity.Medium,
                     $"{repo.Entry.Name}: upstream gone for {branch.Name}",
                     explanation,
                     [
@@ -41,7 +44,7 @@ public sealed class GoneUpstreamRule : ICleanupRule
                             // Only the safe delete is ever offered to an agent, and not for a branch that is checked out.
                             ? Fix("Delete the merged branch", GitCmd(path, $"branch -d {Quote(branch.Name)}"),
                                 isCheckedOut ? null : AgentAction.DeleteBranches(path, [branch.Name]))
-                            : Fix("Force-delete (loses any commits not merged elsewhere)", GitCmd(path, $"branch -D {Quote(branch.Name)}")),
+                            : Fix(squashed ? "Force-delete (its change is already on the trunk)" : "Force-delete (loses any commits not merged elsewhere)", GitCmd(path, $"branch -D {Quote(branch.Name)}")),
                     ],
                     branch.Name).ActiveAt(branch.LastCommitDate);
             }

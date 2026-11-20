@@ -1,0 +1,161 @@
+@page "/disk"
+@inherits LivePage
+@inject SnapshotStore Snapshots
+@inject ActionBoard Board
+
+<PageTitle>Disk · DevDash</PageTitle>
+
+<div class="page-head">
+    <div>
+        <h1>Disk</h1>
+        <p>Developer caches outside your repos on each machine, what cleaning them would free, and the build output inside the repos.</p>
+    </div>
+</div>
+
+<details class="about small muted">
+    <summary>How this is measured, and what Clean does.</summary>
+    <p>
+        Each agent finds its caches itself (from <code>dotnet nuget locals</code>, <code>npm config get cache</code>, <code>pnpm store path</code>,
+        <code>brew --cache</code>, <code>docker system df</code> and fixed places such as Xcode's DerivedData) and measures them in the background
+        every few hours, never during a scan. Clean sends only the cache's name: the agent finds it again and runs its own fixed recipe for it.
+        Only caches that are downloaded or built again have one. Docker volumes, Xcode archives and SDKs are never cleaned from here, and Docker
+        cleaning only removes dangling images and build cache.
+    </p>
+</details>
+
+@if (_machines.Count == 0)
+{
+    <div class="card empty">No machine has reported yet.</div>
+}
+
+@foreach (var disk in _machines)
+{
+    var host = disk.Machine.Machine.Hostname;
+    <section @key="disk.Machine.MachineId">
+        <h2 id="disk-@disk.Machine.MachineId">
+            @host
+            @if (disk.Reported)
+            {
+                <span class="muted small">@Fmt.Size(disk.Total) in caches · <strong>@Fmt.Size(disk.Reclaimable)</strong> reclaimable · measured @Fmt.Ago(disk.Machine.Machine.Disk!.CollectedAt, Now)</span>
+            }
+        </h2>
+        @if (!disk.Reported)
+        {
+            <p class="muted small">@DiskView.WhyNotReported(disk.Machine.Machine)</p>
+        }
+        else if (disk.Rows.Count == 0)
+        {
+            <p class="muted small">No developer caches found on @host.</p>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="stack disk-table">
+                    <thead><tr><th>Cache</th><th class="right">Size</th><th class="right">Reclaimable</th><th class="right">Last written</th><th>Cleaning</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var row in disk.Rows)
+                        {
+                            <tr @key="row.Item.Id">
+                                <td class="cell-main">
+                                    <div>
+                                        <strong>@row.Title</strong>
+                                        @if (row.Info is { } info)
+                                        {
+                                            <div class="sub">@info.What</div>
+                                        }
+                                        @if (row.Item.Path is { } path)
+                                        {
+                                            <div class="sub mono truncate" title="@path">@Fmt.Tilde(path, Fmt.HomeOf(disk.Machine.Snapshot.Roots))</div>
+                                        }
+                                        @if (row.Item.Problem is { } problem)
+                                        {
+                                            <div class="sub"><span class="chip warn">@problem</span></div>
+                                        }
+                                    </div>
+                                </td>
+                                <td data-label="Size" class="right nowrap">
+                                    @Fmt.Size(row.Item.Bytes)
+                                    @if (row.Item.Count is { } count)
+                                    {
+                                        <div class="sub">@count items</div>
+                                    }
+                                </td>
+                                <td data-label="Reclaimable" class="right nowrap">@(row.CanClean ? row.Reclaimable is { } r ? Fmt.Size(r) : "unknown" : "")</td>
+                                <td data-label="Last written" class="right nowrap sub" title="@Fmt.Date(row.Item.LastModified)">@DiskView.Age(row.Item.LastModified, Now)</td>
+                                <td data-label="Cleaning">
+                                    <div>
+                                        <span class="small">@(row.Info?.Cleaning ?? "Not known to this hub.")</span>
+                                        @if (row.Info is { } known)
+                                        {
+                                            <div><span class="chip @(known.Regenerable ? "ok" : "danger")" title="@(known.Regenerable ? "A restore, install or build makes it again." : "Gone for good if deleted.")">@(known.Regenerable ? "regenerable" : "not regenerable")</span></div>
+                                        }
+                                    </div>
+                                </td>
+                                <td class="right cell-buttons">
+                                    @if (row.Action is { } clean)
+                                    {
+                                        <ActionButton Machine="disk.Machine" Action="clean" Label="Clean" Class="run"
+                                                      Ask="@($"Clean {row.Title} on {host}?")"
+                                                      What="@($"Clean {row.Title} on {host}: {row.Info!.Cleaning}")">
+                                            <dl class="kv">
+                                                <dt>Cache</dt><dd>@row.Title @if (row.Item.Path is { } where) { <span class="mono muted">@where</span> }</dd>
+                                                <dt>Size</dt><dd>@Fmt.Size(row.Item.Bytes) (measured @Fmt.Ago(row.Item.MeasuredAt, Now))</dd>
+                                            </dl>
+                                            <p>@row.Info!.Cleaning</p>
+                                        </ActionButton>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            @if (disk.Sdks.Count > 0)
+            {
+                <h3>.NET SDKs <span class="muted small">@disk.Sdks.Count(s => s.Unused) of @disk.Sdks.Count not used by any repo here</span></h3>
+                <ul class="list small">
+                    @foreach (var sdk in disk.Sdks)
+                    {
+                        <li>
+                            <span class="mono">@sdk.Version</span> · @Fmt.Size(sdk.Bytes)
+                            @if (sdk.Unused)
+                            {
+                                <span class="chip muted gap" title="No global.json on this machine resolves to it, and it is not the newest (which unpinned repos use). Report only.">unused</span>
+                            }
+                            else
+                            {
+                                <span class="sub"> used by @string.Join(", ", sdk.UsedBy)</span>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+        }
+
+        @if (disk.BuildOutputRepos > 0)
+        {
+            <h3>Build output in repos <span class="muted small">@Fmt.Size(disk.BuildOutputTotal) in @Fmt.Count(disk.BuildOutputRepos, "working tree")</span></h3>
+            <ul class="list small">
+                @foreach (var build in disk.BuildOutput)
+                {
+                    <li><a href="@Fmt.RepoUrl(build.RepoKey)">@build.Entry.Name</a> · @Fmt.Size(build.Bytes) <span class="sub mono">@string.Join(", ", build.Entry.Size!.ReclaimableDirs.Select(d => d.Path.Split('/', '\\').LastOrDefault(s => s.Length > 0) ?? d.Path).Distinct().Take(3))</span></li>
+                }
+            </ul>
+            @if (disk.BuildOutputRepos > disk.BuildOutput.Count)
+            {
+                <p class="muted small">and @(disk.BuildOutputRepos - disk.BuildOutput.Count) more. Delete build output from each repo's findings on the <a href="cleanup">Cleanup</a> page.</p>
+            }
+        }
+    </section>
+}
+
+@code {
+    private IReadOnlyList<MachineDisk> _machines = [];
+
+    protected override async Task LoadAsync()
+    {
+        _machines = DiskView.For(Snapshots.Machines);
+        await Board.LoadAsync();
+    }
+}

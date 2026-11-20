@@ -69,6 +69,15 @@ public class GitHubClientTests
             return (HttpStatusCode.OK, """{ "data": { "viewer": { "login": "me", "organizations": { "nodes": [ { "login": "acme" } ] } } } }""");
         }
 
+        if (body.Contains("is:merged"))
+        {
+            return (HttpStatusCode.OK, Search("""
+                { "number": 40, "title": "Squashed", "url": "https://github.com/acme/widget/pull/40", "createdAt": "2026-11-01T00:00:00Z", "updatedAt": "2026-11-12T00:00:00Z",
+                  "mergedAt": "2026-11-12T00:00:00Z", "headRefName": "feature/done", "headRefOid": "abc40def", "isCrossRepository": false, "baseRefName": "main",
+                  "author": { "login": "me" }, "repository": { "nameWithOwner": "acme/widget" } }
+                """));
+        }
+
         if (body.Contains("author:@me")) { return (HttpStatusCode.OK, Search(Pr(1, "FAILURE"), Pr(2, "SUCCESS", draft: true), "{}")); }
         if (body.Contains("review-requested:@me")) { return (HttpStatusCode.OK, Search(Pr(3, "PENDING"))); }
         if (body.Contains("is:pr assignee:@me")) { return (HttpStatusCode.OK, Search(Pr(1, "FAILURE"), Pr(4, "null"))); }
@@ -131,6 +140,13 @@ public class GitHubClientTests
         Assert.True(snapshot.PullRequests.Single(p => p.Number == 3) is { ReviewRequested: true, Authored: false, Ci: CiState.Pending });
         Assert.Equal(CiState.None, snapshot.PullRequests.Single(p => p.Number == 4).Ci);
 
+        // Recently merged ones are kept apart, with the commit they were at, for squash-merged branches.
+        var merged = Assert.Single(snapshot.MergedPullRequests);
+        Assert.True(merged is { Number: 40, HeadSha: "abc40def", HeadRef: "feature/done", IsCrossRepository: false });
+        Assert.Equal(new DateTimeOffset(2026, 11, 12, 0, 0, 0, TimeSpan.Zero), merged.MergedAt);
+        Assert.DoesNotContain(snapshot.PullRequests, p => p.Number == 40);
+        Assert.Contains(handler.Requests, r => r.Body.Contains("is:merged") && r.Body.Contains("2026-10-18")); // the last 30 days
+
         var issue = Assert.Single(snapshot.Issues);
         Assert.True(issue is { Number: 9, Assigned: true, Mentioned: false });
         Assert.Equal(["bug"], issue.Labels);
@@ -162,7 +178,7 @@ public class GitHubClientTests
         var pages = 0;
         var handler = new StubHandler((url, body) =>
         {
-            if (!body.Contains("author:@me"))
+            if (!body.Contains("author:@me") || body.Contains("is:merged"))
             {
                 return Default(url, body);
             }

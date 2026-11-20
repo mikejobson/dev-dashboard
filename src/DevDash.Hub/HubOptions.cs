@@ -27,6 +27,10 @@ public sealed class HubOptions
     public Alerts.AlertOptions Alerts { get; set; } = new();
 
     public Mcp.McpOptions Mcp { get; set; } = new();
+
+    /// <summary>Repo tags, notes and pins (§20).</summary>
+    public Services.RepoTagOptions Tags { get; set; } = new();
+    public History.HistoryOptions History { get; set; } = new();
 }
 
 /// <summary>Agent updates: knowing the latest release, and asking agents to move to it.</summary>
@@ -66,6 +70,12 @@ public sealed class HubActionOptions
 
     /// <summary>As <see cref="LeaseMinutes"/>, for a clone: it downloads a whole repository.</summary>
     public int CloneLeaseMinutes { get; set; } = 20;
+
+    /// <summary>
+    /// As <see cref="LeaseMinutes"/>, for archiving a project or restoring one: it reads and writes the whole folder.
+    /// Keep it above the agents' <c>Agent:Archive:TimeoutMinutes</c> (180), so the agent's own result arrives first.
+    /// </summary>
+    public int ArchiveLeaseMinutes { get; set; } = 240;
 
     /// <summary>How many actions the audit trail keeps.</summary>
     public int KeepLast { get; set; } = 500;
@@ -114,6 +124,9 @@ public sealed class GitHubOptions
     public int RecentDays { get; set; } = 30;
     public int ReposPerOrg { get; set; } = 30;
     public int MentionDays { get; set; } = 14;
+
+    /// <summary>How far back merged pull requests are listed, to recognise squash-merged local branches.</summary>
+    public int MergedDays { get; set; } = 30;
     public string ApiUrl { get; set; } = "https://api.github.com/graphql";
     public string RestUrl { get; set; } = "https://api.github.com";
 }

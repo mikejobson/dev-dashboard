@@ -47,6 +47,9 @@ public sealed record PaletteItem
     /// <summary><see cref="PaletteCommand.OpenInT3"/>: the machine and the working tree.</summary>
     public MachineView? T3Machine { get; init; }
     public string? T3Path { get; init; }
+
+    /// <summary>A repo the user pinned (§20): it ranks a little higher.</summary>
+    public bool Pinned { get; init; }
 }
 
 /// <summary>
@@ -69,15 +72,21 @@ public static class Palette
     public const string AskUpdateAll = "update-all";
     public const string AskT3 = "t3";
 
+    /// <summary>What a pinned repo gains in the ranking: ahead of an equal match, not of a better one.</summary>
+    public const int PinnedBoost = 10;
+
     public static IReadOnlyList<PaletteItem> Pages { get; } =
     [
         Page("overview", "Overview", "", "What needs attention", "home", "today", "activity"),
+        Page("left-off", "Where I left off", "left-off", "The projects you touched most recently, on any machine", "recent", "resume", "continue", "touched", "pinned"),
         Page("local", "Local", "local", "Every repo and folder, by machine", "repos", "folders"),
         Page("github", "GitHub", "github", "Pull requests, issues and recent org activity", "prs", "pull requests", "issues", "reviews"),
         Page("cleanup", "Cleanup", "cleanup", "Findings worth tidying up", "findings", "tidy"),
         Page("safety", "Safety", "safety", "What exists on one machine only, and what is safe to remove", "at risk", "remove", "only copy"),
         Page("issues", "Issues", "issues", "Open GitHub issues of your repos, and the T3 threads started for them", "bugs", "t3", "label", "trigger"),
         Page("alerts", "Alerts", "alerts", "Channels, triggers and the delivery log", "notifications", "ntfy", "webhook"),
+        Page("history", "History", "history", "Disk, at-risk work and unpushed commits over time", "trends", "charts", "growth", "since yesterday"),
+        Page("disk", "Disk", "disk", "Developer caches outside your repos, and what cleaning them frees", "caches", "space", "nuget", "npm", "docker", "xcode", "clean"),
         Page("machines", "Machines", "machines", "Agents, toolchains, actions and API keys", "agents", "keys", "toolchains", "sdks"),
     ];
 
@@ -126,8 +135,10 @@ public static class Palette
         Func<MachineView, bool> canRefresh,
         int safeToRemove,
         int updatable,
-        Func<MachineView, AgentActionKind, bool>? canDo = null)
+        Func<MachineView, AgentActionKind, bool>? canDo = null,
+        RepoNoteSet? notes = null)
     {
+        notes ??= RepoNoteSet.Empty;
         var items = new List<PaletteItem>(Pages);
 
         foreach (var machine in machines)
@@ -140,8 +151,11 @@ public static class Palette
         foreach (var row in repos)
         {
             var hit = GlobalSearch.RepoHit(row);
-            var keywords = GlobalSearch.RepoFields(row)[1..];
-            items.Add(new PaletteItem { Id = "repo:" + row.Key.ToLowerInvariant(), Kind = PaletteKind.Repo, Title = hit.Title, Detail = hit.Detail, Url = hit.Url, Keywords = keywords });
+            var note = notes.For(row.Key);
+            // Tags are found as "#client"; the note by its words.
+            string?[] keywords = [.. GlobalSearch.RepoFields(row)[1..], .. note.Tags.Select(t => "#" + t), note.Note.Length > 0 ? note.Note : null];
+            var detail = note.Tags.Count == 0 ? hit.Detail : $"{hit.Detail} · {string.Join(" ", note.Tags.Select(t => "#" + t))}";
+            items.Add(new PaletteItem { Id = "repo:" + row.Key.ToLowerInvariant(), Kind = PaletteKind.Repo, Title = hit.Title, Detail = detail, Url = hit.Url, Keywords = keywords, Pinned = note.Pinned });
 
             foreach (var group in row.Clones.GroupBy(c => c.Machine.MachineId, StringComparer.OrdinalIgnoreCase))
             {
@@ -290,7 +304,7 @@ public static class Palette
             var score = Score(terms, item);
             if (score > 0)
             {
-                scored.Add((score + RecentBoost(recent, item.Id), item));
+                scored.Add((score + RecentBoost(recent, item.Id) + (item.Pinned ? PinnedBoost : 0), item));
             }
         }
 

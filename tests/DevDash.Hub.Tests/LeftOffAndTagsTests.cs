@@ -411,7 +411,8 @@ public class LeftOffAndTagsTests
 
     private static async Task<HubFactory> SeededAsync()
     {
-        var factory = new HubFactory();
+        // A fixed afternoon, not the real clock: just after midnight "30 minutes ago" is yesterday, and the Today group is empty.
+        var factory = new HubFactory { Time = new FixedClock(Now) };
         var now = factory.Services.GetRequiredService<TimeProvider>().GetUtcNow();
         var snapshot = HubFactory.Snapshot("mac", now) with
         {
@@ -567,5 +568,10 @@ public class LeftOffAndTagsTests
         Assert.Equal("client", detail.GetProperty("tags")[0].GetString());
         Assert.True(detail.GetProperty("pinned").GetBoolean());
         Assert.Equal(0, (await CallAsync("list_projects", new() { ["tag"] = "nope" })).GetProperty("total").GetInt32());
+    }
+
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }

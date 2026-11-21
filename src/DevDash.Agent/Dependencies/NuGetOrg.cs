@@ -38,7 +38,14 @@ public sealed class NuGetOrg : IDisposable
     /// <param name="handler">Tests hand in a fake; otherwise a handler that never follows redirects.</param>
     public NuGetOrg(HttpMessageHandler? handler = null, TimeProvider? time = null)
     {
-        _http = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, PooledConnectionLifetime = TimeSpan.FromMinutes(15) })
+        // nuget.org serves the vulnerability files gzip-encoded whether or not that was asked for. The size caps
+        // apply to the decompressed bytes, which is what is read.
+        _http = new HttpClient(handler ?? new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+        })
         {
             Timeout = Timeout.InfiniteTimeSpan, // each call has its own
         };
@@ -211,7 +218,7 @@ public sealed class NuGetOrg : IDisposable
                 throw new NuGetUnavailableException($"nuget.org answered {(int)response.StatusCode}");
             }
 
-            if (response.Content.Headers.ContentLength > max)
+            if (response.Content.Headers.ContentEncoding.Count == 0 && response.Content.Headers.ContentLength > max)
             {
                 throw new NuGetUnavailableException("nuget.org's answer was larger than expected");
             }
